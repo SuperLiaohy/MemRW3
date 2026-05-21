@@ -1,21 +1,21 @@
 use eframe::egui::{self, Color32, RichText, Ui};
 use crate::model::VariablePool;
 use super::legend::ChartLegend;
+use std::time::Instant;
 
 #[derive(PartialEq)]
-pub enum PanelAction {
-    None,
-    OpenTree,
-}
+pub enum PanelAction { None, OpenTree }
 
 pub struct ChartPluginState {
     pub legends: Vec<ChartLegend>,
     pub editing_legend: Option<usize>,
+    start_time: Instant,
+    elapsed_time: f64,
 }
 
 impl Default for ChartPluginState {
     fn default() -> Self {
-        Self { legends: Vec::new(), editing_legend: None }
+        Self { legends: Vec::new(), editing_legend: None, start_time: Instant::now(), elapsed_time: 0.0 }
     }
 }
 
@@ -59,8 +59,20 @@ fn color_pick(ui: &mut Ui, current: &mut Color32) {
     });
 }
 
-pub fn chart_panel(ui: &mut Ui, state: &mut ChartPluginState, pool: &VariablePool) -> PanelAction {
+pub fn chart_panel(ui: &mut Ui, state: &mut ChartPluginState, pool: &VariablePool, running: bool) -> PanelAction {
     let mut action = PanelAction::None;
+
+    if running {
+        state.elapsed_time = state.start_time.elapsed().as_secs_f64();
+        for legend in &mut state.legends {
+            if let Some(var) = pool.get(legend.variable_id) {
+                let val = if var.current_value.len() >= 4 {
+                    u32::from_le_bytes([var.current_value[0], var.current_value[1], var.current_value[2], var.current_value[3]]) as f64
+                } else { 0.0 };
+                legend.push_value(state.elapsed_time, val);
+            }
+        }
+    }
 
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
@@ -93,7 +105,7 @@ pub fn chart_panel(ui: &mut Ui, state: &mut ChartPluginState, pool: &VariablePoo
             } else {
                 legend_list(ui, state, pool);
                 ui.add_space(12.0);
-                chart_area(ui);
+                chart_area(ui, state);
             }
         });
     });
@@ -174,22 +186,74 @@ fn format_value(data: &[u8]) -> String {
     }
 }
 
-fn chart_area(ui: &mut Ui) {
+fn chart_area(ui: &mut Ui, state: &ChartPluginState) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ui.available_height().max(150.0)), egui::Sense::hover());
     if !ui.is_rect_visible(rect) { return; }
     let painter = ui.painter();
     let dark = ui.visuals().dark_mode;
+
+    let ml = (rect.width() * 0.08).clamp(40.0, 70.0);
+    let mb = (rect.height() * 0.08).clamp(22.0, 40.0);
+    let pl = rect.left() + ml; let pr = rect.right() - 5.0;
+    let pt = rect.top() + 5.0; let pb = rect.bottom() - mb;
+    let pw = (pr - pl).max(1.0); let ph = (pb - pt).max(1.0);
+
     let bg = if dark { Color32::from_rgb(18, 18, 24) } else { Color32::from_rgb(250, 250, 255) };
-    painter.rect_filled(rect, egui::CornerRadius::same(4), bg);
+    painter.rect_filled(egui::Rect::from_min_max(egui::pos2(pl, pt), egui::pos2(pr, pb)), egui::CornerRadius::same(0), bg);
+
     let grid = if dark { Color32::from_rgb(35, 35, 45) } else { Color32::from_rgb(220, 220, 225) };
-    for i in 1..6 {
-        let y = rect.top() + rect.height() * i as f32 / 6.0;
-        painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], (1.0, grid));
+    let tc = if dark { Color32::from_rgb(100, 100, 110) } else { Color32::from_rgb(150, 150, 160) };
+    let txc = if dark { Color32::from_rgb(180, 180, 190) } else { Color32::from_rgb(80, 80, 90) };
+
+    let has_data = state.legends.iter().any(|l| l.data_history.len() >= 2);
+    let (x_min, x_max, y_min, y_max) = if has_data {
+        let t_max = state.legends.iter().filter_map(|l| l.data_history.back().map(|p| p.0)).fold(0.0f64, f64::max);
+        let t_min = state.legends.iter().filter_map(|l| l.data_history.front().map(|p| p.0)).fold(f64::MAX, f64::min);
+        let x_rng = (t_max - t_min).max(1.0);
+        let (ymin, ymax) = state.legends.iter().flat_map(|l| l.data_history.iter().map(|p| p.1))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| (lo.min(y), hi.max(y)));
+        let y_pad = ((ymax - ymin).max(1.0) * 0.1).max(0.5);
+        (t_min - x_rng * 0.02, t_max + x_rng * 0.02, ymin - y_pad, ymax + y_pad)
+    } else {
+        (0.0, 10.0, -1.0, 1.0)
+    };
+
+    let ny = 6;
+    for i in 0..=ny {
+        let f = i as f32 / ny as f32;
+        let y = pb - f * ph;
+        painter.line_segment([egui::pos2(pl, y), egui::pos2(pr, y)], (1.0, grid));
+        let val = y_min + (y_max - y_min) * (1.0 - i as f64 / ny as f64);
+        painter.text(egui::pos2(pl - 4.0, y), egui::Align2::RIGHT_CENTER, format_val_axis(val), egui::FontId::proportional(10.0), txc);
+        painter.line_segment([egui::pos2(pl - 5.0, y), egui::pos2(pl, y)], (1.0, tc));
     }
-    for i in 1..10 {
-        let x = rect.left() + rect.width() * i as f32 / 10.0;
-        painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], (1.0, grid));
+
+    let nx = 5;
+    for i in 0..=nx {
+        let f = i as f32 / nx as f32;
+        let x = pl + f * pw;
+        painter.line_segment([egui::pos2(x, pt), egui::pos2(x, pb)], (1.0, grid));
+        let val = x_min + (x_max - x_min) * i as f64 / nx as f64;
+        painter.text(egui::pos2(x, pb + 6.0), egui::Align2::CENTER_TOP, format!("{val:.1}s"), egui::FontId::proportional(10.0), txc);
+        painter.line_segment([egui::pos2(x, pb), egui::pos2(x, pb + 5.0)], (1.0, tc));
     }
+
+    for legend in &state.legends {
+        if !legend.visible || legend.data_history.len() < 2 { continue; }
+        let pts: Vec<egui::Pos2> = legend.data_history.iter().map(|&(t, val)| {
+            let fx = ((t - x_min) / (x_max - x_min)) as f32;
+            let fy = ((val - y_min) / (y_max - y_min)) as f32;
+            egui::pos2(pl + fx * pw, pb - fy * ph)
+        }).collect();
+        for w in pts.windows(2) { painter.line_segment([w[0], w[1]], (1.5, legend.color)); }
+    }
+
     let border = if dark { Color32::from_rgb(60, 60, 70) } else { Color32::from_rgb(180, 180, 190) };
-    painter.rect_stroke(rect, egui::CornerRadius::same(4), (1.0, border), egui::StrokeKind::Middle);
+    painter.rect_stroke(egui::Rect::from_min_max(egui::pos2(pl, pt), egui::pos2(pr, pb)), egui::CornerRadius::same(0), (1.0, border), egui::StrokeKind::Middle);
+}
+
+fn format_val_axis(v: f64) -> String {
+    if v.abs() < 10000.0 && v == (v as i64) as f64 { format!("{v:.0}") }
+    else if v.abs() < 0.01 && v != 0.0 { format!("{v:.4}") }
+    else { format!("{v:.2}") }
 }

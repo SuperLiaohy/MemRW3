@@ -1,4 +1,5 @@
 use eframe::egui::Color32;
+use std::collections::VecDeque;
 
 pub struct ChartLegend {
     pub variable_id: usize,
@@ -6,6 +7,7 @@ pub struct ChartLegend {
     pub color: Color32,
     pub visible: bool,
     pub buffer_size: usize,
+    pub data_history: VecDeque<(f64, f64)>,
 }
 
 impl ChartLegend {
@@ -16,7 +18,15 @@ impl ChartLegend {
             color: default_color(variable_id),
             visible: true,
             buffer_size: 5000,
+            data_history: VecDeque::with_capacity(5000),
         }
+    }
+
+    pub fn push_value(&mut self, time: f64, value: f64) {
+        if self.data_history.len() >= self.buffer_size {
+            self.data_history.pop_front();
+        }
+        self.data_history.push_back((time, value));
     }
 }
 

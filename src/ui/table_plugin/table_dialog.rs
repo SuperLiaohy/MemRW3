@@ -9,36 +9,22 @@ pub struct TableEntry {
 
 impl TableEntry {
     pub fn new(variable_id: usize, display_name: String) -> Self {
-        Self {
-            variable_id,
-            display_name,
-            current_value: String::from("--"),
-            edit_buffer: String::new(),
-        }
+        Self { variable_id, display_name, current_value: String::from("--"), edit_buffer: String::new() }
     }
 }
 
 pub fn table_add_config_ui(ui: &mut Ui, node_name: &str, out_display_name: &mut String) {
-    if out_display_name.is_empty() {
-        *out_display_name = node_name.to_string();
-    }
-    ui.horizontal(|ui| {
-        ui.label("显示名:");
-        ui.text_edit_singleline(out_display_name);
-    });
+    if out_display_name.is_empty() { *out_display_name = node_name.to_string(); }
+    ui.horizontal(|ui| { ui.label("显示名:"); ui.text_edit_singleline(out_display_name); });
 }
 
-pub fn table_entry_dialog_ui(ui: &mut Ui, entry: &mut TableEntry) -> bool {
-    let mut remove = false;
-
+pub fn table_entry_dialog_ui(ui: &mut Ui, entry: &mut TableEntry) -> Option<bool> {
     egui::Grid::new("table_entry_dialog")
-        .num_columns(2)
-        .spacing([8.0, 4.0])
+        .num_columns(2).spacing([8.0, 4.0])
         .show(ui, |ui| {
             ui.label("显示名:");
             ui.text_edit_singleline(&mut entry.display_name);
             ui.end_row();
-
             ui.label("当前值:");
             ui.label(&entry.current_value);
             ui.end_row();
@@ -48,14 +34,16 @@ pub fn table_entry_dialog_ui(ui: &mut Ui, entry: &mut TableEntry) -> bool {
     ui.separator();
     ui.add_space(4.0);
 
+    let mut result = None;
     ui.horizontal(|ui| {
-        if ui
-            .button(RichText::new("删除").color(egui::Color32::from_rgb(220, 60, 50)))
-            .clicked()
-        {
-            remove = true;
+        if ui.button(RichText::new("删除").color(egui::Color32::from_rgb(220, 60, 50))).clicked() {
+            result = Some(true);
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("确定").clicked() { result = Some(false); }
+            if ui.button("取消").clicked() { result = Some(false); }
+        });
     });
 
-    remove
+    result
 }

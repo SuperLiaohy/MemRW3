@@ -3,20 +3,16 @@ use crate::model::VariablePool;
 use super::table_dialog::{TableEntry, table_entry_dialog_ui};
 
 #[derive(PartialEq)]
-pub enum PanelAction {
-    None,
-    OpenTree,
-}
+pub enum PanelAction { None, OpenTree }
 
 pub struct TablePluginState {
     pub entries: Vec<TableEntry>,
     pub editing_entry: Option<usize>,
+    pub show_entry_dialog: bool,
 }
 
 impl Default for TablePluginState {
-    fn default() -> Self {
-        Self { entries: Vec::new(), editing_entry: None }
-    }
+    fn default() -> Self { Self { entries: Vec::new(), editing_entry: None, show_entry_dialog: false } }
 }
 
 impl TablePluginState {
@@ -25,14 +21,12 @@ impl TablePluginState {
             self.entries.push(TableEntry::new(variable_id, var.tree_node.name.clone()));
         }
     }
-
     pub fn remove_entry(&mut self, index: usize) {
         if index < self.entries.len() {
             self.entries.remove(index);
             if self.editing_entry == Some(index) { self.editing_entry = None; }
         }
     }
-
     pub fn entry_ids(&self) -> Vec<usize> {
         self.entries.iter().map(|e| e.variable_id).collect()
     }
@@ -53,13 +47,27 @@ pub fn table_panel(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePoo
         });
         ui.add_space(4.0);
 
-        if let Some(edit_idx) = state.editing_entry {
-            let entry = &mut state.entries[edit_idx];
-            ui.separator();
-            ui.label(RichText::new(format!("编辑: {}", entry.display_name)).size(13.0));
-            if table_entry_dialog_ui(ui, entry) { state.remove_entry(edit_idx); }
-            if ui.button("完成").clicked() { state.editing_entry = None; }
-            ui.separator();
+        if state.show_entry_dialog {
+            if let Some(edit_idx) = state.editing_entry {
+                let mut dialog_remove = false;
+                let mut should_close = false;
+                {
+                    let entry = &mut state.entries[edit_idx];
+                    egui::Window::new(format!("变量属性 - {}", entry.display_name))
+                        .collapsible(false).resizable(false)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(ui.ctx(), |ui| {
+                            if let Some(remove) = table_entry_dialog_ui(ui, entry) {
+                                dialog_remove = remove;
+                                should_close = true;
+                            }
+                        });
+                }
+                if should_close {
+                    state.show_entry_dialog = false;
+                    if dialog_remove { state.remove_entry(edit_idx); }
+                }
+            } else { state.show_entry_dialog = false; }
         }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -67,7 +75,6 @@ pub fn table_panel(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePoo
                 ui.vertical_centered(|ui| {
                     ui.add_space(40.0);
                     ui.label(RichText::new("暂无监控变量").size(13.0).color(Color32::from_rgb(150, 150, 150)));
-                    ui.label(RichText::new("点击右上角「打开变量树」添加变量").size(12.0).color(Color32::from_rgb(130, 130, 130)));
                     if ui.button("📋 打开变量树").clicked() { action = PanelAction::OpenTree; }
                 });
             } else {
@@ -85,27 +92,18 @@ fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool) 
 
     egui::Grid::new("var_table")
         .striped(true)
-        .min_col_width(60.0)
+        .min_col_width(70.0)
         .show(ui, |ui| {
             ui.strong("Name");
-            ui.strong("Address");
-            ui.strong("Size");
             ui.strong("Value");
             ui.strong("Write");
             ui.strong("");
             ui.end_row();
 
             for (i, entry) in state.entries.iter_mut().enumerate() {
-                let addr_str = pool.get(entry.variable_id)
-                    .map(|v| v.tree_node.address_info.clone())
-                    .unwrap_or_else(|| "--".into());
-                let size_str = pool.get(entry.variable_id)
-                    .map(|v| v.tree_node.size_info.clone())
-                    .unwrap_or_else(|| "--".into());
+                let row_id = egui::Id::new(("table_row", i));
 
                 ui.label(RichText::new(&entry.display_name).size(12.0));
-                ui.label(RichText::new(&addr_str).size(11.0).color(Color32::from_rgb(120, 180, 220)));
-                ui.label(RichText::new(&size_str).size(11.0));
 
                 let current_val = pool.get(entry.variable_id)
                     .map(|v| format_value(&v.current_value))
@@ -115,35 +113,35 @@ fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool) 
                 let mut edit_buf = entry.edit_buffer.clone();
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut edit_buf)
+                        .id(row_id.with("write_edit"))
                         .desired_width(80.0)
                         .font(egui::TextStyle::Monospace),
                 );
                 if resp.changed() { entry.edit_buffer = edit_buf; }
 
-                if ui.small_button("写").clicked() {
+                if ui.add(egui::Button::new("写").small()).clicked() {
                     entry.current_value = std::mem::take(&mut entry.edit_buffer);
                 }
 
                 ui.end_row();
 
-                let row_resp = ui.interact(ui.min_rect(), ui.next_auto_id(), egui::Sense::click());
-                if row_resp.double_clicked() { to_edit = Some(i); }
-                let del_btn = ui.small_button("✕");
+                let row_rect = ui.min_rect();
+                let int_resp = ui.interact(row_rect, row_id.with("click"), egui::Sense::click());
+                if int_resp.double_clicked() { to_edit = Some(i); }
+
+                let del_btn = ui.add_sized([20.0, 16.0], egui::Button::new("✕").small());
                 if del_btn.clicked() { to_remove = Some(i); }
             }
         });
 
     if let Some(i) = to_remove { state.remove_entry(i); }
-    if let Some(i) = to_edit { state.editing_entry = Some(i); }
+    if let Some(i) = to_edit { state.editing_entry = Some(i); state.show_entry_dialog = true; }
 }
 
 fn format_value(data: &[u8]) -> String {
     if data.len() >= 4 {
         let val = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         format!("0x{val:08X} ({val})")
-    } else if data.is_empty() {
-        "--".into()
-    } else {
-        format!("{data:02X?}")
-    }
+    } else if data.is_empty() { "--".into() }
+    else { format!("{data:02X?}") }
 }

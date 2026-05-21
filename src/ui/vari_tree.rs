@@ -51,16 +51,10 @@ fn show_tree(ui: &mut Ui, app: &mut DwarfApp) {
         .row_layout(RowLayout::Compact)
         .show_state(ui, &mut *app.tree_state.borrow_mut(), |builder| {
             for cu in &app.cus {
-                if cu.variables.is_empty() {
-                    continue;
-                }
-                if app.search_mode && !app.cu_has_result(cu) {
-                    continue;
-                }
+                if cu.variables.is_empty() { continue; }
+                if app.search_mode && !app.cu_has_result(cu) { continue; }
                 builder.dir(cu.dir_id, &cu.cu_name);
-                for var in &cu.variables {
-                    build_node_recursive(builder, var, highlight);
-                }
+                for var in &cu.variables { build_node_recursive(builder, var, highlight); }
                 builder.close_dir();
             }
         });

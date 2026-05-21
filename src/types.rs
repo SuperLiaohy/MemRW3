@@ -73,7 +73,7 @@ impl DwarfApp {
             search_mode: false,
             search_results: HashSet::new(),
             search_path_nodes: HashSet::new(),
-            needs_all_reset: false,
+            needs_all_reset: true,
         }
     }
 
