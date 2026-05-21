@@ -1,7 +1,15 @@
 use eframe::egui::{self, Color32, RichText, Ui};
+use crate::types::ExtendType;
 use super::legend::{preset_colors, ChartLegend};
 
-pub fn line_dialog_ui(ui: &mut Ui, legend: &mut ChartLegend) -> Option<bool> {
+pub fn line_dialog_ui(
+    ui: &mut Ui,
+    legend: &mut ChartLegend,
+    ext_name: Option<&str>,
+    ext_address: Option<u64>,
+    ext_type: Option<&ExtendType>,
+    ext_size: Option<u32>,
+) -> Option<bool> {
     egui::Grid::new("line_dialog_grid")
         .num_columns(2).spacing([8.0, 4.0])
         .show(ui, |ui| {
@@ -17,6 +25,38 @@ pub fn line_dialog_ui(ui: &mut Ui, legend: &mut ChartLegend) -> Option<bool> {
             ui.label("可见:");
             ui.checkbox(&mut legend.visible, "");
             ui.end_row();
+
+            ui.separator();
+            ui.label(RichText::new("变量属性").strong());
+            ui.end_row();
+
+            ui.label("名称:");
+            ui.label(ext_name.unwrap_or("--"));
+            ui.end_row();
+
+            ui.label("地址:");
+            if let Some(addr) = ext_address {
+                ui.label(format!("0x{:X}", addr));
+            } else {
+                ui.label("--");
+            }
+            ui.end_row();
+
+            ui.label("类型:");
+            if let Some(et) = ext_type {
+                ui.label(extend_type_label(et));
+            } else {
+                ui.label("--");
+            }
+            ui.end_row();
+
+            ui.label("大小:");
+            if let Some(sz) = ext_size {
+                ui.label(sz.to_string());
+            } else {
+                ui.label("--");
+            }
+            ui.end_row();
         });
     ui.add_space(8.0);
     ui.separator();
@@ -30,6 +70,22 @@ pub fn line_dialog_ui(ui: &mut Ui, legend: &mut ChartLegend) -> Option<bool> {
         });
     });
     result
+}
+
+fn extend_type_label(et: &ExtendType) -> &'static str {
+    match et {
+        ExtendType::U8 => "u8",
+        ExtendType::U16 => "u16",
+        ExtendType::U32 => "u32",
+        ExtendType::U64 => "u64",
+        ExtendType::I8 => "i8",
+        ExtendType::I16 => "i16",
+        ExtendType::I32 => "i32",
+        ExtendType::I64 => "i64",
+        ExtendType::Float => "float",
+        ExtendType::Double => "double",
+        ExtendType::Other => "other",
+    }
 }
 
 fn color_picker(ui: &mut Ui, current: &mut Color32) {

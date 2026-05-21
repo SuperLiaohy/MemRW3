@@ -37,32 +37,58 @@ pub fn table_panel(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePoo
     let mut action = PanelAction::None;
 
     ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            ui.heading(RichText::new("📋 变量读写表格").size(16.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(RichText::new("📋 打开变量树").size(12.0)).clicked() {
-                    action = PanelAction::OpenTree;
+        let dialog_is_open = state.show_entry_dialog;
+
+        ui.add_enabled_ui(!dialog_is_open, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading(RichText::new("📋 变量读写表格").size(16.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("📋 打开变量树").size(12.0)).clicked() {
+                        action = PanelAction::OpenTree;
+                    }
+                    ui.label(format!("{} 个变量", state.entries.len()));
+                });
+            });
+            ui.add_space(4.0);
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if state.entries.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(40.0);
+                        ui.label(RichText::new("暂无监控变量").size(13.0).color(Color32::from_rgb(150, 150, 150)));
+                        if ui.button("📋 打开变量树").clicked() { action = PanelAction::OpenTree; }
+                    });
+                } else {
+                    render_table(ui, state, pool);
                 }
-                ui.label(format!("{} 个变量", state.entries.len()));
             });
         });
-        ui.add_space(4.0);
 
+        // Dialog (rendered at top layer, always interactive)
         if state.show_entry_dialog {
             if let Some(edit_idx) = state.editing_entry {
                 let mut dialog_remove = false;
                 let mut should_close = false;
                 {
-                    let entry = &mut state.entries[edit_idx];
-                    egui::Window::new(format!("变量属性 - {}", entry.display_name))
-                        .collapsible(false).resizable(false)
-                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                        .show(ui.ctx(), |ui| {
-                            if let Some(remove) = table_entry_dialog_ui(ui, entry) {
-                                dialog_remove = remove;
-                                should_close = true;
-                            }
-                        });
+                let entry = &mut state.entries[edit_idx];
+                let ext_info = pool.get(entry.variable_id).map(|v| {
+                    (
+                        v.tree_node.extend_name.as_deref(),
+                        v.tree_node.extend_address,
+                        v.tree_node.extend_type.as_ref(),
+                        v.tree_node.extend_size,
+                    )
+                });
+                egui::Window::new(format!("变量属性 - {}", entry.display_name))
+                    .collapsible(false).resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .show(ui.ctx(), |ui| {
+                        let (ext_name, ext_addr, ext_type, ext_size) = ext_info.unwrap_or((None, None, None, None));
+                        if let Some(remove) = table_entry_dialog_ui(ui, entry, ext_name, ext_addr, ext_type, ext_size) {
+                            dialog_remove = remove;
+                            should_close = true;
+                        }
+                    });
                 }
                 if should_close {
                     state.show_entry_dialog = false;
@@ -70,18 +96,6 @@ pub fn table_panel(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePoo
                 }
             } else { state.show_entry_dialog = false; }
         }
-
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            if state.entries.is_empty() {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(40.0);
-                    ui.label(RichText::new("暂无监控变量").size(13.0).color(Color32::from_rgb(150, 150, 150)));
-                    if ui.button("📋 打开变量树").clicked() { action = PanelAction::OpenTree; }
-                });
-            } else {
-                render_table(ui, state, pool);
-            }
-        });
     });
 
     action

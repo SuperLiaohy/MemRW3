@@ -100,6 +100,7 @@ pub fn vari_properties_ui(
             ui.horizontal(|ui| {
                 ui.label("Type:");
                 if let Some(ref mut ext_type) = node.extend_type {
+                    let prev_type = ext_type.clone();
                     let selected = extend_type_label(ext_type);
                     ComboBox::from_id_salt("extend_type_combo")
                         .selected_text(selected)
@@ -117,6 +118,10 @@ pub fn vari_properties_ui(
                             ui.selectable_value(ext_type, ExtendType::Double, "double");
                             ui.selectable_value(ext_type, ExtendType::Other, "other");
                         });
+                    // Auto-bind size when type changes
+                    if *ext_type != prev_type && *ext_type != ExtendType::Other {
+                        node.extend_size = Some(extend_type_default_size(ext_type));
+                    }
                 }
             });
 
@@ -177,5 +182,15 @@ fn extend_type_label(et: &ExtendType) -> &'static str {
         ExtendType::Float => "float",
         ExtendType::Double => "double",
         ExtendType::Other => "other",
+    }
+}
+
+fn extend_type_default_size(et: &ExtendType) -> u32 {
+    match et {
+        ExtendType::U8 | ExtendType::I8 => 1,
+        ExtendType::U16 | ExtendType::I16 => 2,
+        ExtendType::U32 | ExtendType::I32 | ExtendType::Float => 4,
+        ExtendType::U64 | ExtendType::I64 | ExtendType::Double => 8,
+        ExtendType::Other => 0,
     }
 }

@@ -66,39 +66,55 @@ pub fn chart_panel(ui: &mut Ui, state: &mut ChartPluginState, pool: &VariablePoo
     }
 
     ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            ui.heading(RichText::new("📈 实时数据图表").size(16.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(RichText::new("📋 打开变量树").size(12.0)).clicked() { action = PanelAction::OpenTree; }
-            });
-        });
-        ui.add_space(2.0);
+        let dialog_is_open = state.show_line_dialog;
 
+        ui.add_enabled_ui(!dialog_is_open, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading(RichText::new("📈 实时数据图表").size(16.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("📋 打开变量树").size(12.0)).clicked() { action = PanelAction::OpenTree; }
+                });
+            });
+            ui.add_space(2.0);
+
+            if state.legends.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(40.0);
+                    ui.label(RichText::new("暂无监控变量").size(13.0).color(Color32::from_rgb(150,150,150)));
+                    if ui.button("📋 打开变量树").clicked() { action = PanelAction::OpenTree; }
+                });
+            } else {
+                render_chart(ui, state);
+            }
+        });
+
+        // Dialog (rendered at top layer, always interactive)
         if state.show_line_dialog {
             if let Some(edit_idx) = state.editing_legend {
                 let mut remove = false; let mut done = false;
                 let legend = &mut state.legends[edit_idx];
+                let ext_info = pool.get(legend.variable_id).map(|v| {
+                    (
+                        v.tree_node.extend_name.as_deref(),
+                        v.tree_node.extend_address,
+                        v.tree_node.extend_type.as_ref(),
+                        v.tree_node.extend_size,
+                    )
+                });
                 egui::Window::new(format!("曲线属性 - {}", legend.curve_name))
                     .collapsible(false).resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                     .show(ui.ctx(), |ui| {
-                        if let Some(r) = super::line_dialog::line_dialog_ui(ui, legend) { remove = r; done = true; }
+                        let (ext_name, ext_addr, ext_type, ext_size) = ext_info.unwrap_or((None, None, None, None));
+                        if let Some(r) = super::line_dialog::line_dialog_ui(ui, legend, ext_name, ext_addr, ext_type, ext_size) {
+                            remove = r; done = true;
+                        }
                     });
                 if done {
                     state.show_line_dialog = false;
                     if remove { state.remove_legend(edit_idx); }
                 }
             } else { state.show_line_dialog = false; }
-        }
-
-        if state.legends.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(40.0);
-                ui.label(RichText::new("暂无监控变量").size(13.0).color(Color32::from_rgb(150,150,150)));
-                if ui.button("📋 打开变量树").clicked() { action = PanelAction::OpenTree; }
-            });
-        } else {
-            render_chart(ui, state);
         }
     });
     action

@@ -100,9 +100,9 @@ impl eframe::App for MemRW3App {
                 let (dock_rect, _) = ui.allocate_at_least(egui::vec2(ui.available_width(), remaining), egui::Sense::click());
                 let mut dock_ui = ui.new_child(egui::UiBuilder::new().max_rect(dock_rect).layout(egui::Layout::top_down(egui::Align::Min)));
 
-                let dock_resp = dock_ui.interact(dock_rect, egui::Id::new("dock_bg"), egui::Sense::click());
-                if bs_open && dock_resp.clicked() {
-                    self.session.active_bottom_sheet = None;
+                // Modal: disable dock interaction when bottom sheet is open
+                if bs_open {
+                    dock_ui.disable();
                 }
 
                 let mut viewer = TabViewerCtx { session: &mut self.session, chart_state: &mut self.chart_state, table_state: &mut self.table_state };
@@ -144,19 +144,19 @@ impl eframe::App for MemRW3App {
                                     if let Some(ref mut node) = self.dwarf_app.selected_node {
                                         let pool = &mut self.session.pool;
                                         let already_added = pool.contains(node.id);
+                                        let mut chart_curve_name = String::new();
+                                        let mut chart_color = Color32::from_rgb(66, 133, 244);
+                                        let mut table_display_name = String::new();
                                         let added = match target_tab {
                                             Some(DockTab::Chart) => {
-                                                let mut curve_name = String::new();
-                                                let mut color = Color32::from_rgb(66, 133, 244);
                                                 ui::vari_properties_ui(&mut right_ui, node, |ui, node_name| {
-                                                    ui::chart_plugin::chart_add_config_ui(ui, node_name, &mut curve_name, &mut color);
+                                                    ui::chart_plugin::chart_add_config_ui(ui, node_name, &mut chart_curve_name, &mut chart_color);
                                                     ui.button("添加到 Chart").clicked()
                                                 })
                                             }
                                             Some(DockTab::Table) => {
-                                                let mut display_name = String::new();
                                                 ui::vari_properties_ui(&mut right_ui, node, |ui, node_name| {
-                                                    ui::table_plugin::table_add_config_ui(ui, node_name, &mut display_name);
+                                                    ui::table_plugin::table_add_config_ui(ui, node_name, &mut table_display_name);
                                                     ui.button("添加到 Table").clicked()
                                                 })
                                             }
@@ -166,8 +166,19 @@ impl eframe::App for MemRW3App {
                                             let var_id = self.session.pool.add(node);
                                             self.session.selected_variables.insert(var_id);
                                             match target_tab {
-                                                Some(DockTab::Chart) => self.chart_state.add_from_pool(&self.session.pool, var_id),
-                                                Some(DockTab::Table) => self.table_state.add_from_pool(&self.session.pool, var_id),
+                                                Some(DockTab::Chart) => {
+                                                    self.chart_state.add_from_pool(&self.session.pool, var_id);
+                                                    if let Some(legend) = self.chart_state.legends.last_mut() {
+                                                        legend.curve_name = chart_curve_name.clone();
+                                                        legend.color = chart_color;
+                                                    }
+                                                }
+                                                Some(DockTab::Table) => {
+                                                    self.table_state.add_from_pool(&self.session.pool, var_id);
+                                                    if let Some(entry) = self.table_state.entries.last_mut() {
+                                                        entry.display_name = table_display_name.clone();
+                                                    }
+                                                }
                                                 None => {}
                                             }
                                         }
