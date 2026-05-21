@@ -1,17 +1,19 @@
-mod types;
-mod dwarf;
 mod app;
+mod dwarf;
+mod model;
+mod probe;
+mod types;
+mod ui;
 
 use anyhow::{anyhow, Context, Result};
+use gimli::RunTimeEndian;
 use object::read::File as ObjectFile;
 use object::{Endianness, Object};
-use gimli::RunTimeEndian;
 use std::env;
 use std::fs;
 
-use crate::app::DwarfApp;
-use crate::dwarf::load_dwarf;
-use crate::dwarf::collect_cus;
+use crate::dwarf::{collect_cus, load_dwarf};
+use crate::app::MemRW3App;
 
 fn main() -> Result<()> {
     let elf_path = env::args()
@@ -32,9 +34,16 @@ fn main() -> Result<()> {
 
     let dwarf = load_dwarf(&object, endian)?;
     let cus = collect_cus(&dwarf)?;
-    let app = DwarfApp::new(cus);
-    eframe::run_native("DWARF Variable Tree", eframe::NativeOptions::default(),
-        Box::new(|_cc| Ok(Box::new(app))))
-        .map_err(|e| anyhow!("{}", e))?;
+    let app = MemRW3App::new(types::DwarfApp::new(cus));
+
+    eframe::run_native(
+        "MemRW3 - Memory Read/Write Monitor",
+        eframe::NativeOptions::default(),
+        Box::new(|cc| {
+            app::setup_fonts(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
+    )
+    .map_err(|e| anyhow!("{}", e))?;
     Ok(())
 }
