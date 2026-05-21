@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32, RichText, Ui};
 use crate::model::VariablePool;
+use crate::types::ExtendType;
 use super::table_dialog::{TableEntry, table_entry_dialog_ui};
 
 #[derive(PartialEq)]
@@ -106,7 +107,7 @@ fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool) 
                 ui.label(RichText::new(&entry.display_name).size(12.0));
 
                 let current_val = pool.get(entry.variable_id)
-                    .map(|v| format_value(&v.current_value))
+                    .map(|v| format_value(&v.current_value, &v.tree_node.extend_type))
                     .unwrap_or_else(|| "--".into());
                 ui.label(RichText::new(&current_val).size(12.0));
 
@@ -138,10 +139,48 @@ fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool) 
     if let Some(i) = to_edit { state.editing_entry = Some(i); state.show_entry_dialog = true; }
 }
 
-fn format_value(data: &[u8]) -> String {
-    if data.len() >= 4 {
-        let val = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        format!("0x{val:08X} ({val})")
-    } else if data.is_empty() { "--".into() }
-    else { format!("{data:02X?}") }
+fn format_value(data: &[u8], ext_type: &Option<ExtendType>) -> String {
+    use ExtendType::*;
+    if data.is_empty() { return "--".into(); }
+    match ext_type {
+        Some(U8) | None => format!("0x{:02X} ({})", data[0], data[0]),
+        Some(I8) => {
+            let val = i8::from_le_bytes([data[0]]);
+            format!("0x{:02X} ({})", data[0], val)
+        }
+        Some(U16) if data.len() >= 2 => {
+            let val = u16::from_le_bytes([data[0], data[1]]);
+            format!("0x{val:04X} ({val})")
+        }
+        Some(I16) if data.len() >= 2 => {
+            let val = i16::from_le_bytes([data[0], data[1]]);
+            format!("0x{val:04X} ({val})")
+        }
+        Some(U32) if data.len() >= 4 => {
+            let val = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            format!("0x{val:08X} ({val})")
+        }
+        Some(I32) if data.len() >= 4 => {
+            let val = i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            format!("0x{val:08X} ({val})")
+        }
+        Some(U64) if data.len() >= 8 => {
+            let val = u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
+            format!("0x{val:016X} ({val})")
+        }
+        Some(I64) if data.len() >= 8 => {
+            let val = i64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
+            format!("0x{val:016X} ({val})")
+        }
+        Some(Float) if data.len() >= 4 => {
+            let val = f32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            format!("{val:.4}")
+        }
+        Some(Double) if data.len() >= 8 => {
+            let val = f64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
+            format!("{val:.6}")
+        }
+        Some(Other) => format!("{data:02X?}"),
+        _ => format!("{data:02X?}"),
+    }
 }

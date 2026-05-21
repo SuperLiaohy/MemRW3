@@ -200,10 +200,14 @@ pub fn build_variable_node(
         .name
         .clone()
         .unwrap_or_else(|| "<unnamed-type>".to_string());
-    let size = type_ref
-        .size
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "?".to_string());
+    let size = type_ref.size.unwrap_or(0) as u32;
+    let struct_name = matches!(
+        type_ref.kind,
+        TypeKind::Struct | TypeKind::Union | TypeKind::Class
+    )
+    .then(|| type_name.clone());
+    let basic_type = type_name_to_basic_type(&type_name, type_ref.size.unwrap_or(0), type_ref.kind);
+
     let mut children = Vec::new();
     if matches!(
         type_ref.kind,
@@ -214,15 +218,31 @@ pub fn build_variable_node(
         let key = (type_ref.unit_header_offset, type_ref.unit_offset);
         visited.insert(key);
         for field in fields {
-            children.push(build_field_node(dwarf, unit, &field, &mut visited, &type_defs, next_id)?);
+            children.push(build_field_node(
+                dwarf,
+                unit,
+                &field,
+                address,
+                &mut visited,
+                &type_defs,
+                next_id,
+            )?);
         }
     }
     if let Some(elem) = type_ref.element_type.as_deref() {
-        let elem_type_name = elem.name.clone().unwrap_or_else(|| "<unnamed>".to_string());
-        let elem_size = elem
-            .size
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "?".to_string());
+        let elem_type_name = elem
+            .name
+            .clone()
+            .unwrap_or_else(|| "<unnamed>".to_string());
+        let elem_size = elem.size.unwrap_or(0) as u32;
+        let elem_struct_name = matches!(
+            elem.kind,
+            TypeKind::Struct | TypeKind::Union | TypeKind::Class
+        )
+        .then(|| elem_type_name.clone());
+        let elem_basic_type =
+            type_name_to_basic_type(&elem_type_name, elem.size.unwrap_or(0), elem.kind);
+
         let mut elem_children = Vec::new();
         if matches!(
             elem.kind,
@@ -233,7 +253,15 @@ pub fn build_variable_node(
             let key = (elem.unit_header_offset, elem.unit_offset);
             visited.insert(key);
             for field in fields {
-                elem_children.push(build_field_node(dwarf, unit, &field, &mut visited, &type_defs, next_id)?);
+                elem_children.push(build_field_node(
+                    dwarf,
+                    unit,
+                    &field,
+                    address,
+                    &mut visited,
+                    &type_defs,
+                    next_id,
+                )?);
             }
         }
         *next_id += 1;
@@ -241,20 +269,32 @@ pub fn build_variable_node(
         children.push(TreeNode {
             id: elem_child_id,
             name: format!("element_type: {}", elem_type_name),
+            struct_name: elem_struct_name,
             type_name: elem_type_name,
-            address_info: String::new(),
-            size_info: format!("(size: {})", elem_size),
+            basic_type: elem_basic_type,
+            address,
+            size: elem_size,
             children: elem_children,
+            extend_name: None,
+            extend_address: None,
+            extend_type: None,
+            extend_size: None,
         });
     }
 
     Ok(TreeNode {
         id: my_id,
         name: variable_name.to_string(),
+        struct_name,
         type_name,
-        address_info: format!("@ {}", format_address(address)),
-        size_info: format!("(size: {})", size),
+        basic_type,
+        address,
+        size,
         children,
+        extend_name: None,
+        extend_address: None,
+        extend_type: None,
+        extend_size: None,
     })
 }
 
@@ -262,6 +302,7 @@ pub fn build_field_node(
     dwarf: &Dwarf<EndianSlice<RunTimeEndian>>,
     unit: &Unit<EndianSlice<RunTimeEndian>>,
     field: &FieldInfo,
+    parent_address: u64,
     visited: &mut BTreeSet<VisitedKey>,
     type_defs: &HashMap<String, TypeDefInfo>,
     next_id: &mut usize,
@@ -277,11 +318,15 @@ pub fn build_field_node(
         .name
         .clone()
         .unwrap_or_else(|| "<unnamed-type>".to_string());
-    let size = field
-        .type_ref
-        .size
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "?".to_string());
+    let address = parent_address + field.offset;
+    let size = field.type_ref.size.unwrap_or(0) as u32;
+    let struct_name = matches!(
+        field.type_ref.kind,
+        TypeKind::Struct | TypeKind::Union | TypeKind::Class
+    )
+    .then(|| type_name.clone());
+    let basic_type =
+        type_name_to_basic_type(&type_name, field.type_ref.size.unwrap_or(0), field.type_ref.kind);
 
     let mut children = Vec::new();
     if matches!(
@@ -296,16 +341,32 @@ pub fn build_field_node(
             visited.insert(key);
             let nested_fields = struct_fields(dwarf, &field.type_ref, type_defs)?;
             for nested in nested_fields {
-                children.push(build_field_node(dwarf, unit, &nested, visited, type_defs, next_id)?);
+                children.push(build_field_node(
+                    dwarf,
+                    unit,
+                    &nested,
+                    address,
+                    visited,
+                    type_defs,
+                    next_id,
+                )?);
             }
         }
     }
     if let Some(elem) = field.type_ref.element_type.as_deref() {
-        let elem_type_name = elem.name.clone().unwrap_or_else(|| "<unnamed>".to_string());
-        let elem_size = elem
-            .size
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "?".to_string());
+        let elem_type_name = elem
+            .name
+            .clone()
+            .unwrap_or_else(|| "<unnamed>".to_string());
+        let elem_size = elem.size.unwrap_or(0) as u32;
+        let elem_struct_name = matches!(
+            elem.kind,
+            TypeKind::Struct | TypeKind::Union | TypeKind::Class
+        )
+        .then(|| elem_type_name.clone());
+        let elem_basic_type =
+            type_name_to_basic_type(&elem_type_name, elem.size.unwrap_or(0), elem.kind);
+
         let mut elem_children = Vec::new();
         if matches!(
             elem.kind,
@@ -316,7 +377,15 @@ pub fn build_field_node(
                 visited.insert(key);
                 let nested_fields = struct_fields(dwarf, elem, type_defs)?;
                 for nested in nested_fields {
-                    elem_children.push(build_field_node(dwarf, unit, &nested, visited, type_defs, next_id)?);
+                    elem_children.push(build_field_node(
+                        dwarf,
+                        unit,
+                        &nested,
+                        address,
+                        visited,
+                        type_defs,
+                        next_id,
+                    )?);
                 }
             }
         }
@@ -325,20 +394,32 @@ pub fn build_field_node(
         children.push(TreeNode {
             id: elem_child_id,
             name: format!("element_type: {}", elem_type_name),
+            struct_name: elem_struct_name,
             type_name: elem_type_name,
-            address_info: String::new(),
-            size_info: format!("(size: {})", elem_size),
+            basic_type: elem_basic_type,
+            address,
+            size: elem_size,
             children: elem_children,
+            extend_name: None,
+            extend_address: None,
+            extend_type: None,
+            extend_size: None,
         });
     }
 
     Ok(TreeNode {
         id: my_id,
         name,
+        struct_name,
         type_name,
-        address_info: format!("@ offset {}", field.offset),
-        size_info: format!("(size: {})", size),
+        basic_type,
+        address,
+        size,
         children,
+        extend_name: None,
+        extend_address: None,
+        extend_type: None,
+        extend_size: None,
     })
 }
 
@@ -833,8 +914,60 @@ pub fn member_offset(
     }
 }
 
-pub fn format_address(address: u64) -> String {
-    format!("0x{address:08x}")
+pub fn type_name_to_basic_type(name: &str, size: u64, kind: TypeKind) -> BasicType {
+    // Pointer types have '*' in their name
+    if name.contains('*') || name.contains(" *") {
+        return BasicType::Pointer;
+    }
+
+    // Struct/Union/Class types
+    if matches!(kind, TypeKind::Struct | TypeKind::Union | TypeKind::Class) {
+        return BasicType::Struct(name.to_string());
+    }
+
+    let lower = name.to_lowercase();
+    match lower.as_str() {
+        // Unsigned 8-bit
+        "unsigned char" | "u8" | "uint8_t" | "uint8" | "byte" | "unsigned __int8" => BasicType::U8,
+        // Unsigned 16-bit
+        "unsigned short"
+        | "u16"
+        | "uint16_t"
+        | "uint16"
+        | "short unsigned int"
+        | "unsigned short int" => BasicType::U16,
+        // Unsigned 32-bit
+        "unsigned int" | "u32" | "uint32_t" | "uint32" | "unsigned" | "unsigned long"
+        | "dword" => BasicType::U32,
+        // Unsigned 64-bit
+        "unsigned long long" | "u64" | "uint64_t" | "uint64" | "unsigned __int64"
+        | "qword" => BasicType::U64,
+        // Signed 8-bit
+        "signed char" | "i8" | "int8_t" | "int8" | "__int8" => BasicType::I8,
+        // Signed 16-bit
+        "short" | "short int" | "i16" | "int16_t" | "int16" | "signed short"
+        | "signed short int" => BasicType::I16,
+        // Signed 32-bit
+        "int" | "signed int" | "i32" | "int32_t" | "int32" | "long" | "signed long" => BasicType::I32,
+        // Signed 64-bit
+        "long long" | "signed long long" | "i64" | "int64_t" | "int64" | "__int64" => BasicType::I64,
+        // Float
+        "float" | "f32" => BasicType::Float,
+        // Double
+        "double" | "long double" | "f64" => BasicType::Double,
+        // Char
+        "char" => BasicType::I8,
+        // Bool
+        "bool" | "_Bool" | "boolean" => BasicType::U8,
+        // Fallback by size
+        _ => match size {
+            1 => BasicType::U8,
+            2 => BasicType::U16,
+            4 => BasicType::U32,
+            8 => BasicType::U64,
+            _ => BasicType::Other(name.to_string()),
+        },
+    }
 }
 
 pub fn attr_to_string(

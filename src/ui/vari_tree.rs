@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use eframe::egui::{self, Ui};
-use egui_ltreeview::{Action, RowLayout, TreeView, TreeViewState};
+use egui_ltreeview::{Action, RowLayout, TreeView, TreeViewState, NodeBuilder};
 
 use egui_ltreeview::TreeViewBuilder;
 use crate::types::{DwarfApp, TreeNode};
@@ -30,7 +30,7 @@ pub fn vari_tree_ui(ui: &mut Ui, app: &mut DwarfApp) {
         ui.label("No matching results");
     }
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("vari_tree_scroll").show(ui, |ui| {
         show_tree(ui, app);
     });
 }
@@ -53,7 +53,10 @@ fn show_tree(ui: &mut Ui, app: &mut DwarfApp) {
             for cu in &app.cus {
                 if cu.variables.is_empty() { continue; }
                 if app.search_mode && !app.cu_has_result(cu) { continue; }
-                builder.dir(cu.dir_id, &cu.cu_name);
+                let cu_name = cu.cu_name.clone();
+                builder.node(NodeBuilder::dir(cu.dir_id)
+                    .label_ui(move |ui| { ui.add(egui::Label::new(cu_name.clone()).selectable(false)); })
+                    .default_open(false));
                 for var in &cu.variables { build_node_recursive(builder, var, highlight); }
                 builder.close_dir();
             }
@@ -82,7 +85,9 @@ fn build_node_recursive(
     if node.children.is_empty() {
         builder.leaf(node.id, label);
     } else {
-        builder.dir(node.id, label);
+        builder.node(NodeBuilder::dir(node.id)
+            .label_ui(move |ui| { ui.add(egui::Label::new(label.clone()).selectable(false)); })
+            .default_open(false));
         for child in &node.children {
             build_node_recursive(builder, child, highlight_ids);
         }

@@ -141,7 +141,7 @@ impl eframe::App for MemRW3App {
                                     ui.separator();
                                     let (right_rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), rem_h), egui::Sense::hover());
                                     let mut right_ui = ui.new_child(egui::UiBuilder::new().max_rect(right_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-                                    if let Some(ref node) = self.dwarf_app.selected_node {
+                                    if let Some(ref mut node) = self.dwarf_app.selected_node {
                                         let pool = &mut self.session.pool;
                                         let already_added = pool.contains(node.id);
                                         let added = match target_tab {

@@ -34,13 +34,53 @@ pub struct TypeDefInfo {
     pub byte_size: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BasicType {
+    U8,
+    U16,
+    U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    I64,
+    Float,
+    Double,
+    Pointer,
+    Struct(String),
+    Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtendType {
+    U8,
+    U16,
+    U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    I64,
+    Float,
+    Double,
+    Other,
+}
+
 #[derive(Clone)]
 pub struct TreeNode {
     pub id: usize,
     pub name: String,
+    pub struct_name: Option<String>,
     pub type_name: String,
-    pub address_info: String,
-    pub size_info: String,
+    pub basic_type: BasicType,
+    pub address: u64,
+    pub size: u32,
+    
+    pub extend_name: Option<String>,
+    pub extend_address: Option<u64>,
+    pub extend_type: Option<ExtendType>,
+    pub extend_size: Option<u32>,
+
     pub children: Vec<TreeNode>,
 }
 

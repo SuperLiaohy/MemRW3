@@ -89,12 +89,36 @@ impl ProbeSession {
                 Err(e) => { self.last_error = Some(format!("获取核心失败: {e}")); return; }
             };
             for var in pool.iter_mut() {
-                let addr = Self::parse_addr(&var.tree_node.address_info);
+                let addr = var.tree_node.extend_address.unwrap_or(var.tree_node.address);
                 if addr == 0 { continue; }
-                match core.read_word_32(addr) {
-                    Ok(val) => { var.current_value = val.to_le_bytes().to_vec(); }
-                    Err(e) => { self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}")); }
-                }
+                let size = var.tree_node.extend_size.unwrap_or(var.tree_node.size);
+                let val = match size {
+                    1 => match core.read_word_8(addr as u64) {
+                        Ok(v) => v.to_le_bytes().to_vec(),
+                        Err(e) => { self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}")); continue; }
+                    },
+                    2 => match core.read_word_16(addr as u64) {
+                        Ok(v) => v.to_le_bytes().to_vec(),
+                        Err(e) => { self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}")); continue; }
+                    },
+                    4 => match core.read_word_32(addr as u64) {
+                        Ok(v) => v.to_le_bytes().to_vec(),
+                        Err(e) => { self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}")); continue; }
+                    },
+                    8 => match core.read_word_64(addr as u64) {
+                        Ok(v) => v.to_le_bytes().to_vec(),
+                        Err(e) => { self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}")); continue; }
+                    },
+                    n => {
+                        let mut buf = vec![0u8; n as usize];
+                        if let Err(e) = core.read(addr as u64, &mut buf) {
+                            self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}"));
+                            continue;
+                        }
+                        buf
+                    }
+                };
+                var.current_value = val;
             }
         }
     }
@@ -106,12 +130,5 @@ impl ProbeSession {
             }
         }
         false
-    }
-
-    fn parse_addr(s: &str) -> u64 {
-        let s = s.trim().trim_start_matches('@').trim();
-        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-            u64::from_str_radix(hex, 16).unwrap_or(0)
-        } else { s.parse().unwrap_or(0) }
     }
 }
