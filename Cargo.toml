@@ -1,0 +1,11 @@
+[package]
+name = "MemRW3"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+gimli = "0.31"
+object = { version = "0.36", features = ["read", "elf"] }
+eframe = "0.34"
+egui_ltreeview = "0.7.0"
