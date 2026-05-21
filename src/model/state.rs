@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use super::VariablePool;
+use crate::types::ExtendConfig;
 
 #[derive(Default)]
 pub struct AppSession {
@@ -11,6 +12,8 @@ pub struct AppSession {
     pub bottom_sheet_height: f32,
     pub pool: VariablePool,
     pub selected_variables: HashSet<usize>,
+    pub load_error: Option<String>,
+    pub extend_configs: HashMap<usize, ExtendConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -1,6 +1,7 @@
 use eframe::egui;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer, tab_viewer};
+use object::Object;
 use std::{fs, sync::Arc};
 
 use crate::model::{AppSession, DockTab};
@@ -18,6 +19,7 @@ pub enum TabKind { Chart, Table }
 pub struct MemRW3App {
     tree: DockState<TabKind>,
     pub dwarf_app: DwarfApp,
+    pub elf_path: String,
     pub session: AppSession,
     pub probe: ProbeSession,
     pub chart_state: ChartPluginState,
@@ -28,8 +30,43 @@ impl MemRW3App {
     pub fn new(dwarf_app: DwarfApp) -> Self {
         let mut tree = DockState::new(vec![TabKind::Chart]);
         tree.main_surface_mut().split_right(NodeIndex::root(), 0.5, vec![TabKind::Table]);
-        Self { tree, dwarf_app, session: AppSession { bottom_sheet_height: 250.0, ..Default::default() },
+        Self { tree, dwarf_app, elf_path: String::new(), session: AppSession { bottom_sheet_height: 250.0, ..Default::default() },
             probe: ProbeSession::default(), chart_state: ChartPluginState::default(), table_state: TablePluginState::default() }
+    }
+
+    fn load_elf(&mut self) {
+        self.session.load_error = None;
+        let path = self.elf_path.trim().to_string();
+        if path.is_empty() {
+            self.session.load_error = Some("请输入 ELF 文件路径".into());
+            return;
+        }
+        let data = match fs::read(&path) {
+            Ok(d) => d,
+            Err(e) => { self.session.load_error = Some(format!("读取文件失败: {e}")); return; }
+        };
+        let object = match object::read::File::parse(&*data) {
+            Ok(o) => o,
+            Err(e) => { self.session.load_error = Some(format!("解析 ELF 失败: {e}")); return; }
+        };
+        if object.format() != object::BinaryFormat::Elf {
+            self.session.load_error = Some("不是有效的 ELF 文件".into());
+            return;
+        }
+        let endian = match object.endianness() {
+            object::Endianness::Little => gimli::RunTimeEndian::Little,
+            object::Endianness::Big => gimli::RunTimeEndian::Big,
+        };
+        let dwarf = match crate::dwarf::load_dwarf(&object, endian) {
+            Ok(d) => d,
+            Err(e) => { self.session.load_error = Some(format!("加载 DWARF 失败: {e}")); return; }
+        };
+        let cus = match crate::dwarf::collect_cus(&dwarf) {
+            Ok(c) => c,
+            Err(e) => { self.session.load_error = Some(format!("解析 DWARF 数据失败: {e}")); return; }
+        };
+        self.dwarf_app = DwarfApp::new(cus);
+        self.session.load_error = None;
     }
 }
 
@@ -82,25 +119,27 @@ impl eframe::App for MemRW3App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let total_h = ui.available_height();
         let ctrl_h = (total_h * 0.06).clamp(40.0, 56.0);
+        let bs_open = self.session.active_bottom_sheet.is_some();
 
         ui.vertical(|ui| {
+            // ── Control Bar (locked when BottomSheet is open) ──
             let (ctrl_rect, _) = ui.allocate_at_least(egui::vec2(ui.available_width(), ctrl_h), egui::Sense::hover());
             let mut ctrl_ui = ui.new_child(egui::UiBuilder::new().max_rect(ctrl_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-            ui::control_bar(&mut ctrl_ui, &mut self.session, &mut self.probe);
+            ctrl_ui.add_enabled_ui(!bs_open, |ui| {
+                ui::control_bar(ui, &mut self.session, &mut self.probe);
+            });
 
             self.probe.running = self.session.running;
             self.probe.acquire(&mut self.session.pool, self.session.delay_us);
             if self.session.running { ui.ctx().request_repaint(); }
 
             let remaining = ui.available_height();
-            let bs_open = self.session.active_bottom_sheet.is_some();
             let bs_h = if bs_open { self.session.bottom_sheet_height.clamp(150.0, (remaining * 0.75).max(150.0)) } else { 0.0 };
 
             if remaining > 0.0 {
                 let (dock_rect, _) = ui.allocate_at_least(egui::vec2(ui.available_width(), remaining), egui::Sense::click());
                 let mut dock_ui = ui.new_child(egui::UiBuilder::new().max_rect(dock_rect).layout(egui::Layout::top_down(egui::Align::Min)));
 
-                // Modal: disable dock interaction when bottom sheet is open
                 if bs_open {
                     dock_ui.disable();
                 }
@@ -123,6 +162,25 @@ impl eframe::App for MemRW3App {
                             let delta = bottom_sheet_handle(ui);
                             if delta != 0.0 { self.session.bottom_sheet_height -= delta; ui.ctx().request_repaint(); }
                             egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                                // ── ELF file path picker (top of BottomSheet) ──
+                                ui.horizontal(|ui| {
+                                    ui.label("ELF 文件:");
+                                    ui.add_sized(
+                                        [ui.available_width() - 120.0, 20.0],
+                                        egui::TextEdit::singleline(&mut self.elf_path)
+                                            .hint_text("输入 firmware.elf 路径...")
+                                    );
+                                    if ui.button("加载").clicked() {
+                                        self.load_elf();
+                                    }
+                                    if let Some(ref err) = self.session.load_error {
+                                        ui.colored_label(Color32::from_rgb(255, 80, 80), err);
+                                    }
+                                });
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.add_space(2.0);
+
                                 ui.horizontal(|ui| {
                                     ui.heading("变量列表 (DWARF Tree)");
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -141,21 +199,39 @@ impl eframe::App for MemRW3App {
                                     ui.separator();
                                     let (right_rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), rem_h), egui::Sense::hover());
                                     let mut right_ui = ui.new_child(egui::UiBuilder::new().max_rect(right_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-                                    if let Some(ref mut node) = self.dwarf_app.selected_node {
+                                    if let Some(ref node) = self.dwarf_app.selected_node {
                                         let pool = &mut self.session.pool;
                                         let already_added = pool.contains(node.id);
+                                        let extend_name = self.dwarf_app.compute_extend_name(node.id);
+                                        let extend_addr = self.dwarf_app.compute_extend_address(node.id).unwrap_or(node.address);
+                                        let default_type = crate::types::basic_type_to_extend(&node.basic_type);
+
+                                        // Get or create ExtendConfig for this node
+                                        let config = self.session.extend_configs
+                                            .entry(node.id)
+                                            .or_insert_with(|| crate::types::ExtendConfig {
+                                                name: extend_name.clone(),
+                                                address: extend_addr,
+                                                ext_type: default_type.clone(),
+                                                size: node.size,
+                                            });
+
+                                        // Color persistence via egui memory
+                                        let color_id = ui.make_persistent_id(format!("chart_add_color_{}", node.id));
+                                        let mut chart_color = ui.data_mut(|d| *d.get_temp_mut_or(color_id, Color32::from_rgb(66, 133, 244)));
                                         let mut chart_curve_name = String::new();
-                                        let mut chart_color = Color32::from_rgb(66, 133, 244);
                                         let mut table_display_name = String::new();
                                         let added = match target_tab {
                                             Some(DockTab::Chart) => {
-                                                ui::vari_properties_ui(&mut right_ui, node, |ui, node_name| {
+                                                let result = ui::vari_properties_ui(&mut right_ui, node, config, |ui, node_name| {
                                                     ui::chart_plugin::chart_add_config_ui(ui, node_name, &mut chart_curve_name, &mut chart_color);
                                                     ui.button("添加到 Chart").clicked()
-                                                })
+                                                });
+                                                ui.data_mut(|d| d.insert_temp(color_id, chart_color));
+                                                result
                                             }
                                             Some(DockTab::Table) => {
-                                                ui::vari_properties_ui(&mut right_ui, node, |ui, node_name| {
+                                                ui::vari_properties_ui(&mut right_ui, node, config, |ui, node_name| {
                                                     ui::table_plugin::table_add_config_ui(ui, node_name, &mut table_display_name);
                                                     ui.button("添加到 Table").clicked()
                                                 })
@@ -163,7 +239,7 @@ impl eframe::App for MemRW3App {
                                             None => false,
                                         };
                                         if added && !already_added {
-                                            let var_id = self.session.pool.add(node);
+                                            let var_id = self.session.pool.add(config);
                                             self.session.selected_variables.insert(var_id);
                                             match target_tab {
                                                 Some(DockTab::Chart) => {

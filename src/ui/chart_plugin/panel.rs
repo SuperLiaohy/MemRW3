@@ -25,7 +25,7 @@ impl Default for ChartPluginState {
 impl ChartPluginState {
     pub fn add_from_pool(&mut self, pool: &VariablePool, variable_id: usize) {
         if let Some(var) = pool.get(variable_id) {
-            self.legends.push(ChartLegend::new(variable_id, var.tree_node.name.clone()));
+            self.legends.push(ChartLegend::new(variable_id, var.name.clone()));
         }
     }
     pub fn remove_legend(&mut self, index: usize) {
@@ -59,7 +59,7 @@ pub fn chart_panel(ui: &mut Ui, state: &mut ChartPluginState, pool: &VariablePoo
         state.elapsed_time = state.start_time.elapsed().as_secs_f64();
         for legend in &mut state.legends {
             if let Some(var) = pool.get(legend.variable_id) {
-                let val = decode_value_f64(&var.current_value, &var.tree_node.extend_type);
+                let val = decode_value_f64(&var.current_value, &var.ext_type);
                 legend.push_value(state.elapsed_time, val);
             }
         }
@@ -95,18 +95,18 @@ pub fn chart_panel(ui: &mut Ui, state: &mut ChartPluginState, pool: &VariablePoo
                 let legend = &mut state.legends[edit_idx];
                 let ext_info = pool.get(legend.variable_id).map(|v| {
                     (
-                        v.tree_node.extend_name.as_deref(),
-                        v.tree_node.extend_address,
-                        v.tree_node.extend_type.as_ref(),
-                        v.tree_node.extend_size,
+                        v.name.clone(),
+                        v.address,
+                        v.ext_type.clone(),
+                        v.size,
                     )
                 });
                 egui::Window::new(format!("曲线属性 - {}", legend.curve_name))
                     .collapsible(false).resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                     .show(ui.ctx(), |ui| {
-                        let (ext_name, ext_addr, ext_type, ext_size) = ext_info.unwrap_or((None, None, None, None));
-                        if let Some(r) = super::line_dialog::line_dialog_ui(ui, legend, ext_name, ext_addr, ext_type, ext_size) {
+                        let (ext_name, ext_addr, ext_type, ext_size) = ext_info.unwrap_or((String::new(), 0, ExtendType::U32, 0));
+                        if let Some(r) = super::line_dialog::line_dialog_ui(ui, legend, &ext_name, ext_addr, &ext_type, ext_size) {
                             remove = r; done = true;
                         }
                     });
@@ -206,21 +206,21 @@ fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2)
     if let Some(i) = edit { state.editing_legend = Some(i); state.show_line_dialog = true; }
 }
 
-fn decode_value_f64(data: &[u8], ext_type: &Option<ExtendType>) -> f64 {
-    use ExtendType::*;
+fn decode_value_f64(data: &[u8], ext_type: &crate::types::ExtendType) -> f64 {
+    use crate::types::ExtendType::*;
     if data.is_empty() { return 0.0; }
     match ext_type {
-        Some(U8) | None => *data.first().unwrap_or(&0) as f64,
-        Some(I8) => *data.first().unwrap_or(&0) as i8 as f64,
-        Some(U16) => if data.len() >= 2 { u16::from_le_bytes([data[0], data[1]]) as f64 } else { 0.0 },
-        Some(I16) => if data.len() >= 2 { i16::from_le_bytes([data[0], data[1]]) as f64 } else { 0.0 },
-        Some(U32) => if data.len() >= 4 { u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64 } else { 0.0 },
-        Some(I32) => if data.len() >= 4 { i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64 } else { 0.0 },
-        Some(U64) => if data.len() >= 8 { u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]) as f64 } else { 0.0 },
-        Some(I64) => if data.len() >= 8 { i64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]) as f64 } else { 0.0 },
-        Some(Float) => if data.len() >= 4 { f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64 } else { 0.0 },
-        Some(Double) => if data.len() >= 8 { f64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]) } else { 0.0 },
-        Some(Other) => 0.0,
+        U8 => *data.first().unwrap_or(&0) as f64,
+        I8 => *data.first().unwrap_or(&0) as i8 as f64,
+        U16 => if data.len() >= 2 { u16::from_le_bytes([data[0], data[1]]) as f64 } else { 0.0 },
+        I16 => if data.len() >= 2 { i16::from_le_bytes([data[0], data[1]]) as f64 } else { 0.0 },
+        U32 => if data.len() >= 4 { u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64 } else { 0.0 },
+        I32 => if data.len() >= 4 { i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64 } else { 0.0 },
+        U64 => if data.len() >= 8 { u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]) as f64 } else { 0.0 },
+        I64 => if data.len() >= 8 { i64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]) as f64 } else { 0.0 },
+        Float => if data.len() >= 4 { f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64 } else { 0.0 },
+        Double => if data.len() >= 8 { f64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]) } else { 0.0 },
+        Other => 0.0,
     }
 }
 

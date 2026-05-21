@@ -5,10 +5,10 @@ use super::legend::{preset_colors, ChartLegend};
 pub fn line_dialog_ui(
     ui: &mut Ui,
     legend: &mut ChartLegend,
-    ext_name: Option<&str>,
-    ext_address: Option<u64>,
-    ext_type: Option<&ExtendType>,
-    ext_size: Option<u32>,
+    ext_name: &str,
+    ext_address: u64,
+    ext_type: &ExtendType,
+    ext_size: u32,
 ) -> Option<bool> {
     egui::Grid::new("line_dialog_grid")
         .num_columns(2).spacing([8.0, 4.0])
@@ -31,31 +31,19 @@ pub fn line_dialog_ui(
             ui.end_row();
 
             ui.label("名称:");
-            ui.label(ext_name.unwrap_or("--"));
+            ui.label(ext_name);
             ui.end_row();
 
             ui.label("地址:");
-            if let Some(addr) = ext_address {
-                ui.label(format!("0x{:X}", addr));
-            } else {
-                ui.label("--");
-            }
+            ui.label(format!("0x{:X}", ext_address));
             ui.end_row();
 
             ui.label("类型:");
-            if let Some(et) = ext_type {
-                ui.label(extend_type_label(et));
-            } else {
-                ui.label("--");
-            }
+            ui.label(extend_type_label(ext_type));
             ui.end_row();
 
             ui.label("大小:");
-            if let Some(sz) = ext_size {
-                ui.label(sz.to_string());
-            } else {
-                ui.label("--");
-            }
+            ui.label(ext_size.to_string());
             ui.end_row();
         });
     ui.add_space(8.0);

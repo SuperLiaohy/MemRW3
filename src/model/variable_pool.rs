@@ -1,10 +1,13 @@
-use crate::types::TreeNode;
+use crate::types::{ExtendConfig, ExtendType};
 use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct PooledVariable {
     pub id: usize,
-    pub tree_node: TreeNode,
+    pub name: String,
+    pub address: u64,
+    pub ext_type: ExtendType,
+    pub size: u32,
     pub current_value: Vec<u8>,
 }
 
@@ -16,13 +19,16 @@ pub struct VariablePool {
 }
 
 impl VariablePool {
-    pub fn add(&mut self, node: &TreeNode) -> usize {
+    pub fn add(&mut self, config: &ExtendConfig) -> usize {
         let id = self.next_id;
         self.next_id += 1;
         let idx = self.variables.len();
         self.variables.push(PooledVariable {
             id,
-            tree_node: node.clone(),
+            name: config.name.clone(),
+            address: config.address,
+            ext_type: config.ext_type.clone(),
+            size: config.size,
             current_value: Vec::new(),
         });
         self.id_index.insert(id, idx);

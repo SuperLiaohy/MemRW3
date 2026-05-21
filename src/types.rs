@@ -75,13 +75,44 @@ pub struct TreeNode {
     pub basic_type: BasicType,
     pub address: u64,
     pub size: u32,
-    
-    pub extend_name: Option<String>,
-    pub extend_address: Option<u64>,
-    pub extend_type: Option<ExtendType>,
-    pub extend_size: Option<u32>,
 
     pub children: Vec<TreeNode>,
+}
+
+/// Convert BasicType to ExtendType for data acquisition and display.
+pub fn basic_type_to_extend(bt: &BasicType) -> ExtendType {
+    match bt {
+        BasicType::U8 => ExtendType::U8,
+        BasicType::U16 => ExtendType::U16,
+        BasicType::U32 => ExtendType::U32,
+        BasicType::U64 => ExtendType::U64,
+        BasicType::I8 => ExtendType::I8,
+        BasicType::I16 => ExtendType::I16,
+        BasicType::I32 => ExtendType::I32,
+        BasicType::I64 => ExtendType::I64,
+        BasicType::Float => ExtendType::Float,
+        BasicType::Double => ExtendType::Double,
+        BasicType::Pointer => ExtendType::U64,
+        BasicType::Struct(_) => ExtendType::Other,
+        BasicType::Other(_) => ExtendType::Other,
+    }
+}
+
+/// Human-readable label for ExtendType.
+pub fn extend_type_label(et: &ExtendType) -> &'static str {
+    match et {
+        ExtendType::U8 => "u8",
+        ExtendType::U16 => "u16",
+        ExtendType::U32 => "u32",
+        ExtendType::U64 => "u64",
+        ExtendType::I8 => "i8",
+        ExtendType::I16 => "i16",
+        ExtendType::I32 => "i32",
+        ExtendType::I64 => "i64",
+        ExtendType::Float => "float",
+        ExtendType::Double => "double",
+        ExtendType::Other => "other",
+    }
 }
 
 pub struct CuInfo {
@@ -101,6 +132,14 @@ pub struct DwarfApp {
     pub search_results: HashSet<usize>,
     pub search_path_nodes: HashSet<usize>,
     pub needs_all_reset: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExtendConfig {
+    pub name: String,
+    pub address: u64,
+    pub ext_type: ExtendType,
+    pub size: u32,
 }
 
 impl DwarfApp {
@@ -249,6 +288,28 @@ impl DwarfApp {
         None
     }
 
+    pub fn compute_extend_name(&self, node_id: usize) -> String {
+        for cu in &self.cus {
+            for var in &cu.variables {
+                if let Some(path) = find_path_to_node(var, node_id, &var.name) {
+                    return path;
+                }
+            }
+        }
+        String::new()
+    }
+
+    pub fn compute_extend_address(&self, node_id: usize) -> Option<u64> {
+        for cu in &self.cus {
+            for var in &cu.variables {
+                if let Some(addr) = compute_addr_in_tree(var, node_id, var.address, true) {
+                    return Some(addr);
+                }
+            }
+        }
+        None
+    }
+
     pub fn cu_has_result(&self, cu: &CuInfo) -> bool {
         cu.variables.iter().any(|v| self.subtree_has_result(v))
     }
@@ -263,4 +324,34 @@ impl DwarfApp {
 
 pub fn node_name_matches(name: &str, query: &str) -> bool {
     name.to_lowercase().contains(&query.to_lowercase())
+}
+
+fn find_path_to_node(node: &TreeNode, target_id: usize, current_path: &str) -> Option<String> {
+    if node.id == target_id {
+        return Some(current_path.to_string());
+    }
+    for child in &node.children {
+        let child_path = format!("{}.{}", current_path, child.name);
+        if let Some(found) = find_path_to_node(child, target_id, &child_path) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn compute_addr_in_tree(node: &TreeNode, target_id: usize, current_addr: u64, is_root: bool) -> Option<u64> {
+    let addr = if is_root {
+        node.address
+    } else {
+        current_addr + node.address
+    };
+    if node.id == target_id {
+        return Some(addr);
+    }
+    for child in &node.children {
+        if let Some(found) = compute_addr_in_tree(child, target_id, addr, false) {
+            return Some(found);
+        }
+    }
+    None
 }

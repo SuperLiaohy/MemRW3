@@ -22,10 +22,10 @@ pub fn table_add_config_ui(ui: &mut Ui, node_name: &str, out_display_name: &mut 
 pub fn table_entry_dialog_ui(
     ui: &mut Ui,
     entry: &mut TableEntry,
-    ext_name: Option<&str>,
-    ext_address: Option<u64>,
-    ext_type: Option<&ExtendType>,
-    ext_size: Option<u32>,
+    ext_name: &str,
+    ext_address: u64,
+    ext_type: &ExtendType,
+    ext_size: u32,
 ) -> Option<bool> {
     egui::Grid::new("table_entry_dialog")
         .num_columns(2).spacing([8.0, 4.0])
@@ -42,31 +42,19 @@ pub fn table_entry_dialog_ui(
             ui.end_row();
 
             ui.label("名称:");
-            ui.label(ext_name.unwrap_or("--"));
+            ui.label(ext_name);
             ui.end_row();
 
             ui.label("地址:");
-            if let Some(addr) = ext_address {
-                ui.label(format!("0x{:X}", addr));
-            } else {
-                ui.label("--");
-            }
+            ui.label(format!("0x{:X}", ext_address));
             ui.end_row();
 
             ui.label("类型:");
-            if let Some(et) = ext_type {
-                ui.label(extend_type_label(et));
-            } else {
-                ui.label("--");
-            }
+            ui.label(extend_type_label(ext_type));
             ui.end_row();
 
             ui.label("大小:");
-            if let Some(sz) = ext_size {
-                ui.label(sz.to_string());
-            } else {
-                ui.label("--");
-            }
+            ui.label(ext_size.to_string());
             ui.end_row();
         });
 

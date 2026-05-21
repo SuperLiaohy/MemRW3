@@ -19,7 +19,7 @@ impl Default for TablePluginState {
 impl TablePluginState {
     pub fn add_from_pool(&mut self, pool: &VariablePool, variable_id: usize) {
         if let Some(var) = pool.get(variable_id) {
-            self.entries.push(TableEntry::new(variable_id, var.tree_node.name.clone()));
+            self.entries.push(TableEntry::new(variable_id, var.name.clone()));
         }
     }
     pub fn remove_entry(&mut self, index: usize) {
@@ -73,18 +73,18 @@ pub fn table_panel(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePoo
                 let entry = &mut state.entries[edit_idx];
                 let ext_info = pool.get(entry.variable_id).map(|v| {
                     (
-                        v.tree_node.extend_name.as_deref(),
-                        v.tree_node.extend_address,
-                        v.tree_node.extend_type.as_ref(),
-                        v.tree_node.extend_size,
+                        v.name.clone(),
+                        v.address,
+                        v.ext_type.clone(),
+                        v.size,
                     )
                 });
                 egui::Window::new(format!("变量属性 - {}", entry.display_name))
                     .collapsible(false).resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                     .show(ui.ctx(), |ui| {
-                        let (ext_name, ext_addr, ext_type, ext_size) = ext_info.unwrap_or((None, None, None, None));
-                        if let Some(remove) = table_entry_dialog_ui(ui, entry, ext_name, ext_addr, ext_type, ext_size) {
+                        let (ext_name, ext_addr, ext_type, ext_size) = ext_info.unwrap_or((String::new(), 0, ExtendType::U32, 0));
+                        if let Some(remove) = table_entry_dialog_ui(ui, entry, &ext_name, ext_addr, &ext_type, ext_size) {
                             dialog_remove = remove;
                             should_close = true;
                         }
@@ -121,7 +121,7 @@ fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool) 
                 ui.label(RichText::new(&entry.display_name).size(12.0));
 
                 let current_val = pool.get(entry.variable_id)
-                    .map(|v| format_value(&v.current_value, &v.tree_node.extend_type))
+                    .map(|v| format_value(&v.current_value, &v.ext_type))
                     .unwrap_or_else(|| "--".into());
                 ui.label(RichText::new(&current_val).size(12.0));
 
@@ -153,48 +153,48 @@ fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool) 
     if let Some(i) = to_edit { state.editing_entry = Some(i); state.show_entry_dialog = true; }
 }
 
-fn format_value(data: &[u8], ext_type: &Option<ExtendType>) -> String {
+fn format_value(data: &[u8], ext_type: &ExtendType) -> String {
     use ExtendType::*;
     if data.is_empty() { return "--".into(); }
     match ext_type {
-        Some(U8) | None => format!("0x{:02X} ({})", data[0], data[0]),
-        Some(I8) => {
+        U8 => format!("0x{:02X} ({})", data[0], data[0]),
+        I8 => {
             let val = i8::from_le_bytes([data[0]]);
             format!("0x{:02X} ({})", data[0], val)
         }
-        Some(U16) if data.len() >= 2 => {
+        U16 if data.len() >= 2 => {
             let val = u16::from_le_bytes([data[0], data[1]]);
             format!("0x{val:04X} ({val})")
         }
-        Some(I16) if data.len() >= 2 => {
+        I16 if data.len() >= 2 => {
             let val = i16::from_le_bytes([data[0], data[1]]);
             format!("0x{val:04X} ({val})")
         }
-        Some(U32) if data.len() >= 4 => {
+        U32 if data.len() >= 4 => {
             let val = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             format!("0x{val:08X} ({val})")
         }
-        Some(I32) if data.len() >= 4 => {
+        I32 if data.len() >= 4 => {
             let val = i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             format!("0x{val:08X} ({val})")
         }
-        Some(U64) if data.len() >= 8 => {
+        U64 if data.len() >= 8 => {
             let val = u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
             format!("0x{val:016X} ({val})")
         }
-        Some(I64) if data.len() >= 8 => {
+        I64 if data.len() >= 8 => {
             let val = i64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
             format!("0x{val:016X} ({val})")
         }
-        Some(Float) if data.len() >= 4 => {
+        Float if data.len() >= 4 => {
             let val = f32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             format!("{val:.4}")
         }
-        Some(Double) if data.len() >= 8 => {
+        Double if data.len() >= 8 => {
             let val = f64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
             format!("{val:.6}")
         }
-        Some(Other) => format!("{data:02X?}"),
+        Other => format!("{data:02X?}"),
         _ => format!("{data:02X?}"),
     }
 }

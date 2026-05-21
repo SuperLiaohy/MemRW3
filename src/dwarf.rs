@@ -257,7 +257,7 @@ pub fn build_variable_node(
                     dwarf,
                     unit,
                     &field,
-                    address,
+                    0,
                     &mut visited,
                     &type_defs,
                     next_id,
@@ -272,13 +272,9 @@ pub fn build_variable_node(
             struct_name: elem_struct_name,
             type_name: elem_type_name,
             basic_type: elem_basic_type,
-            address,
+            address: 0,
             size: elem_size,
             children: elem_children,
-            extend_name: None,
-            extend_address: None,
-            extend_type: None,
-            extend_size: None,
         });
     }
 
@@ -291,10 +287,6 @@ pub fn build_variable_node(
         address,
         size,
         children,
-        extend_name: None,
-        extend_address: None,
-        extend_type: None,
-        extend_size: None,
     })
 }
 
@@ -302,7 +294,7 @@ pub fn build_field_node(
     dwarf: &Dwarf<EndianSlice<RunTimeEndian>>,
     unit: &Unit<EndianSlice<RunTimeEndian>>,
     field: &FieldInfo,
-    parent_address: u64,
+    _parent_address: u64,
     visited: &mut BTreeSet<VisitedKey>,
     type_defs: &HashMap<String, TypeDefInfo>,
     next_id: &mut usize,
@@ -318,7 +310,7 @@ pub fn build_field_node(
         .name
         .clone()
         .unwrap_or_else(|| "<unnamed-type>".to_string());
-    let address = parent_address + field.offset;
+    let address = field.offset;
     let size = field.type_ref.size.unwrap_or(0) as u32;
     let struct_name = matches!(
         field.type_ref.kind,
@@ -345,7 +337,7 @@ pub fn build_field_node(
                     dwarf,
                     unit,
                     &nested,
-                    address,
+                    0,
                     visited,
                     type_defs,
                     next_id,
@@ -381,7 +373,7 @@ pub fn build_field_node(
                         dwarf,
                         unit,
                         &nested,
-                        address,
+                        0,
                         visited,
                         type_defs,
                         next_id,
@@ -397,13 +389,9 @@ pub fn build_field_node(
             struct_name: elem_struct_name,
             type_name: elem_type_name,
             basic_type: elem_basic_type,
-            address,
+            address: 0,
             size: elem_size,
             children: elem_children,
-            extend_name: None,
-            extend_address: None,
-            extend_type: None,
-            extend_size: None,
         });
     }
 
@@ -416,10 +404,6 @@ pub fn build_field_node(
         address,
         size,
         children,
-        extend_name: None,
-        extend_address: None,
-        extend_type: None,
-        extend_size: None,
     })
 }
 

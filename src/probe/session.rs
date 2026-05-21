@@ -89,9 +89,9 @@ impl ProbeSession {
                 Err(e) => { self.last_error = Some(format!("获取核心失败: {e}")); return; }
             };
             for var in pool.iter_mut() {
-                let addr = var.tree_node.extend_address.unwrap_or(var.tree_node.address);
+                let addr = var.address;
                 if addr == 0 { continue; }
-                let size = var.tree_node.extend_size.unwrap_or(var.tree_node.size);
+                let size = var.size;
                 let val = match size {
                     1 => match core.read_word_8(addr as u64) {
                         Ok(v) => v.to_le_bytes().to_vec(),
