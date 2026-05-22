@@ -2,6 +2,7 @@ use super::legend::ChartLegend;
 use crate::model::VariablePool;
 use crate::types::ExtendType;
 use eframe::egui::{self, Color32, RichText, Ui};
+use egui_plot::{Line, Plot, PlotBounds, PlotPoints};
 use std::time::Instant;
 
 #[derive(PartialEq)]
@@ -14,6 +15,7 @@ pub struct ChartPluginState {
     pub legends: Vec<ChartLegend>,
     pub editing_legend: Option<usize>,
     pub show_line_dialog: bool,
+    pub auto_scroll: bool,
     start_time: Instant,
     elapsed_time: f64,
 }
@@ -24,6 +26,7 @@ impl Default for ChartPluginState {
             legends: Vec::new(),
             editing_legend: None,
             show_line_dialog: false,
+            auto_scroll: true,
             start_time: Instant::now(),
             elapsed_time: 0.0,
         }
@@ -130,6 +133,22 @@ pub fn chart_panel(
             });
             ui.add_space(2.0);
 
+            ui.horizontal(|ui| {
+                if ui.button("清空").clicked() {
+                    for legend in &mut state.legends {
+                        legend.data_history.clear();
+                    }
+                    state.auto_scroll = true;
+                }
+                if ui.button("回到最新").clicked() {
+                    state.auto_scroll = true;
+                }
+                if !state.auto_scroll {
+                    ui.colored_label(Color32::LIGHT_BLUE, "手动查看中");
+                }
+            });
+            ui.add_space(2.0);
+
             if state.legends.is_empty() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(40.0);
@@ -185,54 +204,12 @@ pub fn chart_panel(
 }
 
 fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ui.available_height().max(150.0)),
-        egui::Sense::hover(),
-    );
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-    let painter = ui.painter();
-    let dark = ui.visuals().dark_mode;
-
-    let ml = (rect.width() * 0.08).clamp(40.0, 70.0);
-    let mb = (rect.height() * 0.08).clamp(22.0, 40.0);
-    let pl = rect.left() + ml;
-    let pr = rect.right() - 5.0;
-    let pt = rect.top() + 5.0;
-    let pb = rect.bottom() - mb;
-    let pw = (pr - pl).max(1.0);
-    let ph = (pb - pt).max(1.0);
-
-    let bg = if dark {
-        Color32::from_rgb(18, 18, 24)
-    } else {
-        Color32::from_rgb(250, 250, 255)
-    };
-    painter.rect_filled(
-        egui::Rect::from_min_max(egui::pos2(pl, pt), egui::pos2(pr, pb)),
-        egui::CornerRadius::same(0),
-        bg,
-    );
-
-    let grid = if dark {
-        Color32::from_rgb(35, 35, 45)
-    } else {
-        Color32::from_rgb(220, 220, 225)
-    };
-    let tc = if dark {
-        Color32::from_rgb(100, 100, 110)
-    } else {
-        Color32::from_rgb(150, 150, 160)
-    };
-    let txc = if dark {
-        Color32::from_rgb(180, 180, 190)
-    } else {
-        Color32::from_rgb(80, 80, 90)
-    };
+    let available_h = ui.available_height();
+    let plot_height = (available_h - 24.0).max(100.0);
 
     let has_data = state.legends.iter().any(|l| l.data_history.len() >= 2);
-    let (x_min, x_max, y_min, y_max) = if has_data {
+
+    let auto_bounds = has_data.then(|| {
         let t_max = state
             .legends
             .iter()
@@ -243,80 +220,79 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             .iter()
             .filter_map(|l| l.data_history.front().map(|p| p.0))
             .fold(f64::MAX, f64::min);
-        let xr = (t_max - t_min).max(1.0);
-        let (ymin, ymax) = state
+        let xr = (t_max - t_min).max(40.0);
+        let window = xr.max(10.0);
+        let x_min = t_max - window;
+        let x_max = t_max + window * 0.02;
+
+        let (y_min, y_max) = state
             .legends
             .iter()
             .flat_map(|l| l.data_history.iter().map(|p| p.1))
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
                 (lo.min(y), hi.max(y))
             });
-        let yp = ((ymax - ymin).max(1.0) * 0.1).max(0.5);
-        (t_min - xr * 0.02, t_max + xr * 0.02, ymin - yp, ymax + yp)
-    } else {
-        (0.0, 10.0, -1.0, 1.0)
-    };
+        let y_pad = (y_max - y_min).max(10.0) * 0.1;
+        (x_min, x_max, y_min - y_pad, y_max + y_pad)
+    });
 
-    for i in 0..=6 {
-        let f = i as f32 / 6.0;
-        let y = pb - f * ph;
-        painter.line_segment([egui::pos2(pl, y), egui::pos2(pr, y)], (1.0, grid));
-        let val = y_min + (y_max - y_min) * (1.0 - i as f64 / 6.0);
-        painter.text(
-            egui::pos2(pl - 4.0, y),
-            egui::Align2::RIGHT_CENTER,
-            format_axis(val),
-            egui::FontId::proportional(10.0),
-            txc,
-        );
-        painter.line_segment([egui::pos2(pl - 5.0, y), egui::pos2(pl, y)], (1.0, tc));
-    }
-    for i in 0..=5 {
-        let f = i as f32 / 5.0;
-        let x = pl + f * pw;
-        painter.line_segment([egui::pos2(x, pt), egui::pos2(x, pb)], (1.0, grid));
-        let val = x_min + (x_max - x_min) * i as f64 / 5.0;
-        painter.text(
-            egui::pos2(x, pb + 6.0),
-            egui::Align2::CENTER_TOP,
-            format!("{val:.1}s"),
-            egui::FontId::proportional(10.0),
-            txc,
-        );
-        painter.line_segment([egui::pos2(x, pb), egui::pos2(x, pb + 5.0)], (1.0, tc));
-    }
-
-    for legend in &state.legends {
-        if !legend.visible || legend.data_history.len() < 2 {
-            continue;
-        }
-        let pts: Vec<egui::Pos2> = legend
-            .data_history
-            .iter()
-            .map(|&(t, val)| {
-                let fx = ((t - x_min) / (x_max - x_min)) as f32;
-                let fy = ((val - y_min) / (y_max - y_min)) as f32;
-                egui::pos2(pl + fx * pw, pb - fy * ph)
-            })
-            .collect();
-        for w in pts.windows(2) {
-            painter.line_segment([w[0], w[1]], (1.5, legend.color));
-        }
-    }
-
-    let border = if dark {
-        Color32::from_rgb(60, 60, 70)
-    } else {
-        Color32::from_rgb(180, 180, 190)
-    };
-    painter.rect_stroke(
-        egui::Rect::from_min_max(egui::pos2(pl, pt), egui::pos2(pr, pb)),
-        egui::CornerRadius::same(0),
-        (1.0, border),
-        egui::StrokeKind::Middle,
+    let plot_rect = egui::Rect::from_min_size(
+        ui.next_widget_position(),
+        egui::vec2(ui.available_width(), plot_height),
     );
 
-    legend_overlay(ui, state, egui::pos2(pr, pt));
+    Plot::new("chart_plot")
+        .height(plot_height)
+        .show_axes([true, true])
+        .show_grid([true, true])
+        .allow_zoom([true, true])
+        .allow_drag([true, true])
+        .allow_scroll(true)
+        .allow_boxed_zoom(true)
+        .allow_double_click_reset(false)
+        .label_formatter(|_name, value| {
+            format!("x: {:.1}s\ny: {:.2}", value.x, value.y)
+        })
+        .set_margin_fraction(egui::vec2(0.02, 0.05))
+        .show(ui, |plot_ui| {
+            for legend in &state.legends {
+                if !legend.visible || legend.data_history.len() < 2 {
+                    continue;
+                }
+                let pts: Vec<[f64; 2]> = legend
+                    .data_history
+                    .iter()
+                    .map(|&(t, val)| [t, val])
+                    .collect();
+                plot_ui.line(
+                    Line::new(legend.curve_name.clone(), PlotPoints::new(pts))
+                        .color(legend.color)
+                        .width(1.5),
+                );
+            }
+
+            if plot_ui.response().drag_started() {
+                state.auto_scroll = false;
+            }
+            if plot_ui.response().double_clicked() {
+                state.auto_scroll = true;
+            }
+
+            if state.auto_scroll {
+                if let Some((x_min, x_max, y_min, y_max)) = auto_bounds {
+                    plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                        [x_min, y_min],
+                        [x_max, y_max],
+                    ));
+                }
+            }
+        });
+
+    legend_overlay(
+        ui,
+        state,
+        egui::pos2(plot_rect.right() - 5.0, plot_rect.top() + 5.0),
+    );
 }
 
 fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2) {
