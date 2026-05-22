@@ -132,6 +132,8 @@ pub struct DwarfApp {
     pub search_results: HashSet<usize>,
     pub search_path_nodes: HashSet<usize>,
     pub needs_all_reset: bool,
+    pub scroll_target_id: Option<usize>,
+    pub scroll_offset: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +155,8 @@ impl DwarfApp {
             search_results: HashSet::new(),
             search_path_nodes: HashSet::new(),
             needs_all_reset: true,
+            scroll_target_id: None,
+            scroll_offset: None,
         }
     }
 
@@ -212,6 +216,9 @@ impl DwarfApp {
             let all: Vec<usize> = self.search_results.iter().copied().collect();
             self.tree_state.borrow_mut().set_selected(all);
             self.selected_node = self.find_any_node_by_id(first_id);
+            self.scroll_target_id = Some(first_id);
+            // Calculate scroll offset: count visible nodes before first result × estimated row height
+            self.scroll_offset = Some(self.count_visible_before(first_id) as f32 * 24.0);
         }
     }
 
@@ -308,6 +315,41 @@ impl DwarfApp {
             }
         }
         None
+    }
+
+    fn count_visible_before(&self, target_id: usize) -> usize {
+        let mut count: usize = 0;
+        for cu in &self.cus {
+            for var in &cu.variables {
+                // Count CU header
+                if cu.variables.iter().any(|v| self.subtree_has_result(v)) {
+                    count += 1; // CU dir node
+                }
+                if self.count_in_subtree_before(var, target_id, &mut count) {
+                    return count;
+                }
+            }
+        }
+        count
+    }
+
+    fn count_in_subtree_before(&self, node: &TreeNode, target_id: usize, count: &mut usize) -> bool {
+        if node.id == target_id {
+            return true;
+        }
+        *count += 1; // current node row
+        if node.children.is_empty() {
+            return false;
+        }
+        // Only count children if this node is expanded (or will be)
+        if self.search_path_nodes.contains(&node.id) || self.tree_state.borrow().is_open(&node.id).unwrap_or(false) {
+            for child in &node.children {
+                if self.count_in_subtree_before(child, target_id, count) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     pub fn cu_has_result(&self, cu: &CuInfo) -> bool {

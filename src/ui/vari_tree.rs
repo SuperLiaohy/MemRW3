@@ -30,7 +30,14 @@ pub fn vari_tree_ui(ui: &mut Ui, app: &mut DwarfApp) {
         ui.label("No matching results");
     }
 
-    egui::ScrollArea::vertical().id_salt("vari_tree_scroll").show(ui, |ui| {
+    let _scroll_target = app.scroll_target_id.take();
+    let scroll_offset = app.scroll_offset.take();
+
+    let mut scroll_area = egui::ScrollArea::vertical().id_salt("vari_tree_scroll");
+    if let Some(offset) = scroll_offset {
+        scroll_area = scroll_area.vertical_scroll_offset(offset);
+    }
+    scroll_area.show(ui, |ui| {
         show_tree(ui, app);
     });
 }
@@ -94,5 +101,3 @@ fn build_node_recursive(
         builder.close_dir();
     }
 }
-
-

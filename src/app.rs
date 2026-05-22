@@ -203,6 +203,9 @@ impl eframe::App for MemRW3App {
             } else {
                 0.0
             };
+            let dialog_open = self.chart_state.show_line_dialog
+                || self.table_state.show_entry_dialog
+                || self.probe.show_settings;
 
             if remaining > 0.0 {
                 let (dock_rect, _) = ui.allocate_at_least(
@@ -229,6 +232,14 @@ impl eframe::App for MemRW3App {
                     .show_close_buttons(false)
                     .show_leaf_collapse_buttons(false)
                     .show_inside(&mut dock_ui, &mut viewer);
+
+                // Full-dock click interceptor: rendered AFTER DockArea, BEFORE BottomSheet.
+                // egui Z-order: later widgets take input priority → this steals all clicks
+                // from exposed dock tabs (which use ui.interact() that ignores enabled state).
+                // BottomSheet, rendered after this, overrides for its own area.
+                if bs_open || dialog_open {
+                    ui.interact(dock_rect, ui.id().with("dock_blocker"), egui::Sense::click_and_drag());
+                }
             }
 
             if bs_open {
