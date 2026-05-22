@@ -371,6 +371,17 @@ impl eframe::App for MemRW3App {
                                                 self.dwarf_app.parent_array_info(node_id)
                                             {
                                                 config.array_count = Some(count);
+                                                // Read index from node name (may be set by search)
+                                                if node.name.starts_with('[') {
+                                                    if let Ok(parsed) =
+                                                        node.name[1..node.name.len() - 1]
+                                                            .parse::<u64>()
+                                                    {
+                                                        if parsed < count {
+                                                            config.array_index = Some(parsed);
+                                                        }
+                                                    }
+                                                }
                                                 if config.array_index.is_none() {
                                                     config.array_index = Some(0);
                                                 }

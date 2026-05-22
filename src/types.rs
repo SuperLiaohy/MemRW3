@@ -167,30 +167,98 @@ impl DwarfApp {
         self.search_results.clear();
         self.search_path_nodes.clear();
 
-        let query = self.search_text.trim();
+        let query = self.search_text.trim().to_string();
         if query.is_empty() {
             return;
         }
 
-        let levels: Vec<&str> = query.split('.').collect();
-        let total = levels.len();
+        // Expand [idx] notation into separate levels:
+        //   "A[0][0]"  → ["A", "[0]", "[0]"]
+        //   "A.B[1]"   → ["A", "B", "[1]"]
+        let mut expanded: Vec<String> = Vec::new();
+        for part in query.split('.') {
+            if let Some(bracket) = part.find('[') {
+                let base = &part[..bracket];
+                if !base.is_empty() {
+                    expanded.push(base.to_string());
+                }
+                let rest = &part[bracket..];
+                let mut pos = 0;
+                while let Some(rel_start) = rest[pos..].find('[') {
+                    let abs_start = pos + rel_start;
+                    if let Some(rel_end) = rest[abs_start + 1..].find(']') {
+                        let idx_str = &rest[abs_start + 1..abs_start + 1 + rel_end];
+                        expanded.push(format!("[{}]", idx_str));
+                        pos = abs_start + 1 + rel_end + 1;
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                expanded.push(part.to_string());
+            }
+        }
+
+        let total = expanded.len();
+        if total == 0 {
+            return;
+        }
 
         for cu in &self.cus {
             for var in &cu.variables {
                 if total == 1 {
-                    if node_name_matches(&var.name, levels[0]) {
-                        self.search_results.insert(var.id);
+                    if node_name_matches(&var.name, &expanded[0]) {
                         self.search_path_nodes.insert(var.id);
+                        self.search_results.insert(var.id);
                     }
-                } else if node_name_eq(&var.name, levels[0]) {
+                } else if node_name_eq(&var.name, &expanded[0]) {
                     let mut path = vec![var.id];
-                    let results = self.search_level(var, &levels, 1, &mut path);
+                    let results = self.search_level(var, &expanded, 1, &mut path);
                     for full_path in results {
-                        self.search_results.insert(*full_path.last().unwrap());
                         for &id in &full_path {
                             self.search_path_nodes.insert(id);
                         }
+                        self.search_results.insert(*full_path.last().unwrap());
                     }
+                }
+            }
+        }
+
+        // Array index post-processing: walk up array ancestors,
+        // apply indices from the expanded query (inner→outer).
+        let searched_indices: Vec<u64> = expanded
+            .iter()
+            .filter(|s| s.starts_with('['))
+            .filter_map(|s| s[1..s.len() - 1].parse::<u64>().ok())
+            .collect();
+        let mut to_update: Vec<(usize, u64)> = Vec::new();
+        for &result_id in &self.search_results {
+            let mut node_id = result_id;
+            let mut idx_iter = searched_indices.iter().rev();
+            loop {
+                let Some(node) = self.find_node_by_id(node_id) else { break };
+                let Some(parent_id) = node.parent_id else { break };
+                let Some(parent) = self.find_node_by_id(parent_id) else { break };
+                if let BasicType::ArrayElem(_, count) = parent.basic_type {
+                    if let Some(&idx) = idx_iter.next() {
+                        if idx < count {
+                            to_update.push((node_id, idx));
+                        }
+                    }
+                }
+                node_id = parent_id;
+            }
+        }
+        for (node_id, idx) in to_update {
+            let node_size = self.find_node_by_id(node_id).map(|n| n.size as u64).unwrap_or(0);
+            if let Some(tn) = self.find_node_mut(node_id) {
+                tn.name = format!("[{}]", idx);
+                tn.address = node_size * idx;
+            }
+            if let Some(ref mut sel) = self.selected_node {
+                if sel.id == node_id {
+                    sel.name = format!("[{}]", idx);
+                    sel.address = node_size * idx;
                 }
             }
         }
@@ -270,14 +338,33 @@ impl DwarfApp {
     fn search_level(
         &self,
         node: &TreeNode,
-        levels: &[&str],
+        levels: &[String],
         level_idx: usize,
         path: &mut Vec<usize>,
     ) -> Vec<Vec<usize>> {
         let is_last = level_idx == levels.len() - 1;
-        let target = levels[level_idx];
-        let mut results = Vec::new();
+        let target = &levels[level_idx];
 
+        // [idx] level: enter array element child, validate index
+        if target.starts_with('[') {
+            let idx: u64 = target[1..target.len() - 1].parse().unwrap_or(0);
+            if let BasicType::ArrayElem(_, count) = node.basic_type {
+                if idx < count {
+                    if let Some(elem) = node.children.iter().find(|c| c.name.starts_with('[')) {
+                        let mut full_path = path.clone();
+                        full_path.push(elem.id);
+                        if is_last {
+                            return vec![full_path];
+                        } else {
+                            return self.search_level(elem, levels, level_idx + 1, &mut full_path);
+                        }
+                    }
+                }
+            }
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
         for child in &node.children {
             let matches = if is_last {
                 node_name_matches(&child.name, target)
