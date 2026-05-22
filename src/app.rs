@@ -274,11 +274,12 @@ impl eframe::App for MemRW3App {
                             se: 0,
                         })
                         .show(ui, |ui| {
-                            self.session.bottom_sheet_height = bottom_sheet_handle(
+                            let target = bottom_sheet_handle(
                                 ui,
                                 &mut self.session.bottom_sheet_drag,
                                 self.session.bottom_sheet_height,
                             );
+                            self.session.bottom_sheet_height = target.clamp(min_h, max_h);
                             egui::Frame::NONE
                                 .inner_margin(egui::Margin::symmetric(10, 6))
                                 .show(ui, |ui| {
