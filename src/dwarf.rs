@@ -231,7 +231,7 @@ pub fn build_variable_node(
     }
     if let Some(elem) = type_ref.element_type.as_deref() {
         let mut elem_child =
-            build_variable_node(dwarf, unit, "[]", elem, 0, type_defs, next_id)?;
+            build_variable_node(dwarf, unit, "[0]", elem, 0, type_defs, next_id)?;
         elem_child.parent_id = Some(my_id);
         let elem_size_u64 = elem.size.unwrap_or(0);
         let total = type_ref.size.unwrap_or(0);
@@ -314,7 +314,7 @@ pub fn build_field_node(
     }
     if let Some(elem) = field.type_ref.element_type.as_deref() {
         let mut elem_child =
-            build_variable_node(dwarf, unit, "[]", elem, 0, type_defs, next_id)?;
+            build_variable_node(dwarf, unit, "[0]", elem, 0, type_defs, next_id)?;
         elem_child.parent_id = Some(my_id);
         let elem_size_u64 = elem.size.unwrap_or(0);
         let total = field.type_ref.size.unwrap_or(0);

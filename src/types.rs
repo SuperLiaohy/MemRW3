@@ -235,6 +235,27 @@ impl DwarfApp {
         None
     }
 
+    pub fn find_node_mut(&mut self, id: usize) -> Option<&mut TreeNode> {
+        for cu in &mut self.cus {
+            if let Some(node) = Self::find_in_subtree_mut(&mut cu.variables, id) {
+                return Some(node);
+            }
+        }
+        None
+    }
+
+    fn find_in_subtree_mut(nodes: &mut [TreeNode], id: usize) -> Option<&mut TreeNode> {
+        for node in nodes.iter_mut() {
+            if node.id == id {
+                return Some(node);
+            }
+            if let Some(found) = Self::find_in_subtree_mut(&mut node.children, id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
     pub fn parent_array_info(&self, node_id: usize) -> Option<(u64, u64)> {
         let target = self.find_node_by_id(node_id)?;
         let parent_id = target.parent_id?;

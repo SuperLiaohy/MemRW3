@@ -341,52 +341,75 @@ impl eframe::App for MemRW3App {
                                                 .max_rect(right_rect)
                                                 .layout(egui::Layout::top_down(egui::Align::Min)),
                                         );
-                                        if let Some(ref node) = self.dwarf_app.selected_node {
+                                        let selected = self.dwarf_app.selected_node.clone();
+                                        if let Some(ref node) = selected {
                                             let pool = &mut self.session.pool;
                                             let already_added = pool.contains(node.id);
-                                            let extend_name =
-                                                self.dwarf_app.compute_extend_name(node.id);
-                                            let extend_addr = self
-                                                .dwarf_app
-                                                .compute_extend_address(node.id)
-                                                .unwrap_or(node.address);
-                                            let default_type = crate::types::basic_type_to_extend(
-                                                &node.basic_type,
-                                            );
+                                            let node_id = node.id;
+                                            let node_size = node.size;
+                                            let node_basic_type = node.basic_type.clone();
+                                            let default_type =
+                                                crate::types::basic_type_to_extend(&node_basic_type);
 
-                                            // Get or create ExtendConfig for this node
+                                            // Get or create ExtendConfig
                                             let config = self
                                                 .session
                                                 .extend_configs
-                                                .entry(node.id)
+                                                .entry(node_id)
                                                 .or_insert_with(|| crate::types::ExtendConfig {
-                                                    name: extend_name.clone(),
-                                                    address: extend_addr,
-                                                    ext_type: default_type.clone(),
-                                                    size: node.size,
+                                                    name: String::new(),
+                                                    address: 0,
+                                                    ext_type: default_type,
+                                                    size: node_size,
                                                     array_index: None,
                                                     array_count: None,
                                                 });
 
-                                            // Array element: set up index/name/address
+                                            // Array element: sync tree + selected_node so
+                                            // compute_extend_name/address naturally produce [index].
                                             if let Some((count, elem_size)) =
-                                                self.dwarf_app.parent_array_info(node.id)
+                                                self.dwarf_app.parent_array_info(node_id)
                                             {
                                                 config.array_count = Some(count);
                                                 if config.array_index.is_none() {
                                                     config.array_index = Some(0);
                                                 }
                                                 let idx = config.array_index.unwrap_or(0);
-                                                let parent_id = node.parent_id.unwrap();
-                                                let parent_name =
-                                                    self.dwarf_app.compute_extend_name(parent_id);
-                                                let parent_addr = self
+                                                let new_name = format!("[{}]", idx);
+                                                let new_addr = elem_size * idx;
+
+                                                if let Some(tree_node) =
+                                                    self.dwarf_app.find_node_mut(node_id)
+                                                {
+                                                    tree_node.name = new_name.clone();
+                                                    tree_node.address = new_addr;
+                                                }
+                                                self.dwarf_app
+                                                    .selected_node
+                                                    .as_mut()
+                                                    .map(|sel| {
+                                                        sel.name = new_name;
+                                                        sel.address = new_addr;
+                                                    });
+
+                                                config.name = self
                                                     .dwarf_app
-                                                    .compute_extend_address(parent_id)
+                                                    .compute_extend_name(node_id);
+                                                config.address = self
+                                                    .dwarf_app
+                                                    .compute_extend_address(node_id)
                                                     .unwrap_or(0);
-                                                config.name =
-                                                    format!("{}[{}]", parent_name, idx);
-                                                config.address = parent_addr + elem_size * idx;
+                                            } else {
+                                                // Non-array: ensure name/address are set on first access
+                                                if config.name.is_empty() {
+                                                    config.name = self
+                                                        .dwarf_app
+                                                        .compute_extend_name(node_id);
+                                                    config.address = self
+                                                        .dwarf_app
+                                                        .compute_extend_address(node_id)
+                                                        .unwrap_or(0);
+                                                }
                                             }
 
                                             // Color persistence via egui memory
