@@ -77,34 +77,41 @@ src/
 ```
 TreeNode {
     // ── Basic (DWARF 原始属性, 只读) ──
-    id: usize, name: String, struct_name: Option<String>,
+    id: usize, parent_id: Option<usize>,
+    name: String, struct_name: Option<String>,
     type_name: String, basic_type: BasicType,
-    address: u64,                              // top-level: DWARF绝对地址; field: DWARF offset
+    address: u64,                              // top-level: DWARF绝对地址; field: DWARF offset; array elem: size*index
     size: u32, children: Vec<TreeNode>,
 }
 ```
 
+- `parent_id`：指向父节点，用于数组元素的 `parent_array_info()` 向上查找
 - `address` 的语义：
   - 顶层变量：存储 DWARF 绝对地址（相当于根 base）
   - 结构体成员/嵌套字段：存储 DWARF `data_member_location` 的**原始 offset**
+  - 数组元素 `[]`：存储 `elem_size * index`，表示数组内偏移
 - extend 不存储在 TreeNode 中，改为通过 `DwarfApp` 的遍历方法动态计算
-- `compute_extend_name()`: 从根开始逐级拼接变量名得到完整路径，如 `my_struct.status.flags`
-- `compute_extend_address()`: 从根开始逐级累加 offset 得到实际绝对地址（类似 address 链式相加）
+- `compute_extend_name()`: 从根开始逐级拼接变量名得到完整路径，如 `my_struct.arr[2]`
+- `compute_extend_address()`: 从根开始逐级累加 offset 得到实际绝对地址
+- `find_path_to_node()`: 子节点名以 `[` 开头时不加 `.` 号，直接拼接为 `arr[2]` 格式
 
 ### ExtendConfig (用户可编辑的 Extend 数据)
 
 ```rust
 pub struct ExtendConfig {
-    pub name: String,          // 初始由 compute_extend_name() 计算，用户不可手动编辑
-    pub address: u64,          // 初始由 compute_extend_address() 计算，用户可编辑
-    pub ext_type: ExtendType,  // 初始由 basic_type_to_extend() 推导，用户可编辑
-    pub size: u32,             // 初始 = node.size，随 ext_type 自动绑定，不可手动编辑
+    pub name: String,               // 初始由 compute_extend_name() 计算，用户不可手动编辑
+    pub address: u64,               // 初始由 compute_extend_address() 计算，用户可编辑
+    pub ext_type: ExtendType,       // 初始由 basic_type_to_extend() 推导，用户可编辑
+    pub size: u32,                  // 初始 = node.size，随 ext_type 自动绑定，不可手动编辑
+    pub array_index: Option<u64>,   // 数组元素当前索引 (None=非数组元素)
+    pub array_count: Option<u64>,   // 数组元素总长度
 }
 ```
 
 - 存储在 `AppSession.extend_configs: HashMap<usize, ExtendConfig>`，按 node_id 索引
 - `vari_properties_ui()` 通过 `&mut ExtendConfig` 读写
-- 首次选择节点时惰性初始化（line 212 in app.rs）
+- 首次选择节点时惰性初始化
+- 数组元素时 index 从 `selected_node.name` 解析同步（含搜索后更新）
 - "添加到 Chart/Table" 时，ExtendConfig 被消耗并存入 `VariablePool.add(config)`
 
 ### PooledVariable (池中仅存 extend 数据)
@@ -135,6 +142,7 @@ pub struct PooledVariable {
 | Pointer → U64 | — |
 | Struct(String) → Other | Other |
 | Other(String) → Other | — |
+| ArrayElem(Box\<BasicType\>, u64) → Other | — |
 
 **关键规则**: `extend_type = Other` 的变量**不可添加到 Chart 或 Table**。
 
@@ -192,18 +200,22 @@ Dock Tab 中点击 "📋 打开变量树" → BottomSheet 覆盖显示
 BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭] 按钮退出)
   ├─ 顶部: ELF 文件路径输入框 + [加载] 按钮 + 错误提示
 
-  ├─ 左面板: vari_tree_ui()
-  │   ├─ 搜索栏: 输入变量名 → 模糊匹配 → 高亮 + 自动展开查找路径
-  │   ├─ 搜索后自动滚动到第一个结果 (scroll_offset via count_visible_before)
-  │   ├─ All/Search 模式切换 (切回 All 时自动全部折叠)
-  │   └─ egui_ltreeview::TreeView (NodeBuilder::default_open(false)):
-  │       DWARF 编译单元 → 变量 → 结构体成员 (递归, 默认折叠)
+   ├─ 左面板: vari_tree_ui()
+   │   ├─ 搜索栏: 输入变量名 → 层级递进匹配 → 高亮 + 自动展开查找路径
+   │   │   └─ 搜索规则: "." 分割层级, 非末层精确匹配(忽略大小写), 末层模糊匹配
+   │   │   └─ 数组搜索: `A[2]` / `A[0][0]` 自动展开为独立层级, 匹配时校验 index 范围
+   │   ├─ 搜索后自动居中滚动到第一个结果 (scroll_target_id + viewport_h 居中计算)
+   │   ├─ All/Search 模式切换 (切回 All 时自动全部折叠)
+   │   └─ egui_ltreeview::TreeView (NodeBuilder::default_open(false)):
+   │       DWARF 编译单元 → 变量 → 结构体成员 → 数组元素 `[]` (递归, 默认折叠)
+   │       └─ 多维数组: `float[7][7]` 逐层展开为 A→[i]→[j], 每层独立节点
 
-  └─ 右面板: vari_properties_ui(config: &mut ExtendConfig) — 三段竖直布局
-       ├─ Basic (只读): Name / Address(offset) / Size / Type (DWARF 原始值)
-       ├─ Extend (可编辑): Name(只读label) / Address(hex TextEdit) /
-       │   Size(只读label, 随Type自动绑定) / Type(ComboBox: u8~u64, i8~i64, float, double, other)
-       └─ Add:
+   └─ 右面板: vari_properties_ui(config: &mut ExtendConfig) — 三段竖直布局
+        ├─ Basic (只读): Name / Index(仅数组元素, DragValue可编辑) / Address(offset) / Size / Type
+        │   └─ 数组元素: Name=`[index]`, Address=`size*index`, 树节点名同步更新
+        ├─ Extend (可编辑): Name(只读label) / Address(hex TextEdit) /
+        │   Size(只读label, 随Type自动绑定) / Type(ComboBox: u8~u64, i8~i64, float, double, other)
+        └─ Add:
            ├─ type ≠ other → 显示添加配置 → "添加到 Chart/Table"
            │   ├─ 曲线名(TextEdit) + 颜色(自定义拾色器 + 预设色块) → 添加到 Chart
            │   └─ 显示名(TextEdit) → 添加到 Table
@@ -366,9 +378,10 @@ anyhow = "1.0"            # 错误处理
    - Size 字段在 Extend 段仅显示，不是 TextEdit
 
 4. **extend_name 由顶级变量拼接，extend_address 链式相加**
-   - `compute_extend_name()`: 从根开始逐级拼接，如 `my_struct.field1.subfield`
-   - `compute_extend_address()`: 根绝对地址 + 所有路径节点的 offset 累加
-   - 两者默认不可编辑
+    - `compute_extend_name()`: 从根开始逐级拼接，如 `my_struct.arr[2]`
+    - `compute_extend_address()`: 根绝对地址 + 所有路径节点的 offset 累加
+    - `find_path_to_node()`: 子节点名以 `[` 开头时不加 `.` 号，如 `arr[2]` 而非 `arr.[2]`
+    - 两者默认不可编辑
 
 5. **PooledVariable 仅存 extend 数据**
    - 不再包含 `TreeNode` 克隆，只存 `name/address/ext_type/size/current_value`
@@ -394,6 +407,23 @@ anyhow = "1.0"            # 错误处理
 
 11. **probe-rs 采集在主线程**: 每帧节流读取, `request_repaint()` 保持 UI 刷新, 无需额外线程
 
-12. **Tree View 默认折叠, 搜索自动滚动**: 使用 `NodeBuilder::default_open(false)` 初始化所有树节点为折叠状态; 搜索后通过 `count_visible_before()` 预估结果位置, 使用 `ScrollArea::vertical_scroll_offset()` 自动滚动到第一个匹配项
+12. **Tree View 默认折叠, 搜索居中滚动 + 点击滚动**: 使用 `NodeBuilder::default_open(false)` 初始化所有树节点为折叠状态; 搜索后通过 `count_nodes_before()` (基于 `tree_state` 展开状态) 计算可见节点数, 使用 `viewport_h` 居中偏移公式 `ScrollArea::vertical_scroll_offset()` 居中显示; 点击节点也设 `scroll_target_id` 实现滚到居中。
 
 13. **ELF 文件延迟加载**: 不通过命令行参数加载, App 启动为空, 用户在 BottomSheet 顶部输入路径并点击"加载"触发 `load_elf()`
+
+14. **数组支持 (ArrayElem)**:
+    - DWARF 数组类型逐层构建嵌套 `TypeRef` 链: `float[7][7]` → TypeRef(name="float[7][7]") → TypeRef(name="float[7]") → TypeRef(name="float")
+    - 树中每层为独立 `[]` 节点，`parent_id` 指向数组节点，`name` 默认 `[0]`
+    - `BasicType::ArrayElem(Box<BasicType>, u64)` 存元素类型和数组长度
+    - `basic_type_to_extend(ArrayElem)` → `ExtendType::Other`（不递归穿透多层）
+    - Basic 栏显示 `[index]` + 可编辑 DragValue；Extend name/address 由 `compute_extend_name/address` 自然拼接 `A[2]`
+
+15. **搜索层级递进匹配**:
+    - `.` 分割层级，非末层用 `eq_ignore_ascii_case` 精确匹配，末层用 `contains` 模糊匹配
+    - 匹配失败时**不再跳过当前层级深入搜索**，直接终止该分支
+    - `[idx]` 记号自动展开为独立层级，匹配时校验 index 是否在 `[0, count)` 范围内
+    - 搜索成功后更新树节点 name/address 并同步 `config.array_index`
+
+16. **BottomSheet 拖拽**: 改用初始点 + 屏幕坐标相对位移替代 `drag_delta()` 逐帧累加，消除坐标漂移。写入前 `clamp(min_h, max_h)` 确保无越界帧。
+
+17. **搜索居中滚动**: `scroll_target_id` 驱动，`count_nodes_before()` 基于 `tree_state` 计算可见节点数，`viewport_h` 居中偏移公式 `(count*24 - viewport_h/2 + 12).max(0)` 统一搜索和点击滚动。
