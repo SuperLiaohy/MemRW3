@@ -30,11 +30,17 @@ pub fn vari_tree_ui(ui: &mut Ui, app: &mut DwarfApp) {
         ui.label("No matching results");
     }
 
-    let _scroll_target = app.scroll_target_id.take();
-    let scroll_offset = app.scroll_offset.take();
+    let scroll_target = app.scroll_target_id.take();
+    let viewport_h = ui.available_height();
+
+    let final_offset = scroll_target.map(|target_id| {
+        let row_h = 24.0;
+        let count_before = app.count_nodes_before(target_id);
+        ((count_before as f32 * row_h) - viewport_h / 2.0 + row_h / 2.0).max(0.0)
+    });
 
     let mut scroll_area = egui::ScrollArea::vertical().id_salt("vari_tree_scroll");
-    if let Some(offset) = scroll_offset {
+    if let Some(offset) = final_offset {
         scroll_area = scroll_area.vertical_scroll_offset(offset);
     }
     scroll_area.show(ui, |ui| {
@@ -72,6 +78,9 @@ fn show_tree(ui: &mut Ui, app: &mut DwarfApp) {
     for action in actions {
         if let Action::SetSelected(ids) = action {
             app.selected_node = ids.first().and_then(|id| app.find_node_by_id(*id));
+            if let Some(&id) = ids.first() {
+                app.scroll_target_id = Some(id);
+            }
         }
     }
 }
