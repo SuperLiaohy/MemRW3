@@ -168,32 +168,21 @@ impl DwarfApp {
         }
 
         let levels: Vec<&str> = query.split('.').collect();
+        let total = levels.len();
 
         for cu in &self.cus {
             for var in &cu.variables {
-                let level0 = &levels[0];
-                if !node_name_matches(&var.name, level0) {
-                    let results = self.search_in_tree(var, &levels, 0, &mut Vec::new());
-                    for path in results {
-                        self.search_results
-                            .insert(path.last().copied().unwrap_or(var.id));
-                        for &id in &path {
-                            self.search_path_nodes.insert(id);
-                        }
+                if total == 1 {
+                    if node_name_matches(&var.name, levels[0]) {
+                        self.search_results.insert(var.id);
+                        self.search_path_nodes.insert(var.id);
                     }
-                    continue;
-                }
-
-                if levels.len() == 1 {
-                    self.search_results.insert(var.id);
-                    self.search_path_nodes.insert(var.id);
-                } else {
-                    let results =
-                        self.search_in_tree(var, &levels, 1, &mut vec![var.id]);
-                    for path in results {
-                        self.search_results
-                            .insert(path.last().copied().unwrap_or(var.id));
-                        for &id in &path {
+                } else if node_name_eq(&var.name, levels[0]) {
+                    let mut path = vec![var.id];
+                    let results = self.search_level(var, &levels, 1, &mut path);
+                    for full_path in results {
+                        self.search_results.insert(*full_path.last().unwrap());
+                        for &id in &full_path {
                             self.search_path_nodes.insert(id);
                         }
                     }
@@ -241,42 +230,38 @@ impl DwarfApp {
         None
     }
 
-    fn search_in_tree(
+    fn search_level(
         &self,
         node: &TreeNode,
         levels: &[&str],
         level_idx: usize,
         path: &mut Vec<usize>,
     ) -> Vec<Vec<usize>> {
-        path.push(node.id);
+        let is_last = level_idx == levels.len() - 1;
+        let target = levels[level_idx];
         let mut results = Vec::new();
 
-        if level_idx >= levels.len() {
-            results.push(path.clone());
-            path.pop();
-            return results;
-        }
-
-        let target = levels[level_idx];
         for child in &node.children {
-            if node_name_matches(&child.name, target) {
-                if level_idx + 1 == levels.len() {
+            let matches = if is_last {
+                node_name_matches(&child.name, target)
+            } else {
+                node_name_eq(&child.name, target)
+            };
+
+            if matches {
+                if is_last {
                     let mut full_path = path.clone();
                     full_path.push(child.id);
                     results.push(full_path);
                 } else {
-                    let child_results =
-                        self.search_in_tree(child, levels, level_idx + 1, &mut path.clone());
+                    let mut child_path = path.clone();
+                    child_path.push(child.id);
+                    let child_results = self.search_level(child, levels, level_idx + 1, &mut child_path);
                     results.extend(child_results);
                 }
-            } else {
-                let child_results =
-                    self.search_in_tree(child, levels, level_idx, &mut path.clone());
-                results.extend(child_results);
             }
         }
 
-        path.pop();
         results
     }
 
@@ -368,6 +353,10 @@ impl DwarfApp {
 
 pub fn node_name_matches(name: &str, query: &str) -> bool {
     name.to_lowercase().contains(&query.to_lowercase())
+}
+
+fn node_name_eq(name: &str, query: &str) -> bool {
+    name.eq_ignore_ascii_case(query)
 }
 
 fn find_path_to_node(node: &TreeNode, target_id: usize, current_path: &str) -> Option<String> {
