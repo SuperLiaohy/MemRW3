@@ -230,58 +230,18 @@ pub fn build_variable_node(
         }
     }
     if let Some(elem) = type_ref.element_type.as_deref() {
-        let elem_type_name = elem
-            .name
-            .clone()
-            .unwrap_or_else(|| "<unnamed>".to_string());
-        let elem_size = elem.size.unwrap_or(0) as u32;
-        let elem_struct_name = matches!(
-            elem.kind,
-            TypeKind::Struct | TypeKind::Union | TypeKind::Class
-        )
-        .then(|| elem_type_name.clone());
-        let elem_basic_type =
-            type_name_to_basic_type(&elem_type_name, elem.size.unwrap_or(0), elem.kind);
-
-        let mut elem_children = Vec::new();
-        if matches!(
-            elem.kind,
-            TypeKind::Struct | TypeKind::Union | TypeKind::Class
-        ) {
-            let fields = struct_fields(dwarf, elem, &type_defs)?;
-            let mut visited = BTreeSet::new();
-            let key = (elem.unit_header_offset, elem.unit_offset);
-            visited.insert(key);
-            for field in fields {
-                elem_children.push(build_field_node(
-                    dwarf,
-                    unit,
-                    &field,
-                    0,
-                    &mut visited,
-                    &type_defs,
-                    next_id,
-                )?);
-            }
-        }
-        *next_id += 1;
-        let elem_child_id = *next_id;
-        children.push(TreeNode {
-            id: elem_child_id,
-            parent_id: Some(my_id),
-            name: "[]".to_string(),
-            struct_name: elem_struct_name,
-            type_name: elem_type_name.clone(),
-            basic_type: elem_basic_type.clone(),
-            address: 0,
-            size: elem_size,
-            children: elem_children,
-        });
-        let total = type_ref.size.unwrap_or(0);
+        let mut elem_child =
+            build_variable_node(dwarf, unit, "[]", elem, 0, type_defs, next_id)?;
+        elem_child.parent_id = Some(my_id);
         let elem_size_u64 = elem.size.unwrap_or(0);
+        let total = type_ref.size.unwrap_or(0);
         if elem_size_u64 > 0 && total > 0 {
-            basic_type = BasicType::Array(Box::new(elem_basic_type), total / elem_size_u64);
+            basic_type = BasicType::ArrayElem(
+                Box::new(elem_child.basic_type.clone()),
+                total / elem_size_u64,
+            );
         }
+        children.push(elem_child);
     }
 
     Ok(TreeNode {
@@ -353,59 +313,18 @@ pub fn build_field_node(
         }
     }
     if let Some(elem) = field.type_ref.element_type.as_deref() {
-        let elem_type_name = elem
-            .name
-            .clone()
-            .unwrap_or_else(|| "<unnamed>".to_string());
-        let elem_size = elem.size.unwrap_or(0) as u32;
-        let elem_struct_name = matches!(
-            elem.kind,
-            TypeKind::Struct | TypeKind::Union | TypeKind::Class
-        )
-        .then(|| elem_type_name.clone());
-        let elem_basic_type =
-            type_name_to_basic_type(&elem_type_name, elem.size.unwrap_or(0), elem.kind);
-
-        let mut elem_children = Vec::new();
-        if matches!(
-            elem.kind,
-            TypeKind::Struct | TypeKind::Union | TypeKind::Class
-        ) {
-            let key = (elem.unit_header_offset, elem.unit_offset);
-            if !visited.contains(&key) {
-                visited.insert(key);
-                let nested_fields = struct_fields(dwarf, elem, type_defs)?;
-                for nested in nested_fields {
-                    elem_children.push(build_field_node(
-                        dwarf,
-                        unit,
-                        &nested,
-                        0,
-                        visited,
-                        type_defs,
-                        next_id,
-                    )?);
-                }
-            }
-        }
-        *next_id += 1;
-        let elem_child_id = *next_id;
-        children.push(TreeNode {
-            id: elem_child_id,
-            parent_id: Some(my_id),
-            name: "[]".to_string(),
-            struct_name: elem_struct_name,
-            type_name: elem_type_name.clone(),
-            basic_type: elem_basic_type.clone(),
-            address: 0,
-            size: elem_size,
-            children: elem_children,
-        });
-        let total = field.type_ref.size.unwrap_or(0);
+        let mut elem_child =
+            build_variable_node(dwarf, unit, "[]", elem, 0, type_defs, next_id)?;
+        elem_child.parent_id = Some(my_id);
         let elem_size_u64 = elem.size.unwrap_or(0);
+        let total = field.type_ref.size.unwrap_or(0);
         if elem_size_u64 > 0 && total > 0 {
-            basic_type = BasicType::Array(Box::new(elem_basic_type), total / elem_size_u64);
+            basic_type = BasicType::ArrayElem(
+                Box::new(elem_child.basic_type.clone()),
+                total / elem_size_u64,
+            );
         }
+        children.push(elem_child);
     }
 
     Ok(TreeNode {
@@ -651,24 +570,47 @@ pub fn resolve_type_impl(
                 }
             }
 
-            let array_name = if dims.is_empty() {
-                format!("{}[]", elem_name)
+            // Build nested TypeRefs for multi-dimensional arrays.
+            // dims are ordered outer→inner; we wrap from inner→outer.
+            let array_type = if let Some(inner) = element_type_ref {
+                let mut current = inner;
+                for &count in dims.iter().rev() {
+                    let elem_name = current
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "<unnamed>".to_string());
+                    let elem_size = current.size.unwrap_or(0);
+                    current = TypeRef {
+                        name: Some(format!("{}[{}]", elem_name, count)),
+                        size: Some(elem_size * count),
+                        kind: TypeKind::Other,
+                        unit_offset: offset,
+                        unit_header_offset,
+                        element_type: Some(Box::new(current)),
+                    };
+                }
+                current
             } else {
-                let dims_str = dims
-                    .iter()
-                    .map(|d| d.to_string())
-                    .collect::<Vec<_>>()
-                    .join("][");
-                format!("{}[{}]", elem_name, dims_str)
+                let array_name = if dims.is_empty() {
+                    format!("{}[]", elem_name)
+                } else {
+                    let dims_str = dims
+                        .iter()
+                        .map(|d| d.to_string())
+                        .collect::<Vec<_>>()
+                        .join("][");
+                    format!("{}[{}]", elem_name, dims_str)
+                };
+                TypeRef {
+                    name: Some(array_name),
+                    size: Some(total_size),
+                    kind: TypeKind::Other,
+                    unit_offset: offset,
+                    unit_header_offset,
+                    element_type: None,
+                }
             };
-            Ok(TypeRef {
-                name: Some(array_name),
-                size: Some(total_size),
-                kind: TypeKind::Other,
-                unit_offset: offset,
-                unit_header_offset,
-                element_type: element_type_ref.map(Box::new),
-            })
+            Ok(array_type)
         }
 
         // Struct / union / class: read name, size, kind. Use outer typedef name if inner is unnamed.

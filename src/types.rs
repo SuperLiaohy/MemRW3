@@ -49,7 +49,7 @@ pub enum BasicType {
     Pointer,
     Struct(String),
     Other(String),
-    Array(Box<BasicType>, u64),
+    ArrayElem(Box<BasicType>, u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,7 +97,7 @@ pub fn basic_type_to_extend(bt: &BasicType) -> ExtendType {
         BasicType::Pointer => ExtendType::U64,
         BasicType::Struct(_) => ExtendType::Other,
         BasicType::Other(_) => ExtendType::Other,
-        BasicType::Array(elem, _) => basic_type_to_extend(elem),
+        BasicType::ArrayElem(_, _) => ExtendType::Other,
     }
 }
 
@@ -239,7 +239,7 @@ impl DwarfApp {
         let target = self.find_node_by_id(node_id)?;
         let parent_id = target.parent_id?;
         let parent = self.find_node_by_id(parent_id)?;
-        if let BasicType::Array(_, count) = parent.basic_type {
+        if let BasicType::ArrayElem(_, count) = parent.basic_type {
             Some((count, target.size as u64))
         } else {
             None
