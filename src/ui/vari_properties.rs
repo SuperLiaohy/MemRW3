@@ -1,5 +1,5 @@
-use eframe::egui::{self, RichText, Ui, ComboBox, TextEdit};
-use crate::types::{TreeNode, ExtendConfig, ExtendType, extend_type_label};
+use crate::types::{ExtendConfig, ExtendType, TreeNode, extend_type_label};
+use eframe::egui::{self, ComboBox, RichText, TextEdit, Ui};
 
 pub fn vari_properties_ui(
     ui: &mut Ui,
@@ -44,13 +44,16 @@ pub fn vari_properties_ui(
 
             ui.horizontal(|ui| {
                 ui.label("Name:");
-                ui.add(TextEdit::singleline(&mut config.name).desired_width(160.0));
+                ui.label(&config.name);
             });
 
             ui.horizontal(|ui| {
                 ui.label("Address:");
                 let mut addr_hex = format!("0x{:X}", config.address);
-                if ui.add(TextEdit::singleline(&mut addr_hex).desired_width(160.0)).changed() {
+                if ui
+                    .add(TextEdit::singleline(&mut addr_hex).desired_width(160.0))
+                    .changed()
+                {
                     let cleaned = addr_hex.trim_start_matches("0x").trim_start_matches("0X");
                     if let Ok(parsed) = u64::from_str_radix(cleaned, 16) {
                         config.address = parsed;
