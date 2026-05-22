@@ -19,13 +19,44 @@ pub fn vari_properties_ui(
             // ── BASIC section (read-only, shows DWARF raw offset) ──
             ui.label(RichText::new("Basic").strong().size(13.0));
             ui.separator();
+            let is_array_elem = config.array_index.is_some();
+            let array_basic_name;
+            let display_name: &str = if let Some(idx) = config.array_index {
+                array_basic_name = format!("[{}]", idx);
+                &array_basic_name
+            } else {
+                &node.name
+            };
+            let display_addr = if is_array_elem {
+                config.array_index.unwrap_or(0) * node.size as u64
+            } else {
+                node.address
+            };
             ui.horizontal(|ui| {
                 ui.label("Name:");
-                ui.label(&node.name);
+                ui.label(display_name);
             });
+            if let (Some(idx), Some(count)) = (config.array_index, config.array_count) {
+                let mut i = idx;
+                ui.horizontal(|ui| {
+                    ui.label("Index:");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut i)
+                                .range(0..=(count.saturating_sub(1)))
+                                .speed(1)
+                                .prefix("[")
+                                .suffix("]"),
+                        )
+                        .changed()
+                    {
+                        config.array_index = Some(i);
+                    }
+                });
+            }
             ui.horizontal(|ui| {
                 ui.label("Address (offset):");
-                ui.label(format!("0x{:X}", node.address));
+                ui.label(format!("0x{:X}", display_addr));
             });
             ui.horizontal(|ui| {
                 ui.label("Size:");

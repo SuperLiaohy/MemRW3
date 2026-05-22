@@ -364,7 +364,30 @@ impl eframe::App for MemRW3App {
                                                     address: extend_addr,
                                                     ext_type: default_type.clone(),
                                                     size: node.size,
+                                                    array_index: None,
+                                                    array_count: None,
                                                 });
+
+                                            // Array element: set up index/name/address
+                                            if let Some((count, elem_size)) =
+                                                self.dwarf_app.parent_array_info(node.id)
+                                            {
+                                                config.array_count = Some(count);
+                                                if config.array_index.is_none() {
+                                                    config.array_index = Some(0);
+                                                }
+                                                let idx = config.array_index.unwrap_or(0);
+                                                let parent_id = node.parent_id.unwrap();
+                                                let parent_name =
+                                                    self.dwarf_app.compute_extend_name(parent_id);
+                                                let parent_addr = self
+                                                    .dwarf_app
+                                                    .compute_extend_address(parent_id)
+                                                    .unwrap_or(0);
+                                                config.name =
+                                                    format!("{}[{}]", parent_name, idx);
+                                                config.address = parent_addr + elem_size * idx;
+                                            }
 
                                             // Color persistence via egui memory
                                             let color_id = ui.make_persistent_id(format!(

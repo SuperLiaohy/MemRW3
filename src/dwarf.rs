@@ -206,7 +206,7 @@ pub fn build_variable_node(
         TypeKind::Struct | TypeKind::Union | TypeKind::Class
     )
     .then(|| type_name.clone());
-    let basic_type = type_name_to_basic_type(&type_name, type_ref.size.unwrap_or(0), type_ref.kind);
+    let mut basic_type = type_name_to_basic_type(&type_name, type_ref.size.unwrap_or(0), type_ref.kind);
 
     let mut children = Vec::new();
     if matches!(
@@ -268,18 +268,25 @@ pub fn build_variable_node(
         let elem_child_id = *next_id;
         children.push(TreeNode {
             id: elem_child_id,
-            name: format!("element_type: {}", elem_type_name),
+            parent_id: Some(my_id),
+            name: "[]".to_string(),
             struct_name: elem_struct_name,
-            type_name: elem_type_name,
-            basic_type: elem_basic_type,
+            type_name: elem_type_name.clone(),
+            basic_type: elem_basic_type.clone(),
             address: 0,
             size: elem_size,
             children: elem_children,
         });
+        let total = type_ref.size.unwrap_or(0);
+        let elem_size_u64 = elem.size.unwrap_or(0);
+        if elem_size_u64 > 0 && total > 0 {
+            basic_type = BasicType::Array(Box::new(elem_basic_type), total / elem_size_u64);
+        }
     }
 
     Ok(TreeNode {
         id: my_id,
+        parent_id: None,
         name: variable_name.to_string(),
         struct_name,
         type_name,
@@ -317,7 +324,7 @@ pub fn build_field_node(
         TypeKind::Struct | TypeKind::Union | TypeKind::Class
     )
     .then(|| type_name.clone());
-    let basic_type =
+    let mut basic_type =
         type_name_to_basic_type(&type_name, field.type_ref.size.unwrap_or(0), field.type_ref.kind);
 
     let mut children = Vec::new();
@@ -385,18 +392,25 @@ pub fn build_field_node(
         let elem_child_id = *next_id;
         children.push(TreeNode {
             id: elem_child_id,
-            name: format!("element_type: {}", elem_type_name),
+            parent_id: Some(my_id),
+            name: "[]".to_string(),
             struct_name: elem_struct_name,
-            type_name: elem_type_name,
-            basic_type: elem_basic_type,
+            type_name: elem_type_name.clone(),
+            basic_type: elem_basic_type.clone(),
             address: 0,
             size: elem_size,
             children: elem_children,
         });
+        let total = field.type_ref.size.unwrap_or(0);
+        let elem_size_u64 = elem.size.unwrap_or(0);
+        if elem_size_u64 > 0 && total > 0 {
+            basic_type = BasicType::Array(Box::new(elem_basic_type), total / elem_size_u64);
+        }
     }
 
     Ok(TreeNode {
         id: my_id,
+        parent_id: None,
         name,
         struct_name,
         type_name,

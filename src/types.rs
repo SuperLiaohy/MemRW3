@@ -49,6 +49,7 @@ pub enum BasicType {
     Pointer,
     Struct(String),
     Other(String),
+    Array(Box<BasicType>, u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +70,7 @@ pub enum ExtendType {
 #[derive(Clone)]
 pub struct TreeNode {
     pub id: usize,
+    pub parent_id: Option<usize>,
     pub name: String,
     pub struct_name: Option<String>,
     pub type_name: String,
@@ -95,6 +97,7 @@ pub fn basic_type_to_extend(bt: &BasicType) -> ExtendType {
         BasicType::Pointer => ExtendType::U64,
         BasicType::Struct(_) => ExtendType::Other,
         BasicType::Other(_) => ExtendType::Other,
+        BasicType::Array(elem, _) => basic_type_to_extend(elem),
     }
 }
 
@@ -141,6 +144,8 @@ pub struct ExtendConfig {
     pub address: u64,
     pub ext_type: ExtendType,
     pub size: u32,
+    pub array_index: Option<u64>,
+    pub array_count: Option<u64>,
 }
 
 impl DwarfApp {
@@ -228,6 +233,17 @@ impl DwarfApp {
             }
         }
         None
+    }
+
+    pub fn parent_array_info(&self, node_id: usize) -> Option<(u64, u64)> {
+        let target = self.find_node_by_id(node_id)?;
+        let parent_id = target.parent_id?;
+        let parent = self.find_node_by_id(parent_id)?;
+        if let BasicType::Array(_, count) = parent.basic_type {
+            Some((count, target.size as u64))
+        } else {
+            None
+        }
     }
 
     fn search_level(
@@ -364,7 +380,11 @@ fn find_path_to_node(node: &TreeNode, target_id: usize, current_path: &str) -> O
         return Some(current_path.to_string());
     }
     for child in &node.children {
-        let child_path = format!("{}.{}", current_path, child.name);
+        let child_path = if child.name.starts_with('[') {
+            format!("{}{}", current_path, child.name)
+        } else {
+            format!("{}.{}", current_path, child.name)
+        };
         if let Some(found) = find_path_to_node(child, target_id, &child_path) {
             return Some(found);
         }
