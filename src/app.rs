@@ -199,10 +199,14 @@ impl eframe::App for MemRW3App {
             }
 
             let remaining = ui.available_height();
-            let max_h = (remaining * 0.75).max(150.0);
-            let min_h = 150.0_f32.min(max_h);
+            // 1. 将最小高度提高到 250.0，确保树状视图始终有空间显示
+            let min_limit = remaining * 0.5;
+            let max_h = (remaining * 0.9).max(min_limit);
+            let min_h = min_limit.min(max_h);
             let bs_h = if bs_open {
-                self.session.bottom_sheet_height.clamp(min_h, max_h)
+                // 2. 覆盖写回 bottom_sheet_height：防止快速拖拽越界导致数值跑飞而产生“拖动卡死”感
+                self.session.bottom_sheet_height = self.session.bottom_sheet_height.clamp(min_h, max_h);
+                self.session.bottom_sheet_height
             } else {
                 0.0
             };
@@ -301,8 +305,8 @@ impl eframe::App for MemRW3App {
                                     ui.add_space(4.0);
                                     ui.separator();
                                     ui.add_space(4.0);
-                                    let rem_h = ui.available_height();
-                                    let total_w = ui.available_width();
+                                    let rem_h = ui.available_height().max(0.0);
+                                    let total_w = ui.available_width().max(0.0);
                                     let right_w = (total_w * 0.32).clamp(220.0, 350.0);
                                     let left_w = (total_w - right_w - 8.0).max(200.0);
                                     ui.horizontal(|ui| {
