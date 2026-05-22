@@ -172,9 +172,12 @@ impl eframe::App for MemRW3App {
         let total_h = ui.available_height();
         let ctrl_h = (total_h * 0.06).clamp(40.0, 56.0);
         let bs_open = self.session.active_bottom_sheet.is_some();
+        let dialog_open = self.chart_state.show_line_dialog
+            || self.table_state.show_entry_dialog
+            || self.probe.show_settings;
 
         ui.vertical(|ui| {
-            // ── Control Bar (locked when BottomSheet is open) ──
+            // ── Control Bar (locked when BottomSheet or dialogs are open) ──
             let (ctrl_rect, _) = ui.allocate_at_least(
                 egui::vec2(ui.available_width(), ctrl_h),
                 egui::Sense::hover(),
@@ -184,7 +187,7 @@ impl eframe::App for MemRW3App {
                     .max_rect(ctrl_rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
-            ctrl_ui.add_enabled_ui(!bs_open, |ui| {
+            ctrl_ui.add_enabled_ui(!bs_open && !dialog_open, |ui| {
                 ui::control_bar(ui, &mut self.session, &mut self.probe);
             });
 
@@ -196,17 +199,13 @@ impl eframe::App for MemRW3App {
             }
 
             let remaining = ui.available_height();
+            let max_h = (remaining * 0.75).max(150.0);
+            let min_h = 150.0_f32.min(max_h);
             let bs_h = if bs_open {
-                self.session
-                    .bottom_sheet_height
-                    .clamp(150.0, (remaining * 0.75).max(150.0))
+                self.session.bottom_sheet_height.clamp(min_h, max_h)
             } else {
                 0.0
             };
-            let dialog_open = self.chart_state.show_line_dialog
-                || self.table_state.show_entry_dialog
-                || self.probe.show_settings;
-
             if remaining > 0.0 {
                 let (dock_rect, _) = ui.allocate_at_least(
                     egui::vec2(ui.available_width(), remaining),
@@ -218,7 +217,7 @@ impl eframe::App for MemRW3App {
                         .layout(egui::Layout::top_down(egui::Align::Min)),
                 );
 
-                if bs_open {
+                if bs_open || dialog_open {
                     dock_ui.disable();
                 }
 
