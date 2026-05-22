@@ -142,7 +142,7 @@ impl<'a> TabViewer for TabViewerCtx<'a> {
     }
 }
 
-fn bottom_sheet_handle(ui: &mut Ui) -> f32 {
+fn bottom_sheet_handle(ui: &mut Ui, drag_state: &mut Option<(f32, f32)>, current_h: f32) -> f32 {
     let (rect, response) =
         ui.allocate_at_least(egui::vec2(ui.available_width(), 20.0), egui::Sense::drag());
     if response.hovered() || response.dragged() {
@@ -160,10 +160,20 @@ fn bottom_sheet_handle(ui: &mut Ui) -> f32 {
     let capsule = egui::Rect::from_center_size(rect.center(), egui::vec2(40.0, 4.0));
     ui.painter()
         .rect_filled(capsule, egui::CornerRadius::same(2), handle_color);
+
     if response.dragged() {
-        response.drag_delta().y
+        if let Some(pointer) = response.interact_pointer_pos() {
+            if drag_state.is_none() {
+                *drag_state = Some((pointer.y, current_h));
+            }
+            let (origin_y, initial_h) = drag_state.unwrap();
+            let displacement = origin_y - pointer.y;
+            return initial_h + displacement;
+        }
+        current_h
     } else {
-        0.0
+        *drag_state = None;
+        current_h
     }
 }
 
@@ -264,11 +274,11 @@ impl eframe::App for MemRW3App {
                             se: 0,
                         })
                         .show(ui, |ui| {
-                            let delta = bottom_sheet_handle(ui);
-                            if delta != 0.0 {
-                                self.session.bottom_sheet_height -= delta;
-                                ui.ctx().request_repaint();
-                            }
+                            self.session.bottom_sheet_height = bottom_sheet_handle(
+                                ui,
+                                &mut self.session.bottom_sheet_drag,
+                                self.session.bottom_sheet_height,
+                            );
                             egui::Frame::NONE
                                 .inner_margin(egui::Margin::symmetric(10, 6))
                                 .show(ui, |ui| {
