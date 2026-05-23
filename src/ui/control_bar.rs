@@ -35,22 +35,72 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
     let session = &mut app.session;
     let mut show = session.show_probe_settings;
     let mut closed = false;
+
+    let probe_list: Vec<String> = probe_rs::probe::list::Lister::new()
+        .list_all()
+        .iter()
+        .map(|p| p.identifier.clone())
+        .collect();
+    let probe_text = if probe_list.is_empty() {
+        "未检测到 Probe".to_string()
+    } else if probe_list.len() == 1 {
+        probe_list[0].clone()
+    } else {
+        format!("{} 个设备", probe_list.len())
+    };
+
+    let search_id = egui::Id::new("mcu_search");
+    let mut search = ctx.data_mut(|d| d.get_temp::<String>(search_id).unwrap_or_default());
+
     egui::Window::new("Probe 设置")
         .collapsible(false).resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .default_width(320.0)
         .open(&mut show)
         .show(ctx, |ui| {
-            egui::Grid::new("probe_settings").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.horizontal(|ui| {
                 ui.label("MCU 型号:");
-                egui::ComboBox::from_id_salt("chip_combo")
-                    .selected_text(&session.probe_chip)
-                    .width(160.0)
-                    .show_ui(ui, |ui| {
-                        for name in &session.probe_chips {
-                            ui.selectable_value(&mut session.probe_chip, name.clone(), name.as_str());
-                        }
-                    });
-                ui.end_row();
+                ui.label(egui::RichText::new(&session.probe_chip).strong());
+            });
+            ui.add_sized(
+                [ui.available_width(), 20.0],
+                egui::TextEdit::singleline(&mut search)
+                    .hint_text("搜索过滤...")
+                    .id(search_id),
+            );
+            ctx.data_mut(|d| d.insert_temp(search_id, search.clone()));
+
+            let filtered: Vec<&String> = if search.is_empty() {
+                session.all_chips.iter().collect()
+            } else {
+                let s = search.to_lowercase();
+                session.all_chips.iter().filter(|n| n.to_lowercase().contains(&s)).collect()
+            };
+
+            let list_h = 200.0;
+            let (list_rect, _) = ui.allocate_at_least(
+                egui::vec2(ui.available_width(), list_h),
+                egui::Sense::hover(),
+            );
+            let mut list_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(list_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            egui::ScrollArea::vertical().show(&mut list_ui, |ui| {
+                ui.set_min_height(list_h);
+                for name in filtered {
+                    if ui.selectable_label(session.probe_chip == *name, name.as_str()).clicked() {
+                        session.probe_chip = name.clone();
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            egui::Grid::new("probe_settings").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                 ui.label("协议:");
                 egui::ComboBox::from_id_salt("protocol_combo")
                     .selected_text(&session.probe_protocol)
@@ -64,12 +114,27 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
                 ui.label("速度 (kHz):");
                 ui.add(egui::Slider::new(&mut session.probe_speed_khz, 100..=20000).text("kHz"));
                 ui.end_row();
+                ui.label("Probe 设备:");
+                egui::ComboBox::from_id_salt("probe_combo")
+                    .selected_text(&probe_text)
+                    .width(180.0)
+                    .show_ui(ui, |ui| {
+                        if probe_list.is_empty() {
+                            ui.label("(无可用设备, 请插入调试器)");
+                        }
+                        for name in &probe_list {
+                            ui.label(name);
+                        }
+                    });
+                ui.end_row();
             });
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
-            if ui.button("确定").clicked() { closed = true; }
-            if ui.button("取消").clicked() { closed = true; }
+            ui.horizontal(|ui| {
+                if ui.button("确定").clicked() { closed = true; }
+                if ui.button("取消").clicked() { closed = true; }
+            });
         });
     if closed { session.show_probe_settings = false; }
     else { session.show_probe_settings = show; }

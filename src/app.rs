@@ -95,10 +95,17 @@ impl MemRW3App {
         tree.main_surface_mut()
             .split_right(NodeIndex::root(), 0.5, vec![TabKind::Table]);
 
-        let session = AppSession {
+        let mut session = AppSession {
             bottom_sheet_height: 250.0,
             ..Default::default()
         };
+        let mut chips: Vec<String> = probe_rs::config::Registry::from_builtin_families()
+            .families()
+            .iter()
+            .flat_map(|f| f.variants.iter().map(|v| v.name.clone()))
+            .collect();
+        chips.sort();
+        session.all_chips = chips;
 
         let probe = Arc::new(ProbeCell::new(ProbeSession::default()));
         let sync = Arc::new(Sync::new());
@@ -129,7 +136,8 @@ impl MemRW3App {
             delay_us,
             acq_cycle_count,
             slot_count,
-            toasts: egui_notify::Toasts::default(),
+            toasts: egui_notify::Toasts::default()
+                .with_anchor(egui_notify::Anchor::BottomRight),
             hz_last_cycles: 0,
             hz_last_time: Instant::now(),
             acq_stop,

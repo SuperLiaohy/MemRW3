@@ -463,17 +463,20 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 
 | 功能 | 实现 |
 |------|------|
-| 表格列 | Name / Value / Write / ✕(删除) |
-| Name | `entry.display_name` (从添加配置持久化) |
-| Value | 按 `var.ext_type` 格式化: u/i → hex+十进制, float/double → 小数, other → hex dump |
-| Write | TextEdit 输入 → "写"按钮 → 暂存到 current_value |
-| 双击行 | 弹出居中 table_entry_dialog (模态: 全界面拦截对话窗外点击) |
-| 变量属性 Dialog | 显示名/当前值 + **PooledVariable 的 Extend 属性** (名称/地址/类型/大小) + 删除/确定/取消 |
+| 表格列 | Name / Read / Write (三列) |
+| Name | `entry.display_name`, 双击打开属性 Dialog (含删除) |
+| Read | `frame_data` 最新值 或 `DoubleBuffer.latest()`, 按 `var.ext_type` 格式化: u/i → hex+十进制, float/double → 小数 |
+| Write | TextEdit 输入 → `validate_write()` 校验类型范围 → 点"写" → `pending_writes.push((var_id, value))` |
+| 写入流程 | 主循环 drain `pending_writes` → `write_variable(var_id, value)` → `sync.send_request` 暂停采集线程 → `core.write_word_8/16/32/64` → 恢复 |
+| 写入校验 | 按 ExtendType 校验: u8(0-255), i8(-128~127), u16, i16, u32, i32, u64, i64, f32, f64; Other 类型禁止写入 |
+| 通知 | `egui-notify` toast: 成功=绿色2s, 失败=红色3s, 校验错误=红色3s |
 | 空状态 | 居中提示 + 打开变量树按钮 |
 
-### 8. 模态 (Modal) 行为
+### 8. 模态 (Modal) 行为 + Toast 通知
 
 全部模态采用双层拦截机制：`add_enabled_ui` + Z-order click interceptor (`ui.interact`)，确保 egui_dock 的 tab headers 也被阻止。
+
+**Toast 通知** (`egui-notify`): Table 写入结果通过右上角 toast 显示 — 成功(绿色 2s)、失败(红色 3s)、校验错误(红色 3s)。`self.toasts.show(ctx)` 每帧在 ui() 末尾调用。
 
 | 覆盖层 | 阻塞范围 | 拦截方式 | 退出方式 |
 |--------|----------|----------|----------|
@@ -521,6 +524,8 @@ probe-rs = "0.31"         # MCU 调试 (CMSIS-DAP/ST-Link/J-Link)
 gimli = "0.31"            # DWARF 解析
 object = "0.36"           # ELF 解析
 anyhow = "1.0"            # 错误处理
+egui_plot = "0.35"        # 图表绘制
+egui-notify = "0.22"      # Toast 通知
 ```
 
 ## 关键设计决策

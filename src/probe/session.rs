@@ -51,7 +51,7 @@ impl Default for ProbeSession {
                 "STM32G474RE".into(), "STM32L476RG".into(), "ATSAMD51P19A".into(),
             ],
             protocol: "SWD".into(),
-            speed_khz: 4000,
+            speed_khz: 10000,
             last_error: None,
             slots: Vec::new(),
             var_mappings: Vec::new(),
