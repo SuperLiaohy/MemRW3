@@ -4,6 +4,7 @@ use crate::types::ExtendType;
 use eframe::egui::{self, Color32, RichText, Ui};
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints};
 use std::collections::HashMap;
+use std::io::{BufWriter, Write};
 use std::time::Instant;
 
 #[derive(PartialEq)]
@@ -48,6 +49,11 @@ pub struct ChartPluginState {
     pub edit_color: Color32,
     pub edit_buffer_size: usize,
     pub edit_visible: bool,
+    pub log_file: Option<std::path::PathBuf>,
+    log_writer: Option<BufWriter<std::fs::File>>,
+    logging_active: bool,
+    pub log_started: bool,
+    pub log_stopped: bool,
     acq_frame_count: u64,
     acq_last_reset: Instant,
     was_running: bool,
@@ -69,6 +75,11 @@ impl Default for ChartPluginState {
             edit_color: Color32::WHITE,
             edit_buffer_size: 10000,
             edit_visible: true,
+            log_file: None,
+            log_writer: None,
+            logging_active: false,
+            log_started: false,
+            log_stopped: false,
             acq_frame_count: 0,
             acq_last_reset: Instant::now(),
             was_running: false,
@@ -159,6 +170,24 @@ pub fn chart_panel(
             state.acq_frame_count = 0;
             state.acq_last_reset = Instant::now();
             state.was_running = true;
+            if state.log_file.is_some() {
+                match std::fs::File::create(state.log_file.as_ref().unwrap()) {
+                    Ok(f) => {
+                        let mut w = BufWriter::new(f);
+                        let _ = write!(w, "timestamp");
+                        for legend in &state.legends {
+                            let _ = write!(w, ",{}", legend.curve_name);
+                        }
+                        let _ = writeln!(w);
+                        state.log_writer = Some(w);
+                        state.logging_active = true;
+                        state.log_started = true;
+                    }
+                    Err(_) => {
+                        state.logging_active = false;
+                    }
+                }
+            }
         }
         for legend in &mut state.legends {
             if let Some(data) = frame_data.get(&legend.variable_id) {
@@ -181,7 +210,46 @@ pub fn chart_panel(
             state.acq_last_reset = Instant::now();
         }
     } else {
+        if state.logging_active {
+            state.log_writer = None;
+            state.logging_active = false;
+            state.log_stopped = true;
+        }
         state.was_running = false;
+    }
+
+    if running && state.logging_active {
+        if let Some(ref mut w) = state.log_writer {
+            let mut timestamps: Vec<f64> = Vec::new();
+            for legend in &state.legends {
+                if let Some(data) = frame_data.get(&legend.variable_id) {
+                    for (t, _) in data {
+                        if !timestamps.contains(t) {
+                            timestamps.push(*t);
+                        }
+                    }
+                }
+            }
+            timestamps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            for t in &timestamps {
+                let _ = write!(w, "{:.6}", t);
+                for legend in &state.legends {
+                    if let Some(data) = frame_data.get(&legend.variable_id) {
+                        let val = data.iter().find(|(dt, _)| (dt - t).abs() < 1e-9);
+                        if let Some((_, raw)) = val {
+                            if let Some(var) = pool.get(legend.variable_id) {
+                                let f = decode_value_f64(raw, &var.ext_type);
+                                let _ = write!(w, ",{:.6}", f);
+                                continue;
+                            }
+                        }
+                    }
+                    let _ = write!(w, ",");
+                }
+                let _ = writeln!(w);
+            }
+            let _ = w.flush();
+        }
     }
 
     ui.vertical(|ui| {
@@ -191,12 +259,11 @@ pub fn chart_panel(
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("📈 实时数据图表").size(16.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .button(RichText::new("📋 打开变量树").size(12.0))
-                        .clicked()
-                    {
-                        action = PanelAction::OpenTree;
-                    }
+                    ui.add_enabled_ui(!state.logging_active, |ui| {
+                        if ui.button(RichText::new("📋 打开变量树").size(12.0)).clicked() {
+                            action = PanelAction::OpenTree;
+                        }
+                    });
                 });
             });
             ui.add_space(2.0);
@@ -307,6 +374,31 @@ pub fn chart_panel(
                 if !state.auto_scroll {
                     ui.colored_label(Color32::LIGHT_BLUE, "手动查看中");
                 }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Log:");
+                    ui.add_enabled_ui(!state.logging_active, |ui| {
+                        if ui.button("选择文件").clicked() {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .add_filter("CSV", &["csv"])
+                                .set_file_name("data.csv")
+                                .save_file()
+                            {
+                                state.log_file = Some(p);
+                            }
+                        }
+                        if state.log_file.is_some() {
+                            if ui.button("清除").clicked() {
+                                state.log_file = None;
+                            }
+                        }
+                    });
+                    if let Some(ref p) = state.log_file {
+                        ui.label(p.file_name().unwrap_or_default().to_string_lossy().to_string());
+                    } else {
+                        ui.label("不 log");
+                    }
+                });
             });
             ui.add_space(2.0);
 
@@ -318,9 +410,9 @@ pub fn chart_panel(
                             .size(13.0)
                             .color(Color32::from_rgb(150, 150, 150)),
                     );
-                    if ui.button("📋 打开变量树").clicked() {
-                        action = PanelAction::OpenTree;
-                    }
+                    ui.add_enabled_ui(!state.logging_active, |ui| {
+                        if ui.button("📋 打开变量树").clicked() { action = PanelAction::OpenTree; }
+                    });
                 });
             } else {
                 render_chart(ui, state);
@@ -353,6 +445,7 @@ pub fn chart_panel(
                             &mut state.edit_visible,
                             &ext_name, ext_addr, &ext_type, ext_size,
                             running,
+                            state.logging_active,
                         );
                     });
                 if let Some(act) = action {

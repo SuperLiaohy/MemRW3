@@ -19,6 +19,7 @@ pub fn line_dialog_ui(
     ext_type: &ExtendType,
     ext_size: u32,
     running: bool,
+    logging_active: bool,
 ) -> Option<DialogAction> {
     egui::Grid::new("line_dialog_grid")
         .num_columns(2).spacing([8.0, 4.0])
@@ -63,9 +64,11 @@ pub fn line_dialog_ui(
     ui.add_space(4.0);
     let mut result = None;
     ui.horizontal(|ui| {
-        if ui.button(RichText::new("删除").color(Color32::from_rgb(220,60,50))).clicked() {
-            result = Some(DialogAction::Delete);
-        }
+        ui.add_enabled_ui(!logging_active, |ui| {
+            if ui.button(RichText::new("删除").color(Color32::from_rgb(220,60,50))).clicked() {
+                result = Some(DialogAction::Delete);
+            }
+        });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("确定").clicked() {
                 result = Some(DialogAction::Confirm);

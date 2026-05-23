@@ -79,9 +79,15 @@ fn acq_thread(
             if !probe_ref.connected {
                 break;
             }
+
             probe_ref.acquire_from_slots();
             cycle_count.fetch_add(1, Ordering::Relaxed);
 
+            if probe_ref.slots.is_empty() {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            
             let d = delay_us.load(Ordering::Acquire);
             if d > 0 {
                 thread::sleep(Duration::from_micros(d));
@@ -588,6 +594,14 @@ impl eframe::App for MemRW3App {
                 if self.chart_state.reset_timer {
                     self.chart_state.reset_timer = false;
                     self.clear_all_buffers();
+                }
+                if self.chart_state.log_started {
+                    self.chart_state.log_started = false;
+                    self.toasts.success("Log 开始").duration(Some(Duration::from_secs(2)));
+                }
+                if self.chart_state.log_stopped {
+                    self.chart_state.log_stopped = false;
+                    self.toasts.success("Log 停止").duration(Some(Duration::from_secs(2)));
                 }
             }
 
