@@ -62,6 +62,10 @@ impl VariablePool {
         self.variables.iter()
     }
 
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut PooledVariable> {
+        self.variables.iter_mut()
+    }
+
     pub fn contains(&self, id: usize) -> bool {
         self.id_index.contains_key(&id)
     }

@@ -389,6 +389,60 @@ impl DwarfApp {
         results
     }
 
+    /// Exact-match search across all CUs. First level matches root variable names,
+    /// subsequent levels match children. All levels use `node_name_eq` (exact).
+    pub fn trace_exact(&self, levels: &[String]) -> Vec<usize> {
+        if levels.is_empty() {
+            return Vec::new();
+        }
+        let mut results = Vec::new();
+        for cu in &self.cus {
+            for var in &cu.variables {
+                if node_name_eq(&var.name, &levels[0]) {
+                    if levels.len() == 1 {
+                        results.push(var.id);
+                    } else {
+                        results.extend(self.trace_level(var, levels, 1));
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    fn trace_level(&self, node: &TreeNode, levels: &[String], level_idx: usize) -> Vec<usize> {
+        let is_last = level_idx == levels.len() - 1;
+        let target = &levels[level_idx];
+
+        if target.starts_with('[') {
+            let idx: u64 = target[1..target.len() - 1].parse().unwrap_or(0);
+            if let BasicType::ArrayElem(_, count) = node.basic_type {
+                if idx < count {
+                    if let Some(elem) = node.children.iter().find(|c| c.name.starts_with('[')) {
+                        if is_last {
+                            return vec![elem.id];
+                        } else {
+                            return self.trace_level(elem, levels, level_idx + 1);
+                        }
+                    }
+                }
+            }
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+        for child in &node.children {
+            if node_name_eq(&child.name, target) {
+                if is_last {
+                    results.push(child.id);
+                } else {
+                    results.extend(self.trace_level(child, levels, level_idx + 1));
+                }
+            }
+        }
+        results
+    }
+
     pub fn find_node_by_id(&self, id: usize) -> Option<TreeNode> {
         for cu in &self.cus {
             for var in &cu.variables {

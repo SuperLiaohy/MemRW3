@@ -192,6 +192,63 @@ impl MemRW3App {
         self.session.load_error = None;
     }
 
+    fn trace_variables(&mut self) {
+        self.load_elf();
+        if self.session.load_error.is_some() {
+            return;
+        }
+
+        let mut errors: Vec<String> = Vec::new();
+        let pool = &mut self.session.pool;
+
+        for var in pool.iter_mut() {
+            let name = var.name.clone();
+            let path: Vec<String> = name.split('.').map(|s| s.to_string()).collect();
+            let node_ids = self.dwarf_app.trace_exact(&path);
+
+            match node_ids.len() {
+                1 => {
+                    let node_id = node_ids[0];
+                    let node = self.dwarf_app.find_node_by_id(node_id);
+                    if let Some(node) = node {
+                        let new_type = crate::types::basic_type_to_extend(&node.basic_type);
+                        let new_size = match new_type {
+                            crate::types::ExtendType::U8 | crate::types::ExtendType::I8 => 1,
+                            crate::types::ExtendType::U16 | crate::types::ExtendType::I16 => 2,
+                            crate::types::ExtendType::U32 | crate::types::ExtendType::I32
+                            | crate::types::ExtendType::Float => 4,
+                            crate::types::ExtendType::U64 | crate::types::ExtendType::I64
+                            | crate::types::ExtendType::Double => 8,
+                            _ => node.size,
+                        };
+                        let new_addr = self.dwarf_app.compute_extend_address(node_id).unwrap_or(node.address);
+                        var.address = new_addr;
+                        var.ext_type = new_type;
+                        var.size = new_size;
+                    }
+                }
+                0 => {
+                    errors.push(format!("\"{name}\": 未找到匹配"));
+                }
+                _ => {
+                    errors.push(format!("\"{name}\": 匹配到多个 ({}) 节点", node_ids.len()));
+                }
+            }
+        }
+
+        for err in &errors {
+            self.toasts
+                .error(err.clone())
+                .duration(Some(Duration::from_secs(15)))
+                .closable(true);
+        }
+        if errors.is_empty() {
+            self.toasts.success("追踪完成, 所有变量已更新").duration(Some(Duration::from_secs(3)));
+        }
+
+        self.rebuild_slots();
+    }
+
     pub fn sync_connect(&mut self) {
         let chip = self.session.probe_chip.clone();
         let protocol = self.session.probe_protocol.clone();
@@ -559,11 +616,23 @@ impl eframe::App for MemRW3App {
                                     ui.horizontal(|ui| {
                                         ui.label("ELF 文件:");
                                         ui.add_sized(
-                                            [ui.available_width() - 120.0, 20.0],
+                                            [ui.available_width() - 200.0, 20.0],
                                             egui::TextEdit::singleline(&mut self.elf_path)
                                                 .hint_text("输入 firmware.elf 路径..."),
                                         );
+                                        if ui.button("浏览").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new()
+                                                .add_filter("ELF/AXF", &["elf", "axf"])
+                                                .add_filter("全部", &["*"])
+                                                .pick_file()
+                                            {
+                                                self.elf_path = path.display().to_string();
+                                            }
+                                        }
                                         if ui.button("加载").clicked() { self.load_elf(); }
+                                        if ui.button("追踪").clicked() {
+                                            self.trace_variables();
+                                        }
                                         if let Some(ref err) = self.session.load_error {
                                             ui.colored_label(Color32::from_rgb(255, 80, 80), err);
                                         }
