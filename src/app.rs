@@ -246,6 +246,8 @@ impl eframe::App for MemRW3App {
                     .show_leaf_collapse_buttons(false)
                     .show_inside(&mut dock_ui, &mut viewer);
 
+                self.session.sampling_hz = self.chart_state.acq_hz;
+
                 // Full-dock click interceptor: rendered AFTER DockArea, BEFORE BottomSheet.
                 // egui Z-order: later widgets take input priority → this steals all clicks
                 // from exposed dock tabs (which use ui.interact() that ignores enabled state).

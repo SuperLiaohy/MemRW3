@@ -11,13 +11,40 @@ pub enum PanelAction {
     OpenTree,
 }
 
+#[derive(Clone, PartialEq)]
+pub enum YAxisMode {
+    Auto,
+    Fixed { min: f64, max: f64 },
+    None,
+}
+
+#[derive(Clone, PartialEq)]
+pub enum XAxisMode {
+    Auto,
+    Fixed(f64),
+}
+
+impl XAxisMode {
+    fn window(&self, xr: f64) -> f64 {
+        match self {
+            XAxisMode::Auto => xr.max(10.0),
+            XAxisMode::Fixed(w) => *w,
+        }
+    }
+}
+
 pub struct ChartPluginState {
     pub legends: Vec<ChartLegend>,
     pub editing_legend: Option<usize>,
     pub show_line_dialog: bool,
     pub auto_scroll: bool,
-    start_time: Instant,
+    pub x_mode: XAxisMode,
+    pub y_mode: YAxisMode,
+    pub acq_hz: f64,
+    timer_start: Option<Instant>,
     elapsed_time: f64,
+    acq_frame_count: u64,
+    acq_last_reset: Instant,
 }
 
 impl Default for ChartPluginState {
@@ -27,8 +54,13 @@ impl Default for ChartPluginState {
             editing_legend: None,
             show_line_dialog: false,
             auto_scroll: true,
-            start_time: Instant::now(),
+            x_mode: XAxisMode::Auto,
+            y_mode: YAxisMode::Auto,
+            acq_hz: 0.0,
+            timer_start: None,
             elapsed_time: 0.0,
+            acq_frame_count: 0,
+            acq_last_reset: Instant::now(),
         }
     }
 }
@@ -107,12 +139,26 @@ pub fn chart_panel(
     let mut action = PanelAction::None;
 
     if running {
-        state.elapsed_time = state.start_time.elapsed().as_secs_f64();
+        if state.timer_start.is_none() {
+            state.timer_start = Some(Instant::now());
+            state.acq_frame_count = 0;
+            state.acq_last_reset = Instant::now();
+        }
+        state.elapsed_time = state
+            .timer_start
+            .map_or(0.0, |ts| ts.elapsed().as_secs_f64());
         for legend in &mut state.legends {
             if let Some(var) = pool.get(legend.variable_id) {
                 let val = decode_value_f64(&var.current_value, &var.ext_type);
                 legend.push_value(state.elapsed_time, val);
             }
+        }
+        state.acq_frame_count += 1;
+        let elapsed = state.acq_last_reset.elapsed().as_secs_f64();
+        if elapsed >= 1.0 {
+            state.acq_hz = state.acq_frame_count as f64 / elapsed;
+            state.acq_frame_count = 0;
+            state.acq_last_reset = Instant::now();
         }
     }
 
@@ -139,9 +185,103 @@ pub fn chart_panel(
                         legend.data_history.clear();
                     }
                     state.auto_scroll = true;
+                    state.timer_start = None;
+                    state.elapsed_time = 0.0;
+                    state.acq_hz = 0.0;
+                    state.acq_frame_count = 0;
                 }
                 if ui.button("回到最新").clicked() {
                     state.auto_scroll = true;
+                }
+                ui.separator();
+                egui::ComboBox::from_label("X轴")
+                    .selected_text(x_mode_label(&state.x_mode))
+                    .width(80.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(state.x_mode == XAxisMode::Auto, "自动").clicked() {
+                            state.x_mode = XAxisMode::Auto;
+                        }
+                        if ui
+                            .selectable_label(
+                                matches!(state.x_mode, XAxisMode::Fixed(_)),
+                                "固定",
+                            )
+                            .clicked()
+                        {
+                            let xr = state
+                                .legends
+                                .iter()
+                                .filter_map(|l| {
+                                    let front = l.data_history.front().map(|p| p.0);
+                                    let back = l.data_history.back().map(|p| p.0);
+                                    front.zip(back).map(|(f, b)| (b - f).max(40.0))
+                                })
+                                .fold(10.0f64, f64::max);
+                            state.x_mode = XAxisMode::Fixed(xr.max(10.0));
+                        }
+                    });
+                if let XAxisMode::Fixed(w) = &mut state.x_mode {
+                    let mut w_str = format!("{:.3}", *w);
+                    if ui
+                        .add_sized([65.0, 20.0], egui::TextEdit::singleline(&mut w_str).hint_text("s"))
+                        .changed()
+                    {
+                        if let Ok(v) = w_str.parse::<f64>() {
+                            *w = v.max(0.001);
+                        }
+                    }
+                    ui.label("s");
+                }
+                egui::ComboBox::from_label("Y轴")
+                    .selected_text(y_mode_label(&state.y_mode))
+                    .width(80.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(state.y_mode == YAxisMode::Auto, "自动").clicked() {
+                            state.y_mode = YAxisMode::Auto;
+                        }
+                        if ui
+                            .selectable_label(
+                                matches!(state.y_mode, YAxisMode::Fixed { .. }),
+                                "固定",
+                            )
+                            .clicked()
+                        {
+                            let (lo, hi) = state
+                                .legends
+                                .iter()
+                                .flat_map(|l| l.data_history.iter().map(|p| p.1))
+                                .fold((0.0f64, 0.0f64), |(lo, hi), y| (lo.min(y), hi.max(y)));
+                            let range = (hi - lo).max(10.0);
+                            state.y_mode = YAxisMode::Fixed {
+                                min: lo - range * 0.1,
+                                max: hi + range * 0.1,
+                            };
+                        }
+                        if ui.selectable_label(state.y_mode == YAxisMode::None, "无").clicked() {
+                            state.y_mode = YAxisMode::None;
+                        }
+                    });
+                if let YAxisMode::Fixed { min, max } = &mut state.y_mode {
+                    ui.label("min:");
+                    let mut min_str = format!("{:.2}", *min);
+                    if ui
+                        .add_sized([55.0, 20.0], egui::TextEdit::singleline(&mut min_str))
+                        .changed()
+                    {
+                        if let Ok(v) = min_str.parse::<f64>() {
+                            *min = v;
+                        }
+                    }
+                    ui.label("max:");
+                    let mut max_str = format!("{:.2}", *max);
+                    if ui
+                        .add_sized([55.0, 20.0], egui::TextEdit::singleline(&mut max_str))
+                        .changed()
+                    {
+                        if let Ok(v) = max_str.parse::<f64>() {
+                            *max = v;
+                        }
+                    }
                 }
                 if !state.auto_scroll {
                     ui.colored_label(Color32::LIGHT_BLUE, "手动查看中");
@@ -208,6 +348,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
     let plot_height = (available_h - 24.0).max(100.0);
 
     let has_data = state.legends.iter().any(|l| l.data_history.len() >= 2);
+    let show_y_axis = !matches!(state.y_mode, YAxisMode::None);
 
     let auto_bounds = has_data.then(|| {
         let t_max = state
@@ -221,19 +362,38 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             .filter_map(|l| l.data_history.front().map(|p| p.0))
             .fold(f64::MAX, f64::min);
         let xr = (t_max - t_min).max(40.0);
-        let window = xr.max(10.0);
+        let window = state.x_mode.window(xr);
         let x_min = t_max - window;
         let x_max = t_max + window * 0.02;
 
-        let (y_min, y_max) = state
-            .legends
-            .iter()
-            .flat_map(|l| l.data_history.iter().map(|p| p.1))
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
-                (lo.min(y), hi.max(y))
-            });
-        let y_pad = (y_max - y_min).max(10.0) * 0.1;
-        (x_min, x_max, y_min - y_pad, y_max + y_pad)
+        let (y_min, y_max) = match &state.y_mode {
+            YAxisMode::Auto => {
+                let (g_min, g_max) = state
+                    .legends
+                    .iter()
+                    .flat_map(|l| l.data_history.iter().map(|p| p.1))
+                    .fold(
+                        (f64::INFINITY, f64::NEG_INFINITY),
+                        |(lo, hi), y| (lo.min(y), hi.max(y)),
+                    );
+                let y_pad = (g_max - g_min).max(10.0) * 0.1;
+                (g_min - y_pad, g_max + y_pad)
+            }
+            YAxisMode::Fixed { min, max } => (*min, *max),
+            YAxisMode::None => {
+                let (g_min, g_max) = state
+                    .legends
+                    .iter()
+                    .flat_map(|l| l.data_history.iter().map(|p| p.1))
+                    .fold(
+                        (f64::INFINITY, f64::NEG_INFINITY),
+                        |(lo, hi), y| (lo.min(y), hi.max(y)),
+                    );
+                let y_pad = (g_max - g_min).max(10.0) * 0.1;
+                (g_min - y_pad, g_max + y_pad)
+            }
+        };
+        (x_min, x_max, y_min, y_max)
     });
 
     let plot_rect = egui::Rect::from_min_size(
@@ -243,15 +403,17 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
 
     Plot::new("chart_plot")
         .height(plot_height)
-        .show_axes([true, true])
+        .show_axes([true, show_y_axis])
         .show_grid([true, true])
         .allow_zoom([true, true])
         .allow_drag([true, true])
         .allow_scroll(true)
         .allow_boxed_zoom(true)
         .allow_double_click_reset(false)
-        .label_formatter(|_name, value| {
-            format!("x: {:.1}s\ny: {:.2}", value.x, value.y)
+        .x_axis_formatter(|t, _range| fmt_time(t.value))
+        .y_axis_formatter(|v, _range| y_axis_fmt(v.value))
+        .label_formatter(|name, value| {
+            format!("{}\nt: {}\nv: {:.3}", name, fmt_time(value.x), value.y)
         })
         .set_margin_fraction(egui::vec2(0.02, 0.05))
         .show(ui, |plot_ui| {
@@ -307,12 +469,7 @@ fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2)
         } else {
             Color32::from_gray(100)
         };
-        let lv = legend
-            .data_history
-            .back()
-            .map(|&(_, v)| format_axis(v))
-            .unwrap_or_else(|| "--".into());
-        let text = format!("{} = {}", legend.curve_name, lv);
+        let text = legend.curve_name.clone();
         let g = ui
             .painter()
             .layout_no_wrap(text, egui::FontId::proportional(11.0), tc);
@@ -340,7 +497,7 @@ fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2)
         if resp.clicked() {
             toggle = Some(i);
         }
-        if resp.double_clicked() {
+        if resp.secondary_clicked() {
             edit = Some(i);
         }
         y += h + 3.0;
@@ -428,12 +585,35 @@ fn decode_value_f64(data: &[u8], ext_type: &crate::types::ExtendType) -> f64 {
     }
 }
 
-fn format_axis(v: f64) -> String {
-    if v.abs() < 10000.0 && v == (v as i64) as f64 {
-        format!("{v:.0}")
-    } else if v.abs() < 0.01 && v != 0.0 {
-        format!("{v:.4}")
+fn y_axis_fmt(v: f64) -> String {
+    if v.abs() < 0.01 && v != 0.0 {
+        format!("{v:.5}")
     } else {
-        format!("{v:.2}")
+        format!("{v:.3}")
+    }
+}
+
+fn fmt_time(t: f64) -> String {
+    let s = format!("{:.6}", t);
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() {
+        "0s".to_string()
+    } else {
+        format!("{}s", trimmed)
+    }
+}
+
+fn y_mode_label(mode: &YAxisMode) -> String {
+    match mode {
+        YAxisMode::Auto => "自动".to_string(),
+        YAxisMode::Fixed { .. } => "固定".to_string(),
+        YAxisMode::None => "无".to_string(),
+    }
+}
+
+fn x_mode_label(mode: &XAxisMode) -> String {
+    match mode {
+        XAxisMode::Auto => "自动".to_string(),
+        XAxisMode::Fixed(w) => format!("{:.3}s", w),
     }
 }
