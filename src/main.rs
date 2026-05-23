@@ -15,7 +15,12 @@ fn main() -> Result<()> {
 
     eframe::run_native(
         "MemRW3 - Memory Read/Write Monitor",
-        eframe::NativeOptions::default(),
+        eframe::NativeOptions {
+            viewport: eframe::egui::ViewportBuilder::default()
+                .with_inner_size([1280.0, 720.0])
+                .with_min_inner_size([800.0, 500.0]),
+            ..Default::default()
+        },
         Box::new(|cc| {
             app::setup_fonts(&cc.egui_ctx);
             Ok(Box::new(app))
