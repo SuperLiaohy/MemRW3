@@ -22,6 +22,10 @@ use crate::ui::table_plugin::TablePluginState;
 
 const CHINESE_FONT_PATH: &str = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf";
 
+use std::collections::HashMap;
+
+type FrameData = HashMap<usize, Vec<(f64, [u8; 8])>>;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TabKind {
     Chart,
@@ -290,6 +294,7 @@ struct TabViewerCtx<'a> {
     chart_state: &'a mut ChartPluginState,
     table_state: &'a mut TablePluginState,
     pool: &'a VariablePool,
+    frame_data: &'a FrameData,
     running: bool,
     open_tree: &'a mut Option<DockTab>,
 }
@@ -308,13 +313,13 @@ impl<'a> TabViewer for TabViewerCtx<'a> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         match tab {
             TabKind::Chart => {
-                let a = ui::chart_plugin::chart_panel(ui, self.chart_state, self.pool, self.running);
+                let a = ui::chart_plugin::chart_panel(ui, self.chart_state, self.pool, self.frame_data, self.running);
                 if a == ui::chart_plugin::PanelAction::OpenTree {
                     *self.open_tree = Some(DockTab::Chart);
                 }
             }
             TabKind::Table => {
-                let a = ui::table_plugin::table_panel(ui, self.table_state, self.pool);
+                let a = ui::table_plugin::table_panel(ui, self.table_state, self.pool, self.frame_data);
                 if a == ui::table_plugin::PanelAction::OpenTree {
                     *self.open_tree = Some(DockTab::Table);
                 }
@@ -360,7 +365,8 @@ fn bottom_sheet_handle(ui: &mut Ui, drag_state: &mut Option<(f32, f32)>, current
 
 impl eframe::App for MemRW3App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        if self.session.is_running() {
+        let running = self.session.is_running();
+        if running {
             ui.ctx().request_repaint();
         }
 
@@ -370,6 +376,16 @@ impl eframe::App for MemRW3App {
             self.session.sampling_hz = (cycles - self.hz_last_cycles) as f64 / elapsed;
             self.hz_last_cycles = cycles;
             self.hz_last_time = Instant::now();
+        }
+
+        let mut frame_data: FrameData = HashMap::new();
+        if running {
+            for var in self.session.pool.iter() {
+                let drained = var.incoming.drain();
+                if !drained.is_empty() {
+                    frame_data.insert(var.id, drained);
+                }
+            }
         }
 
         let total_h = ui.available_height();
@@ -423,6 +439,7 @@ impl eframe::App for MemRW3App {
                     chart_state: &mut self.chart_state,
                     table_state: &mut self.table_state,
                     pool: &self.session.pool,
+                    frame_data: &frame_data,
                     running,
                     open_tree: &mut open_tree,
                 };

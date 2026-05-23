@@ -2,6 +2,7 @@ use eframe::egui::{self, Color32, RichText, Ui};
 use crate::model::VariablePool;
 use crate::types::ExtendType;
 use super::table_dialog::{TableEntry, table_entry_dialog_ui};
+use std::collections::HashMap;
 
 #[derive(PartialEq)]
 pub enum PanelAction { None, OpenTree }
@@ -47,7 +48,12 @@ impl TablePluginState {
     }
 }
 
-pub fn table_panel(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool) -> PanelAction {
+pub fn table_panel(
+    ui: &mut Ui,
+    state: &mut TablePluginState,
+    pool: &VariablePool,
+    frame_data: &HashMap<usize, Vec<(f64, [u8; 8])>>,
+) -> PanelAction {
     let mut action = PanelAction::None;
 
     ui.vertical(|ui| {
@@ -73,7 +79,7 @@ pub fn table_panel(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePoo
                         if ui.button("📋 打开变量树").clicked() { action = PanelAction::OpenTree; }
                     });
                 } else {
-                    render_table(ui, state, pool);
+                    render_table(ui, state, pool, frame_data);
                 }
             });
         });
@@ -115,7 +121,7 @@ pub fn table_panel(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePoo
     action
 }
 
-fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool) {
+fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool, frame_data: &HashMap<usize, Vec<(f64, [u8; 8])>>) {
     let mut to_remove = None;
     let mut to_edit = None;
 
@@ -134,11 +140,18 @@ fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool) 
 
                 ui.label(RichText::new(&entry.display_name).size(12.0));
 
-                let current_val = pool.get(entry.variable_id)
-                    .map(|v| {
-                        v.incoming.latest()
-                            .map(|(_, data)| format_value(&data, &v.ext_type))
-                            .unwrap_or_else(|| "--".into())
+                let var = pool.get(entry.variable_id);
+                let current_val = var
+                    .and_then(|v| {
+                        frame_data
+                            .get(&entry.variable_id)
+                            .and_then(|d| d.last())
+                            .map(|(_, data)| format_value(data, &v.ext_type))
+                            .or_else(|| {
+                                v.incoming
+                                    .latest()
+                                    .map(|(_, data)| format_value(&data, &v.ext_type))
+                            })
                     })
                     .unwrap_or_else(|| "--".into());
                 ui.label(RichText::new(&current_val).size(12.0));

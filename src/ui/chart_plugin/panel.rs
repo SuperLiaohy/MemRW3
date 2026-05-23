@@ -3,6 +3,7 @@ use crate::model::VariablePool;
 use crate::types::ExtendType;
 use eframe::egui::{self, Color32, RichText, Ui};
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints};
+use std::collections::HashMap;
 use std::time::Instant;
 
 #[derive(PartialEq)]
@@ -138,6 +139,7 @@ pub fn chart_panel(
     ui: &mut Ui,
     state: &mut ChartPluginState,
     pool: &VariablePool,
+    frame_data: &HashMap<usize, Vec<(f64, [u8; 8])>>,
     running: bool,
 ) -> PanelAction {
     let mut action = PanelAction::None;
@@ -149,14 +151,14 @@ pub fn chart_panel(
             state.was_running = true;
         }
         for legend in &mut state.legends {
-            if let Some(var) = pool.get(legend.variable_id) {
-                let drained = var.incoming.drain();
-                if drained.is_empty() {
-                    continue;
-                }
-                let n = drained.len() as u64;
-                for (t, data) in &drained {
-                    let val = decode_value_f64(data, &var.ext_type);
+            if let Some(data) = frame_data.get(&legend.variable_id) {
+                let var = match pool.get(legend.variable_id) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let n = data.len() as u64;
+                for (t, raw) in data {
+                    let val = decode_value_f64(raw, &var.ext_type);
                     legend.push_value(*t, val);
                 }
                 state.acq_frame_count += n;
