@@ -103,6 +103,7 @@ fn run_control(ui: &mut Ui, app: &mut MemRW3App) {
         let new_running = !app.session.is_running();
         app.session.set_running(new_running);
         if new_running {
+            app.reset_timer();
             app.rebuild_slots();
         }
     }

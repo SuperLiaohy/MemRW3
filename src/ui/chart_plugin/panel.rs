@@ -28,7 +28,7 @@ pub enum XAxisMode {
 impl XAxisMode {
     fn window(&self, xr: f64) -> f64 {
         match self {
-            XAxisMode::Auto => xr.max(10.0),
+            XAxisMode::Auto => xr.max(6.0),
             XAxisMode::Fixed(w) => *w,
         }
     }
@@ -43,6 +43,7 @@ pub struct ChartPluginState {
     pub y_mode: YAxisMode,
     pub acq_hz: f64,
     pub removed_var_ids: Vec<usize>,
+    pub reset_timer: bool,
     acq_frame_count: u64,
     acq_last_reset: Instant,
     was_running: bool,
@@ -59,6 +60,7 @@ impl Default for ChartPluginState {
             y_mode: YAxisMode::Auto,
             acq_hz: 0.0,
             removed_var_ids: Vec::new(),
+            reset_timer: false,
             acq_frame_count: 0,
             acq_last_reset: Instant::now(),
             was_running: false,
@@ -199,6 +201,7 @@ pub fn chart_panel(
                     state.auto_scroll = true;
                     state.acq_hz = 0.0;
                     state.acq_frame_count = 0;
+                    state.reset_timer = true;
                 }
                 if ui.button("回到最新").clicked() {
                     state.auto_scroll = true;
@@ -224,10 +227,10 @@ pub fn chart_panel(
                                 .filter_map(|l| {
                                     let front = l.data_history.front().map(|p| p.0);
                                     let back = l.data_history.back().map(|p| p.0);
-                                    front.zip(back).map(|(f, b)| (b - f).max(40.0))
+                                    front.zip(back).map(|(f, b)| (b - f).max(6.0))
                                 })
-                                .fold(10.0f64, f64::max);
-                            state.x_mode = XAxisMode::Fixed(xr.max(10.0));
+                                .fold(6.0f64, f64::max);
+                            state.x_mode = XAxisMode::Fixed(xr.max(6.0));
                         }
                     });
                 if let XAxisMode::Fixed(w) = &mut state.x_mode {
@@ -360,7 +363,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
     let has_data = state.legends.iter().any(|l| l.data_history.len() >= 2);
     let show_y_axis = !matches!(state.y_mode, YAxisMode::None);
 
-    let auto_bounds = has_data.then(|| {
+    let auto_bounds: Option<(f64, f64, f64, f64)> = {
         let t_max = state
             .legends
             .iter()
@@ -371,40 +374,45 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             .iter()
             .filter_map(|l| l.data_history.front().map(|p| p.0))
             .fold(f64::MAX, f64::min);
-        let xr = (t_max - t_min).max(40.0);
-        let window = state.x_mode.window(xr);
-        let x_min = t_max - window;
-        let x_max = t_max + window * 0.02;
-
-        let (y_min, y_max) = match &state.y_mode {
-            YAxisMode::Auto => {
-                let (g_min, g_max) = state
-                    .legends
-                    .iter()
-                    .flat_map(|l| l.data_history.iter().map(|p| p.1))
-                    .fold(
-                        (f64::INFINITY, f64::NEG_INFINITY),
-                        |(lo, hi), y| (lo.min(y), hi.max(y)),
-                    );
-                let y_pad = (g_max - g_min).max(10.0) * 0.1;
-                (g_min - y_pad, g_max + y_pad)
-            }
-            YAxisMode::Fixed { min, max } => (*min, *max),
-            YAxisMode::None => {
-                let (g_min, g_max) = state
-                    .legends
-                    .iter()
-                    .flat_map(|l| l.data_history.iter().map(|p| p.1))
-                    .fold(
-                        (f64::INFINITY, f64::NEG_INFINITY),
-                        |(lo, hi), y| (lo.min(y), hi.max(y)),
-                    );
-                let y_pad = (g_max - g_min).max(10.0) * 0.1;
-                (g_min - y_pad, g_max + y_pad)
-            }
-        };
-        (x_min, x_max, y_min, y_max)
-    });
+        if has_data {
+            let xr = (t_max - t_min).max(6.0);
+            let window = state.x_mode.window(xr);
+            let x_min = t_max - window;
+            let x_max = t_max + window * 0.02;
+            let (y_min, y_max) = match &state.y_mode {
+                YAxisMode::Auto => {
+                    let (g_min, g_max) = state
+                        .legends
+                        .iter()
+                        .flat_map(|l| l.data_history.iter().map(|p| p.1))
+                        .fold(
+                            (f64::INFINITY, f64::NEG_INFINITY),
+                            |(lo, hi), y| (lo.min(y), hi.max(y)),
+                        );
+                    let y_pad = (g_max - g_min).max(10.0) * 0.1;
+                    (g_min - y_pad, g_max + y_pad)
+                }
+                YAxisMode::Fixed { min, max } => (*min, *max),
+                YAxisMode::None => {
+                    let (g_min, g_max) = state
+                        .legends
+                        .iter()
+                        .flat_map(|l| l.data_history.iter().map(|p| p.1))
+                        .fold(
+                            (f64::INFINITY, f64::NEG_INFINITY),
+                            |(lo, hi), y| (lo.min(y), hi.max(y)),
+                        );
+                    let y_pad = (g_max - g_min).max(10.0) * 0.1;
+                    (g_min - y_pad, g_max + y_pad)
+                }
+            };
+            Some((x_min, x_max, y_min, y_max))
+        } else if matches!(state.x_mode, XAxisMode::Auto) {
+            Some((0.0, 6.0, 0.0, 1.0))
+        } else {
+            None
+        }
+    };
 
     let plot_rect = egui::Rect::from_min_size(
         ui.next_widget_position(),

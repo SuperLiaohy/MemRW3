@@ -225,6 +225,24 @@ impl MemRW3App {
         });
     }
 
+    pub fn reset_timer(&self) {
+        let probe = self.probe.clone();
+        self.sync.send_request(move || {
+            unsafe { probe.get_mut() }.timer = Instant::now();
+        });
+    }
+
+    pub fn clear_all_buffers(&mut self) {
+        let pool = &self.session.pool;
+        let probe = self.probe.clone();
+        self.sync.send_request(move || {
+            unsafe { probe.get_mut() }.timer = Instant::now();
+            for var in pool.iter() {
+                var.incoming.drain();
+            }
+        });
+    }
+
     pub fn rebuild_slots(&self) {
         let probe = self.probe.clone();
         let pool = &self.session.pool;
@@ -462,6 +480,10 @@ impl eframe::App for MemRW3App {
                 let removed_table: Vec<usize> = self.table_state.removed_var_ids.drain(..).collect();
                 for var_id in removed_table {
                     self.unbind_variable(var_id);
+                }
+                if self.chart_state.reset_timer {
+                    self.chart_state.reset_timer = false;
+                    self.clear_all_buffers();
                 }
             }
 

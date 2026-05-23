@@ -78,7 +78,6 @@ impl ProbeSession {
             Ok(session) => {
                 self.session = Some(session);
                 self.connected = true;
-                self.timer = Instant::now();
                 true
             }
             Err(e) => {
