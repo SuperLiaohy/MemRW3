@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use probe_rs::{MemoryInterface, Session};
@@ -5,16 +6,23 @@ use probe_rs::probe::list::Lister;
 
 use crate::model::DoubleBuffer;
 
+/// A single 32-bit aligned probe read slot.
+/// Deduplicated: multiple variables may share the same address.
 pub struct AcqSlot {
     pub address: u64,
+}
+
+/// Maps one PooledVariable to its set of AcqSlots.
+pub struct VarSlotMapping {
+    pub slots: Vec<Arc<AcqSlot>>,
     pub size: u32,
+    /// Byte offset of the variable's address within the first 32-bit slot.
+    pub byte_offset: usize,
     pub incoming: Arc<DoubleBuffer<(f64, [u8; 8])>>,
 }
 
 pub struct ProbeSession {
-    /// Declared before `session` so it's dropped first.
-    /// Cached core obtained via `session.core(0)`, reused across acquisitions.
-    /// Invalidated on read errors, re-obtained on next acquire.
+    /// Declared before `session` — dropped first (while session alive).
     cached_core: Option<probe_rs::Core<'static>>,
     session: Option<Session>,
     pub connected: bool,
@@ -23,7 +31,10 @@ pub struct ProbeSession {
     pub protocol: String,
     pub speed_khz: u32,
     pub last_error: Option<String>,
-    pub slots: Vec<AcqSlot>,
+    /// Deduplicated 32-bit aligned read slots.
+    pub slots: Vec<Arc<AcqSlot>>,
+    /// Per-variable mapping: slots → DoubleBuffer.
+    pub var_mappings: Vec<VarSlotMapping>,
     pub timer: Instant,
 }
 
@@ -43,6 +54,7 @@ impl Default for ProbeSession {
             speed_khz: 4000,
             last_error: None,
             slots: Vec::new(),
+            var_mappings: Vec::new(),
             timer: Instant::now(),
         }
     }
@@ -106,6 +118,19 @@ impl ProbeSession {
             .collect()
     }
 
+    /// Calculate the set of 32-bit aligned addresses covering [address, address+size).
+    pub fn slot_addresses(address: u64, size: u32) -> Vec<u64> {
+        let end = address.saturating_add(size as u64);
+        let start = address & !3;
+        let mut addrs = Vec::new();
+        let mut a = start;
+        while a < end {
+            addrs.push(a);
+            a = a.wrapping_add(4);
+        }
+        addrs
+    }
+
     fn ensure_core(&mut self) -> bool {
         if self.cached_core.is_some() {
             return true;
@@ -117,8 +142,6 @@ impl ProbeSession {
         match session.core(0) {
             Ok(core) => {
                 self.cached_core = Some(unsafe {
-                    // SAFETY: core borrows from self.session, both belong to self.
-                    // cached_core is declared before session, so it's dropped first.
                     std::mem::transmute::<probe_rs::Core<'_>, probe_rs::Core<'static>>(core)
                 });
                 true
@@ -130,66 +153,63 @@ impl ProbeSession {
         }
     }
 
+    /// Two-phase acquisition:
+    /// 1. Read all 32-bit slots → slot_values
+    /// 2. Assemble per-variable values from slots → push to DoubleBuffer
     pub fn acquire_from_slots(&mut self) {
-        if !self.connected {
+        if !self.connected || self.slots.is_empty() {
             return;
         }
         if !self.ensure_core() {
             return;
         }
         let ts = self.timer.elapsed().as_secs_f64();
-        let core = unsafe { &mut *(self.cached_core.as_mut().unwrap() as *mut probe_rs::Core<'static>) };
+        let core = unsafe {
+            &mut *(self.cached_core.as_mut().unwrap() as *mut probe_rs::Core<'static>)
+        };
+
+        let mut slot_values: HashMap<u64, [u8; 4]> =
+            HashMap::with_capacity(self.slots.len());
         for slot in &self.slots {
-            let addr = slot.address;
-            if addr == 0 {
-                continue;
-            }
-            let mut val = [0u8; 8];
-            match slot.size {
-                1 => match core.read_word_8(addr) {
-                    Ok(v) => val[..1].copy_from_slice(&v.to_le_bytes()),
-                    Err(e) => {
-                        self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}"));
-                        self.cached_core = None;
-                        continue;
-                    }
-                },
-                2 => match core.read_word_16(addr) {
-                    Ok(v) => val[..2].copy_from_slice(&v.to_le_bytes()),
-                    Err(e) => {
-                        self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}"));
-                        self.cached_core = None;
-                        continue;
-                    }
-                },
-                4 => match core.read_word_32(addr) {
-                    Ok(v) => val[..4].copy_from_slice(&v.to_le_bytes()),
-                    Err(e) => {
-                        self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}"));
-                        self.cached_core = None;
-                        continue;
-                    }
-                },
-                8 => match core.read_word_64(addr) {
-                    Ok(v) => val.copy_from_slice(&v.to_le_bytes()),
-                    Err(e) => {
-                        self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}"));
-                        self.cached_core = None;
-                        continue;
-                    }
-                },
-                n => {
-                    let mut buf = vec![0u8; n as usize];
-                    if let Err(e) = core.read(addr, &mut buf) {
-                        self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}"));
-                        self.cached_core = None;
-                        continue;
-                    }
-                    let len = buf.len().min(8);
-                    val[..len].copy_from_slice(&buf[..len]);
+            match core.read_word_32(slot.address) {
+                Ok(v) => {
+                    slot_values.insert(slot.address, v.to_le_bytes());
+                }
+                Err(e) => {
+                    self.last_error = Some(format!(
+                        "读取 {:#010x} 失败: {e}",
+                        slot.address
+                    ));
+                    self.cached_core = None;
+                    return;
                 }
             }
-            slot.incoming.push((ts, val));
+        }
+
+        for mapping in &self.var_mappings {
+            let mut val = [0u8; 8];
+            let mut pos: usize = 0;
+            for (i, slot) in mapping.slots.iter().enumerate() {
+                let sv = match slot_values.get(&slot.address) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                if i == 0 {
+                    let start = mapping.byte_offset;
+                    let copy_len = (4 - start).min(mapping.size as usize - pos);
+                    val[pos..pos + copy_len]
+                        .copy_from_slice(&sv[start..start + copy_len]);
+                    pos += copy_len;
+                } else {
+                    let copy_len = 4.min(mapping.size as usize - pos);
+                    val[pos..pos + copy_len].copy_from_slice(&sv[..copy_len]);
+                    pos += copy_len;
+                }
+                if pos >= mapping.size as usize {
+                    break;
+                }
+            }
+            mapping.incoming.push((ts, val));
         }
     }
 

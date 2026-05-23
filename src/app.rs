@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::model::{AppSession, DockTab, VariablePool};
-use crate::probe::{AcqSlot, ProbeCell, ProbeSession};
+use crate::probe::{AcqSlot, ProbeCell, ProbeSession, VarSlotMapping};
 use crate::sync::Sync;
 use crate::types::DwarfApp;
 use crate::ui;
@@ -210,22 +210,41 @@ impl MemRW3App {
 
     pub fn rebuild_slots(&self) {
         let probe = self.probe.clone();
-        let slots: Vec<AcqSlot> = self.session.pool.iter().map(|var| AcqSlot {
-            address: var.address,
-            size: var.size,
-            incoming: var.incoming.clone(),
-        }).collect();
+        let pool = &self.session.pool;
+        let mut slot_map: std::collections::HashMap<u64, Arc<AcqSlot>> =
+            std::collections::HashMap::new();
+        let mut mappings: Vec<VarSlotMapping> = Vec::new();
+
+        for var in pool.iter() {
+            let addrs = ProbeSession::slot_addresses(var.address, var.size);
+            let byte_offset = (var.address & 3) as usize;
+            let mut var_slots: Vec<Arc<AcqSlot>> = Vec::with_capacity(addrs.len());
+            for addr in addrs {
+                var_slots.push(
+                    slot_map
+                        .entry(addr)
+                        .or_insert_with(|| Arc::new(AcqSlot { address: addr }))
+                        .clone(),
+                );
+            }
+            mappings.push(VarSlotMapping {
+                slots: var_slots,
+                size: var.size,
+                byte_offset,
+                incoming: var.incoming.clone(),
+            });
+        }
+
+        let slots: Vec<Arc<AcqSlot>> = slot_map.into_values().collect();
         self.sync.send_request(move || {
-            unsafe { probe.get_mut() }.slots = slots;
+            let p = unsafe { probe.get_mut() };
+            p.slots = slots;
+            p.var_mappings = mappings;
         });
     }
 
-    fn push_slot(&self, address: u64, size: u32, incoming: Arc<crate::model::DoubleBuffer<(f64, [u8; 8])>>) {
-        let probe = self.probe.clone();
-        let slot = AcqSlot { address, size, incoming };
-        self.sync.send_request(move || {
-            unsafe { probe.get_mut() }.slots.push(slot);
-        });
+    fn push_slot(&self, _address: u64, _size: u32, _incoming: Arc<crate::model::DoubleBuffer<(f64, [u8; 8])>>) {
+        self.rebuild_slots();
     }
 }
 
@@ -441,7 +460,6 @@ impl eframe::App for MemRW3App {
                                         let mut right_ui = ui.new_child(egui::UiBuilder::new().max_rect(right_rect).layout(egui::Layout::top_down(egui::Align::Min)));
                                         let selected = self.dwarf_app.selected_node.clone();
                                         if let Some(ref node) = selected {
-                                            let already_added = self.session.pool.contains(node.id);
                                             let node_id = node.id;
                                             let node_size = node.size;
                                             let node_basic_type = node.basic_type.clone();
@@ -473,6 +491,11 @@ impl eframe::App for MemRW3App {
                                                     config.address = self.dwarf_app.compute_extend_address(node_id).unwrap_or(0);
                                                 }
                                             }
+                                            let already_added = self
+                                                .session
+                                                .pool
+                                                .find_by_name_addr(&config.name, config.address)
+                                                .is_some();
                                             let color_id = ui.make_persistent_id(format!("chart_add_color_{}", node.id));
                                             let mut chart_color = ui.data_mut(|d| *d.get_temp_mut_or(color_id, Color32::from_rgb(66,133,244)));
                                             let mut chart_curve_name = String::new();

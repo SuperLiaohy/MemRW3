@@ -131,7 +131,8 @@ pub struct PooledVariable {
 
 - 不再包含 `TreeNode`，只存实际用于采集和显示的数据
 - `VariablePool.add(&ExtendConfig)` 创建条目
-- `incoming` 通过 `Arc` 共享给 `AcqSlot`（采集线程无锁写入）和 Chart/Table 面板（UI 线程无锁 drain）
+- `incoming` 通过 `Arc` 共享: rebuild_slots 时 clone 到 `VarSlotMapping.incoming`, 采集线程无锁写入, UI 线程无锁 drain
+- 去重: 添加变量前检查 `Pool.find_by_name_addr(name, address)`, 同 name+address 不重复添加
 - Chart/Table 面板直接使用 `var.ext_type` 进行值解码和格式化
 
 ### BasicType vs ExtendType
@@ -337,10 +338,50 @@ fn acquire_from_slots(&mut self) {
 
 ```rust
 pub struct AcqSlot {
-    pub address: u64,
-    pub size: u32,
+    pub address: u64,  // 32-bit 对齐地址, 去重: 多变量可共享同一地址
+}
+```
+
+`VarSlotMapping` 将一个 `PooledVariable` 映射到其 `AcqSlot` 集合:
+
+```rust
+pub struct VarSlotMapping {
+    pub slots: Vec<Arc<AcqSlot>>,   // 该变量的全部 32-bit 槽位
+    pub size: u32,                   // 变量总大小
+    pub byte_offset: usize,          // 变量地址在首槽位中的字节偏移
     pub incoming: Arc<DoubleBuffer<(f64, [u8; 8])>>,
 }
+```
+
+**rebuild_slots 算法** (每次连接/变量变更时在主线程通过 sync 执行):
+
+```
+1. 遍历 VariablePool 中每个 PooledVariable:
+   a. slot_addresses(var.address, var.size) → 计算覆盖该地址范围的 32-bit 对齐地址列表
+      - u32@0x2000_0000 → [0x2000_0000]
+      - u64@0x2000_0000 → [0x2000_0000, 0x2000_0004]
+      - u8@0x2000_0001  → [0x2000_0000] (byte_offset=1)
+   b. 去重: HashMap<u64, Arc<AcqSlot>>, 同地址共享 Arc
+   c. 构建 VarSlotMapping { slots, size, byte_offset, incoming }
+2. 将去重后的 Vec<Arc<AcqSlot>> 和 Vec<VarSlotMapping> 写入 ProbeSession (通过 sync)
+```
+
+**两阶段采集** (acq_thread):
+
+```
+Phase 1: 读取全部去重槽位
+  for slot in slots:
+    slot_value = core.read_word_32(slot.address)
+    → HashMap<u64, [u8; 4]>
+
+Phase 2: 组装变量值 → push DoubleBuffer
+  for mapping in var_mappings:
+    val = [0u8; 8]
+    for (i, slot) in mapping.slots:
+      sv = slot_values[slot.address]
+      if i == 0: copy sv[mapping.byte_offset..]  → val
+      else:      copy sv[..]                      → val
+    mapping.incoming.push((ts, val))
 ```
 
 #### DoubleBuffer (SPSC 无锁双缓冲)

@@ -59,4 +59,10 @@ impl VariablePool {
     pub fn contains(&self, id: usize) -> bool {
         self.id_index.contains_key(&id)
     }
+
+    pub fn find_by_name_addr(&self, name: &str, address: u64) -> Option<&PooledVariable> {
+        self.variables
+            .iter()
+            .find(|v| v.name == name && v.address == address)
+    }
 }
