@@ -12,6 +12,9 @@ pub struct TablePluginState {
     pub editing_entry: Option<usize>,
     pub show_entry_dialog: bool,
     pub removed_var_ids: Vec<usize>,
+    pub pending_writes: Vec<(usize, u64)>,
+    pub status_message: Option<String>,
+    pub status_error: bool,
 }
 
 impl Default for TablePluginState {
@@ -21,6 +24,9 @@ impl Default for TablePluginState {
             editing_entry: None,
             show_entry_dialog: false,
             removed_var_ids: Vec::new(),
+            pending_writes: Vec::new(),
+            status_message: None,
+            status_error: false,
         }
     }
 }
@@ -84,45 +90,46 @@ pub fn table_panel(
             });
         });
 
-        // Dialog (rendered at top layer, always interactive)
         if state.show_entry_dialog {
             if let Some(edit_idx) = state.editing_entry {
                 let mut dialog_remove = false;
                 let mut should_close = false;
-                {
                 let entry = &mut state.entries[edit_idx];
                 let ext_info = pool.get(entry.variable_id).map(|v| {
-                    (
-                        v.name.clone(),
-                        v.address,
-                        v.ext_type.clone(),
-                        v.size,
-                    )
+                    (v.name.clone(), v.address, v.ext_type.clone(), v.size)
                 });
                 egui::Window::new(format!("变量属性 - {}", entry.display_name))
                     .collapsible(false).resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                     .show(ui.ctx(), |ui| {
-                        let (ext_name, ext_addr, ext_type, ext_size) = ext_info.unwrap_or((String::new(), 0, ExtendType::U32, 0));
-                        if let Some(remove) = table_entry_dialog_ui(ui, entry, &ext_name, ext_addr, &ext_type, ext_size) {
+                        let (ext_name, ext_addr, ext_type, ext_size) =
+                            ext_info.unwrap_or((String::new(), 0, ExtendType::U32, 0));
+                        if let Some(remove) = table_entry_dialog_ui(
+                            ui, entry, &ext_name, ext_addr, &ext_type, ext_size,
+                        ) {
                             dialog_remove = remove;
                             should_close = true;
                         }
                     });
-                }
                 if should_close {
                     state.show_entry_dialog = false;
                     if dialog_remove { state.remove_entry(edit_idx); }
                 }
-            } else { state.show_entry_dialog = false; }
+            } else {
+                state.show_entry_dialog = false;
+            }
         }
     });
 
     action
 }
 
-fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool, frame_data: &HashMap<usize, Vec<(f64, [u8; 8])>>) {
-    let mut to_remove = None;
+fn render_table(
+    ui: &mut Ui,
+    state: &mut TablePluginState,
+    pool: &VariablePool,
+    frame_data: &HashMap<usize, Vec<(f64, [u8; 8])>>,
+) {
     let mut to_edit = None;
 
     egui::Grid::new("var_table")
@@ -130,17 +137,21 @@ fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool, 
         .min_col_width(70.0)
         .show(ui, |ui| {
             ui.strong("Name");
-            ui.strong("Value");
+            ui.strong("Read");
             ui.strong("Write");
-            ui.strong("");
             ui.end_row();
 
             for (i, entry) in state.entries.iter_mut().enumerate() {
                 let row_id = egui::Id::new(("table_row", i));
-
-                ui.label(RichText::new(&entry.display_name).size(12.0));
-
                 let var = pool.get(entry.variable_id);
+
+                if ui
+                    .add_sized([120.0, 20.0], egui::Button::new(RichText::new(&entry.display_name).size(12.0)))
+                    .double_clicked()
+                {
+                    to_edit = Some(i);
+                }
+
                 let current_val = var
                     .and_then(|v| {
                         frame_data
@@ -148,40 +159,75 @@ fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool, 
                             .and_then(|d| d.last())
                             .map(|(_, data)| format_value(data, &v.ext_type))
                             .or_else(|| {
-                                v.incoming
-                                    .latest()
+                                v.incoming.latest()
                                     .map(|(_, data)| format_value(&data, &v.ext_type))
                             })
                     })
                     .unwrap_or_else(|| "--".into());
-                ui.label(RichText::new(&current_val).size(12.0));
+                ui.label(RichText::new(&current_val).size(12.0).monospace());
 
+                let var_info = var.map(|v| (v.ext_type.clone(), v.size));
                 let mut edit_buf = entry.edit_buffer.clone();
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut edit_buf)
-                        .id(row_id.with("write_edit"))
-                        .desired_width(80.0)
-                        .font(egui::TextStyle::Monospace),
-                );
-                if resp.changed() { entry.edit_buffer = edit_buf; }
-
-                if ui.add(egui::Button::new("写").small()).clicked() {
-                    entry.current_value = std::mem::take(&mut entry.edit_buffer);
-                }
-
+                ui.horizontal(|ui| {
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut edit_buf)
+                            .id(row_id.with("write_edit"))
+                            .desired_width(70.0)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    if resp.changed() {
+                        entry.edit_buffer = edit_buf;
+                    }
+                    if ui.add(egui::Button::new("写").small()).clicked() {
+                        if let Some((ref ext_type, _)) = var_info {
+                            match validate_write(&entry.edit_buffer, ext_type) {
+                                Ok(value) => {
+                                    state.pending_writes.push((entry.variable_id, value));
+                                    state.status_message = Some("写入请求已发送".into());
+                                    state.status_error = false;
+                                }
+                                Err(e) => {
+                                    state.status_message = Some(e);
+                                    state.status_error = true;
+                                }
+                            }
+                        }
+                    }
+                });
                 ui.end_row();
-
-                let row_rect = ui.min_rect();
-                let int_resp = ui.interact(row_rect, row_id.with("click"), egui::Sense::click());
-                if int_resp.double_clicked() { to_edit = Some(i); }
-
-                let del_btn = ui.add_sized([20.0, 16.0], egui::Button::new("✕").small());
-                if del_btn.clicked() { to_remove = Some(i); }
             }
         });
 
-    if let Some(i) = to_remove { state.remove_entry(i); }
-    if let Some(i) = to_edit { state.editing_entry = Some(i); state.show_entry_dialog = true; }
+    if let Some(i) = to_edit {
+        state.editing_entry = Some(i);
+        state.show_entry_dialog = true;
+    }
+}
+
+fn validate_write(input: &str, ext_type: &ExtendType) -> Result<u64, String> {
+    let v = input.trim();
+    if v.is_empty() {
+        return Err("请输入值".into());
+    }
+    match ext_type {
+        ExtendType::U8 => v.parse::<u8>().map(|x| x as u64).map_err(|_| "超出 u8 范围 (0-255)".into()),
+        ExtendType::I8 => v.parse::<i8>().map(|x| x as u64).map_err(|_| "超出 i8 范围 (-128~127)".into()),
+        ExtendType::U16 => v.parse::<u16>().map(|x| x as u64).map_err(|_| "超出 u16 范围".into()),
+        ExtendType::I16 => v.parse::<i16>().map(|x| x as u64).map_err(|_| "超出 i16 范围".into()),
+        ExtendType::U32 => v.parse::<u32>().map(|x| x as u64).map_err(|_| "超出 u32 范围".into()),
+        ExtendType::I32 => v.parse::<i32>().map(|x| x as u64).map_err(|_| "超出 i32 范围".into()),
+        ExtendType::U64 => v.parse::<u64>().map_err(|_| "超出 u64 范围".into()),
+        ExtendType::I64 => v.parse::<i64>().map(|x| x as u64).map_err(|_| "超出 i64 范围".into()),
+        ExtendType::Float => {
+            let f: f32 = v.parse().map_err(|_| "无效的 float".to_string())?;
+            Ok(f.to_bits() as u64)
+        }
+        ExtendType::Double => {
+            let d: f64 = v.parse().map_err(|_| "无效的 double".to_string())?;
+            Ok(d.to_bits())
+        }
+        ExtendType::Other => Err("Other 类型不支持写入".into()),
+    }
 }
 
 fn format_value(data: &[u8], ext_type: &ExtendType) -> String {

@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "eframe",
+ "egui-notify",
  "egui_dock",
  "egui_ltreeview",
  "egui_plot",
@@ -1162,6 +1163,15 @@ dependencies = [
  "profiling",
  "smallvec",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "egui-notify"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a29b39d9d60a29c217d0e86ef8221cd2e736f841aba75b5c32a3a0cade5f802"
+dependencies = [
+ "egui",
 ]
 
 [[package]]

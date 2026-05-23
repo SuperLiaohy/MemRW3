@@ -272,22 +272,36 @@ BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭]
 
 ```
 [变量树添加变量]
-  ├─ VariablePool.add(config) → PooledVariable { incoming: Arc<DoubleBuffer<...>> }
-  └─ push_slot() → sync → acq_thread.slots.push(AcqSlot { incoming: clone(Arc) })
-                          ↑ 指向同一个 DoubleBuffer
+  ├─ Pool.find_by_name_addr(name, addr) → 去重
+  │   ├─ 已存在 → 复用 var_id
+  │   └─ 新变量 → VariablePool.add(config) → rebuild_slots (sync)
+  └─ Plugin.add_legend/entry(var_id) → PooledVariable.plugins_cnt += 1
+
 [点击"开始"]
-  └─ rebuild_slots() → sync → acq_thread.slots = 全量 AcqSlot 列表
+  ├─ first start 或 after clear → reset_timer() (sync)
+  └─ rebuild_slots() → sync → acq_thread.slots + var_mappings
 
-采集线程:
-  for slot in slots:
-    probe-rs read(slot.address, slot.size) → slot.incoming.push((ts, val))
-    ↑ 无锁 push 到 DoubleBuffer
+采集线程 (每轮):
+  Phase 1: read32 all slots → HashMap<u64, [u8; 4]>
+  Phase 2: for mapping in var_mappings:
+    assemble value from slots → mapping.incoming.push((ts, val))
+  cycle_count.fetch_add(1) → Hz 统计
 
-UI 线程 (每帧):
-  for legend in chart_state.legends:
-    var.incoming.drain() → Vec<(time, value)>
-    ↑ 同一个 Arc<DoubleBuffer>, 无锁 drain
-    push_value(time, val) → 图表绘制
+UI 线程 (每帧开始):
+  for var in pool.iter():
+    frame_data[var.id] = var.incoming.drain()  ← 每个变量只 drain 一次
+
+  chart_panel(&frame_data):   ← 从 frame_data 读, 不再调用 drain
+  table_panel(&frame_data):   ← 同上
+```
+
+**插件删除 → 解绑**:
+
+```
+remove_legend/entry → removed_var_ids.push(var_id)
+ui() drain removed_var_ids:
+  PooledVariable.plugins_cnt -= 1
+  if plugins_cnt == 0 → pool.remove(var_id) + rebuild_slots (sync)
 ```
 
 #### ProbeCell (无 Mutex) + Core 缓存
@@ -414,9 +428,14 @@ Vec<PooledVariable> + HashMap<usize, usize> (id → index)
   ├─ get(id)      → O(1) id_index → Vec[index]
   └─ iter_mut()   → 直接迭代 Vec (采集循环用)
 
-PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<...>> }
-                                                         ↑ Arc 共享: 采集线程 push, UI 线程 drain
+PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<...>>, plugins_cnt: usize }
+                                                          ↑ Arc 共享: 采集线程 push, UI 线程 drain    ↑ 绑定计数: 0 时自动移除
 ```
+
+**plugins_cnt 生命周期**:
+- `add_legend/entry` → `plugins_cnt += 1`
+- `remove_legend/entry` → `plugins_cnt -= 1`; 若为 0 → `pool.remove(id)` + `rebuild_slots`
+- `find_by_name_addr(name, addr)` 添加前去重, 已存在则复用 id
 
 ### 6. Chart 图表面板特性
 
@@ -429,7 +448,14 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 | 图例 (Legend) | 图表右上角浮动: `[色条] 曲线名 = 当前值` |
 | 单击图例 | 切换 visible (曲线消失/恢复, 图例变暗) |
 | 双击图例 | 弹出居中 line_dialog (模态: 全界面拦截对话窗外点击) |
-| 曲线属性 Dialog | 曲线名/颜色/缓冲/可见 + **PooledVariable 的 Extend 属性** (名称/地址/类型/大小) + 删除/确定/取消 |
+| 曲线属性 Dialog | 曲线名/颜色(`color_edit_button_srgba`+预设色块)/缓冲/可见 + 变量属性 + 删除/确定/取消 |
+| 编辑确认 | 对话框内编本地副本 (state.edit_*), "确定"生效 / "取消"丢弃, 非 running 时缓冲区长度可编辑 |
+| 缓冲区 | "确定"时若长度变化 → `data_history = VecDeque::with_capacity(new_size)` 清空重建 |
+| X 轴 | 默认 Auto 模式 6s 视窗, 无数据时初始 [0, 6.0] |
+| 清空 | 清除 data_history + `clear_all_buffers()` (sync pause → drain all DoubleBuffers + reset timer) |
+| Hz | `acq_cycle_count: Arc<AtomicU64>` 每采集轮询 `fetch_add(1)`, 主线程每秒计算 |
+| 计时 | 首次"开始"或"清空"后第一次"开始" → timer 归零; 暂停再继续 → 累积计时 |
+| 控制栏 | 显示 `Vari:N Slot:M` (PooledVariable 数 / 去重 AcqSlot 数) + `Hz: xxxx` |
 | 添加配置颜色 | `egui::color_picker::color_edit_button_srgba()` 自定义拾色器 + 预设色块网格, egui memory 持久化 |
 | 空状态 | 居中提示"暂无监控变量" + 打开变量树按钮 |
 
@@ -548,9 +574,14 @@ anyhow = "1.0"            # 错误处理
     - `Sync`: 两阶段握手 (Mutex+Condvar), `send_request(闭包)` 阻塞主线程直至采集线程暂停
     - `ProbeCell` (UnsafeCell): 无 Mutex 开销, Sync 协议保证互斥
     - **Core 缓存**: `session.core(0)` 首次调用后通过 `unsafe transmute` 缓存为 `Core<'static>`, 避免每帧重复初始化 (性能关键: 200-500µs → ~0µs)
-    - `AcqSlot`: 缓存变量地址/大小/类型, 采集线程无需访问 VariablePool
+    - `AcqSlot`: 纯 32-bit 地址标记, 去重: 多变量共享同地址; `VarSlotMapping` 将变量映射到其槽位集合
+    - **两阶段采集**: Phase1 read32 全部去重槽位 → Phase2 按 byte_offset 组装变量值
     - `DoubleBuffer`: SPSC 无锁双缓冲, `fetch_xor` 原子翻转, 预分配容量 2560
     - `delay_us: Arc<AtomicU64>`: 默认 0 (全速), 采集线程 sleep 节流, 主线程独立 vsync 刷新
+    - **FrameData 预 drain**: UI 每帧开始时统一 drain 所有 DoubleBuffer 到 HashMap, plugin 只读不 drain — 避免同一变量被多处引用时多次切换缓冲区
+    - **plugins_cnt**: 变量被 plugin 绑定时 +1, 解绑时 -1; 归零自动从 Pool 移除 + rebuild_slots
+    - **Hz**: `acq_cycle_count: Arc<AtomicU64>` 采集线程每轮 +1, 主线程每秒计算采集轮询频率
+    - **计时**: `timer_was_started` 追踪, 首次"开始"和清空后第一次"开始"归零, 暂停再继续累积
 
 12. **Tree View 默认折叠, 搜索居中滚动 + 点击滚动**: 使用 `NodeBuilder::default_open(false)` 初始化所有树节点为折叠状态; 搜索后通过 `count_nodes_before()` (基于 `tree_state` 展开状态) 计算可见节点数, 使用 `viewport_h` 居中偏移公式 `ScrollArea::vertical_scroll_offset()` 居中显示; 点击节点也设 `scroll_target_id` 实现滚到居中。
 

@@ -214,11 +214,17 @@ impl ProbeSession {
         }
     }
 
-    pub fn write_u32(&mut self, addr: u64, value: u32) -> bool {
+    pub fn write_value(&mut self, addr: u64, size: u32, value: u64) -> bool {
         self.cached_core = None;
         if let Some(ref mut session) = self.session {
             if let Ok(mut core) = session.core(0) {
-                return core.write_word_32(addr, value).is_ok();
+                return match size {
+                    1 => core.write_word_8(addr, value as u8).is_ok(),
+                    2 => core.write_word_16(addr, value as u16).is_ok(),
+                    4 => core.write_word_32(addr, value as u32).is_ok(),
+                    8 => core.write_word_64(addr, value).is_ok(),
+                    _ => false,
+                };
             }
         }
         false

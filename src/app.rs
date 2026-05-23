@@ -44,6 +44,7 @@ pub struct MemRW3App {
     pub delay_us: Arc<AtomicU64>,
     acq_cycle_count: Arc<AtomicU64>,
     pub slot_count: Arc<AtomicU64>,
+    pub toasts: egui_notify::Toasts,
     hz_last_cycles: u64,
     hz_last_time: Instant,
     acq_stop: Arc<AtomicBool>,
@@ -128,6 +129,7 @@ impl MemRW3App {
             delay_us,
             acq_cycle_count,
             slot_count,
+            toasts: egui_notify::Toasts::default(),
             hz_last_cycles: 0,
             hz_last_time: Instant::now(),
             acq_stop,
@@ -243,6 +245,21 @@ impl MemRW3App {
                 var.incoming.drain();
             }
         });
+    }
+
+    pub fn write_variable(&self, var_id: usize, value: u64) -> bool {
+        let var = match self.session.pool.get(var_id) {
+            Some(v) => v,
+            None => return false,
+        };
+        let addr = var.address;
+        let size = var.size;
+        let probe = self.probe.clone();
+        let mut ok = false;
+        self.sync.send_request(|| {
+            ok = unsafe { probe.get_mut() }.write_value(addr, size, value);
+        });
+        ok
     }
 
     pub fn rebuild_slots(&self) {
@@ -430,8 +447,10 @@ impl eframe::App for MemRW3App {
             });
 
             let remaining = ui.available_height();
-            let min_limit = remaining * 0.5;
-            let max_h = (remaining * 0.9).max(min_limit);
+            let dock_h = remaining;
+
+            let min_limit = dock_h * 0.5;
+            let max_h = (dock_h * 0.9).max(min_limit);
             let min_h = min_limit.min(max_h);
             let bs_h = if bs_open {
                 self.session.bottom_sheet_height = self.session.bottom_sheet_height.clamp(min_h, max_h);
@@ -439,9 +458,9 @@ impl eframe::App for MemRW3App {
             } else {
                 0.0
             };
-            if remaining > 0.0 {
+            if dock_h > 0.0 {
                 let (dock_rect, _) = ui.allocate_at_least(
-                    egui::vec2(ui.available_width(), remaining),
+                    egui::vec2(ui.available_width(), dock_h),
                     egui::Sense::click(),
                 );
                 let mut dock_ui = ui.new_child(
@@ -482,6 +501,21 @@ impl eframe::App for MemRW3App {
                 let removed_table: Vec<usize> = self.table_state.removed_var_ids.drain(..).collect();
                 for var_id in removed_table {
                     self.unbind_variable(var_id);
+                }
+                let writes: Vec<(usize, u64)> = self.table_state.pending_writes.drain(..).collect();
+                for (var_id, value) in writes {
+                    let ok = self.write_variable(var_id, value);
+                    if ok {
+                        self.toasts.success("写入成功").duration(Some(Duration::from_secs(2)));
+                    } else {
+                        self.toasts.error("写入失败").duration(Some(Duration::from_secs(3)));
+                    }
+                }
+                if let Some(ref msg) = self.table_state.status_message {
+                    if self.table_state.status_error {
+                        self.toasts.error(msg.clone()).duration(Some(Duration::from_secs(3)));
+                    }
+                    self.table_state.status_message = None;
                 }
                 if self.chart_state.reset_timer {
                     self.chart_state.reset_timer = false;
@@ -656,6 +690,7 @@ impl eframe::App for MemRW3App {
                 });
             }
         });
+        self.toasts.show(ui.ctx());
     }
 }
 
