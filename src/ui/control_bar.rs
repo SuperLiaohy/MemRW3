@@ -20,6 +20,13 @@ pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
                 delay_slider(ui, app);
                 ui.separator();
                 reset_button(ui, app);
+                ui.separator();
+                if ui.button(RichText::new("保存").size(12.0)).clicked() {
+                    app.save_config();
+                }
+                if ui.button(RichText::new("加载").size(12.0)).clicked() {
+                    app.load_config();
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     sampling_status(ui, app);
                 });

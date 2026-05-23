@@ -2,6 +2,7 @@ use eframe::egui;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer, tab_viewer};
 use object::Object;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     sync::{
@@ -770,6 +771,198 @@ impl eframe::App for MemRW3App {
             }
         });
         self.toasts.show(ui.ctx());
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SaveConfig {
+    elf_path: String,
+    probe_chip: String,
+    probe_protocol: String,
+    probe_speed_khz: u32,
+    variables: Vec<SavedVariable>,
+    chart_legends: Vec<SavedChartLegend>,
+    table_entries: Vec<SavedTableEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedVariable {
+    name: String,
+    address: u64,
+    ext_type: String,
+    size: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedChartLegend {
+    variable_name: String,
+    curve_name: String,
+    color: [u8; 4],
+    visible: bool,
+    buffer_size: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedTableEntry {
+    variable_name: String,
+    display_name: String,
+}
+
+impl MemRW3App {
+    pub fn save_config(&mut self) {
+        let path = rfd::FileDialog::new()
+            .add_filter("JSON", &["json"])
+            .set_file_name("memrw3_config.json")
+            .save_file();
+        let Some(path) = path else { return };
+
+        let config = SaveConfig {
+            elf_path: self.elf_path.clone(),
+            probe_chip: self.session.probe_chip.clone(),
+            probe_protocol: self.session.probe_protocol.clone(),
+            probe_speed_khz: self.session.probe_speed_khz,
+            variables: self
+                .session
+                .pool
+                .iter()
+                .map(|v| SavedVariable {
+                    name: v.name.clone(),
+                    address: v.address,
+                    ext_type: format!("{:?}", v.ext_type),
+                    size: v.size,
+                })
+                .collect(),
+            chart_legends: self
+                .chart_state
+                .legends
+                .iter()
+                .map(|l| {
+                    let var_name = self
+                        .session
+                        .pool
+                        .get(l.variable_id)
+                        .map(|v| v.name.clone())
+                        .unwrap_or_default();
+                    SavedChartLegend {
+                        variable_name: var_name,
+                        curve_name: l.curve_name.clone(),
+                        color: [l.color.r(), l.color.g(), l.color.b(), l.color.a()],
+                        visible: l.visible,
+                        buffer_size: l.buffer_size,
+                    }
+                })
+                .collect(),
+            table_entries: self
+                .table_state
+                .entries
+                .iter()
+                .map(|e| {
+                    let var_name = self
+                        .session
+                        .pool
+                        .get(e.variable_id)
+                        .map(|v| v.name.clone())
+                        .unwrap_or_default();
+                    SavedTableEntry {
+                        variable_name: var_name,
+                        display_name: e.display_name.clone(),
+                    }
+                })
+                .collect(),
+        };
+
+        if let Ok(json) = serde_json::to_string_pretty(&config) {
+            std::fs::write(&path, json).ok();
+            self.toasts.success("配置已保存").duration(Some(Duration::from_secs(2)));
+        }
+    }
+
+    pub fn load_config(&mut self) {
+        let path = rfd::FileDialog::new()
+            .add_filter("JSON", &["json"])
+            .pick_file();
+        let Some(path) = path else { return };
+
+        let Ok(json) = std::fs::read_to_string(&path) else {
+            self.toasts.error("读取配置文件失败").duration(Some(Duration::from_secs(3)));
+            return;
+        };
+        let config: SaveConfig = match serde_json::from_str(&json) {
+            Ok(c) => c,
+            Err(e) => {
+                self.toasts.error(format!("解析 JSON 失败: {e}")).duration(Some(Duration::from_secs(5)));
+                return;
+            }
+        };
+
+        // Restore probe settings
+        self.session.probe_chip = config.probe_chip;
+        self.session.probe_protocol = config.probe_protocol;
+        self.session.probe_speed_khz = config.probe_speed_khz;
+        self.elf_path = config.elf_path;
+
+        // Load ELF
+        self.load_elf();
+
+        // Clear existing pool and plugins
+        self.session.pool = VariablePool::default();
+        self.chart_state.legends.clear();
+        self.table_state.entries.clear();
+
+        // Restore variables
+        for sv in &config.variables {
+            let ext_type = match sv.ext_type.as_str() {
+                "U8" => crate::types::ExtendType::U8,
+                "U16" => crate::types::ExtendType::U16,
+                "U32" => crate::types::ExtendType::U32,
+                "U64" => crate::types::ExtendType::U64,
+                "I8" => crate::types::ExtendType::I8,
+                "I16" => crate::types::ExtendType::I16,
+                "I32" => crate::types::ExtendType::I32,
+                "I64" => crate::types::ExtendType::I64,
+                "Float" => crate::types::ExtendType::Float,
+                "Double" => crate::types::ExtendType::Double,
+                _ => crate::types::ExtendType::Other,
+            };
+            let config = crate::types::ExtendConfig {
+                name: sv.name.clone(),
+                address: sv.address,
+                ext_type,
+                size: sv.size,
+                array_index: None,
+                array_count: None,
+            };
+            self.session.pool.add(&config);
+        }
+
+        // Restore chart legends
+        for sl in &config.chart_legends {
+            let var_id = self.session.pool.iter().find(|v| v.name == sl.variable_name).map(|v| v.id);
+            if let Some(var_id) = var_id {
+                let mut legend = crate::ui::chart_plugin::ChartLegend::new(var_id, sl.curve_name.clone());
+                legend.color = Color32::from_rgba_premultiplied(sl.color[0], sl.color[1], sl.color[2], sl.color[3]);
+                legend.visible = sl.visible;
+                legend.buffer_size = sl.buffer_size;
+                self.chart_state.legends.push(legend);
+                if let Some(var) = self.session.pool.get_mut(var_id) {
+                    var.plugins_cnt += 1;
+                }
+            }
+        }
+
+        for se in &config.table_entries {
+            let var_id = self.session.pool.iter().find(|v| v.name == se.variable_name).map(|v| v.id);
+            if let Some(var_id) = var_id {
+                let mut entry = crate::ui::table_plugin::TableEntry::new(var_id, se.display_name.clone());
+                entry.display_name = se.display_name.clone();
+                self.table_state.entries.push(entry);
+                if let Some(var) = self.session.pool.get_mut(var_id) {
+                    var.plugins_cnt += 1;
+                }
+            }
+        }
+
+        self.toasts.success("配置已加载").duration(Some(Duration::from_secs(2)));
     }
 }
 
