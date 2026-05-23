@@ -21,6 +21,7 @@ pub struct AppSession {
     pub probe_protocol: String,
     pub probe_speed_khz: u32,
     pub show_probe_settings: bool,
+    pub timer_was_started: bool,
 }
 
 impl AppSession {
@@ -56,6 +57,7 @@ impl Default for AppSession {
             probe_protocol: "SWD".into(),
             probe_speed_khz: 4000,
             show_probe_settings: false,
+            timer_was_started: false,
         }
     }
 }

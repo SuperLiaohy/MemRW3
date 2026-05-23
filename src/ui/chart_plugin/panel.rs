@@ -44,6 +44,10 @@ pub struct ChartPluginState {
     pub acq_hz: f64,
     pub removed_var_ids: Vec<usize>,
     pub reset_timer: bool,
+    pub edit_curve_name: String,
+    pub edit_color: Color32,
+    pub edit_buffer_size: usize,
+    pub edit_visible: bool,
     acq_frame_count: u64,
     acq_last_reset: Instant,
     was_running: bool,
@@ -61,6 +65,10 @@ impl Default for ChartPluginState {
             acq_hz: 0.0,
             removed_var_ids: Vec::new(),
             reset_timer: false,
+            edit_curve_name: String::new(),
+            edit_color: Color32::WHITE,
+            edit_buffer_size: 10000,
+            edit_visible: true,
             acq_frame_count: 0,
             acq_last_reset: Instant::now(),
             was_running: false,
@@ -322,31 +330,49 @@ pub fn chart_panel(
         // Dialog (rendered at top layer, always interactive)
         if state.show_line_dialog {
             if let Some(edit_idx) = state.editing_legend {
-                let mut remove = false;
-                let mut done = false;
-                let legend = &mut state.legends[edit_idx];
-                let ext_info = pool
-                    .get(legend.variable_id)
-                    .map(|v| (v.name.clone(), v.address, v.ext_type.clone(), v.size));
-                egui::Window::new(format!("曲线属性 - {}", legend.curve_name))
+                let (ext_info, win_title) = {
+                    let legend = &state.legends[edit_idx];
+                    let ext_info = pool
+                        .get(legend.variable_id)
+                        .map(|v| (v.name.clone(), v.address, v.ext_type.clone(), v.size));
+                    (ext_info, legend.curve_name.clone())
+                };
+                let mut action: Option<super::line_dialog::DialogAction> = None;
+                egui::Window::new(format!("曲线属性 - {}", win_title))
                     .collapsible(false)
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                     .show(ui.ctx(), |ui| {
                         let (ext_name, ext_addr, ext_type, ext_size) =
                             ext_info.unwrap_or((String::new(), 0, ExtendType::U32, 0));
-                        if let Some(r) = super::line_dialog::line_dialog_ui(
-                            ui, legend, &ext_name, ext_addr, &ext_type, ext_size,
-                        ) {
-                            remove = r;
-                            done = true;
-                        }
+                        action = super::line_dialog::line_dialog_ui(
+                            ui,
+                            &mut state.edit_curve_name,
+                            &mut state.edit_color,
+                            &mut state.edit_buffer_size,
+                            &mut state.edit_visible,
+                            &ext_name, ext_addr, &ext_type, ext_size,
+                            running,
+                        );
                     });
-                if done {
-                    state.show_line_dialog = false;
-                    if remove {
-                        state.remove_legend(edit_idx);
+                if let Some(act) = action {
+                    match act {
+                        super::line_dialog::DialogAction::Delete => {
+                            state.remove_legend(edit_idx);
+                        }
+                        super::line_dialog::DialogAction::Cancel => {}
+                        super::line_dialog::DialogAction::Confirm => {
+                            let legend = &mut state.legends[edit_idx];
+                            legend.curve_name = std::mem::take(&mut state.edit_curve_name);
+                            legend.color = state.edit_color;
+                            legend.visible = state.edit_visible;
+                            if legend.buffer_size != state.edit_buffer_size {
+                                legend.buffer_size = state.edit_buffer_size;
+                                legend.data_history = std::collections::VecDeque::with_capacity(state.edit_buffer_size);
+                            }
+                        }
                     }
+                    state.show_line_dialog = false;
                 }
             } else {
                 state.show_line_dialog = false;
@@ -526,6 +552,11 @@ fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2)
     if let Some(i) = edit {
         state.editing_legend = Some(i);
         state.show_line_dialog = true;
+        let legend = &state.legends[i];
+        state.edit_curve_name = legend.curve_name.clone();
+        state.edit_color = legend.color;
+        state.edit_buffer_size = legend.buffer_size;
+        state.edit_visible = legend.visible;
     }
 }
 

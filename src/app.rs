@@ -191,6 +191,7 @@ impl MemRW3App {
 
         if connected {
             self.session.set_running(false);
+            self.session.timer_was_started = false;
             self.sync.send_request(move || {
                 unsafe { probe.get_mut() }.disconnect();
             });
@@ -233,6 +234,7 @@ impl MemRW3App {
     }
 
     pub fn clear_all_buffers(&mut self) {
+        self.session.timer_was_started = false;
         let pool = &self.session.pool;
         let probe = self.probe.clone();
         self.sync.send_request(move || {

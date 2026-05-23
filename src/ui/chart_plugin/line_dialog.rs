@@ -1,29 +1,41 @@
 use eframe::egui::{self, Color32, RichText, Ui};
 use crate::types::ExtendType;
-use super::legend::{preset_colors, ChartLegend};
+use super::legend::preset_colors;
+
+pub enum DialogAction {
+    Confirm,
+    Cancel,
+    Delete,
+}
 
 pub fn line_dialog_ui(
     ui: &mut Ui,
-    legend: &mut ChartLegend,
+    curve_name: &mut String,
+    color: &mut Color32,
+    buffer_size: &mut usize,
+    visible: &mut bool,
     ext_name: &str,
     ext_address: u64,
     ext_type: &ExtendType,
     ext_size: u32,
-) -> Option<bool> {
+    running: bool,
+) -> Option<DialogAction> {
     egui::Grid::new("line_dialog_grid")
         .num_columns(2).spacing([8.0, 4.0])
         .show(ui, |ui| {
             ui.label("曲线名称:");
-            ui.text_edit_singleline(&mut legend.curve_name);
+            ui.text_edit_singleline(curve_name);
             ui.end_row();
             ui.label("颜色:");
-            color_picker(ui, &mut legend.color);
+            color_pick(ui, color);
             ui.end_row();
             ui.label("缓冲区:");
-            ui.add(egui::Slider::new(&mut legend.buffer_size, 1000..=50000).step_by(1000.0).text("points"));
+            ui.add_enabled_ui(!running, |ui| {
+                ui.add(egui::Slider::new(buffer_size, 1000..=50000).step_by(1000.0).text("points"));
+            });
             ui.end_row();
             ui.label("可见:");
-            ui.checkbox(&mut legend.visible, "");
+            ui.checkbox(visible, "");
             ui.end_row();
 
             ui.separator();
@@ -51,10 +63,16 @@ pub fn line_dialog_ui(
     ui.add_space(4.0);
     let mut result = None;
     ui.horizontal(|ui| {
-        if ui.button(RichText::new("删除").color(Color32::from_rgb(220,60,50))).clicked() { result = Some(true); }
+        if ui.button(RichText::new("删除").color(Color32::from_rgb(220,60,50))).clicked() {
+            result = Some(DialogAction::Delete);
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("确定").clicked() { result = Some(false); }
-            if ui.button("取消").clicked() { result = Some(false); }
+            if ui.button("确定").clicked() {
+                result = Some(DialogAction::Confirm);
+            }
+            if ui.button("取消").clicked() {
+                result = Some(DialogAction::Cancel);
+            }
         });
     });
     result
@@ -76,12 +94,20 @@ fn extend_type_label(et: &ExtendType) -> &'static str {
     }
 }
 
-fn color_picker(ui: &mut Ui, current: &mut Color32) {
-    egui::Grid::new("color_grid").show(ui, |ui| {
-        for (i, &c) in preset_colors().iter().enumerate() {
-            let bg = if *current == c { c } else { c.linear_multiply(0.6) };
-            if ui.add_sized([20.0, 20.0], egui::Button::new("").fill(bg)).clicked() { *current = c; }
-            if (i+1)%6==0 { ui.end_row(); }
-        }
+fn color_pick(ui: &mut Ui, current: &mut Color32) {
+    ui.vertical(|ui| {
+        ui.color_edit_button_srgba(current);
+        let colors = preset_colors();
+        egui::Grid::new("dialog_color_grid").show(ui, |ui| {
+            for (i, &c) in colors.iter().enumerate() {
+                let fill = if *current == c { c } else { c.linear_multiply(0.5) };
+                if ui.add_sized([18.0, 18.0], egui::Button::new("").fill(fill)).clicked() {
+                    *current = c;
+                }
+                if (i + 1) % 6 == 0 {
+                    ui.end_row();
+                }
+            }
+        });
     });
 }
