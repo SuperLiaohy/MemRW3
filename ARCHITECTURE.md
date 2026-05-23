@@ -254,16 +254,21 @@ BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭]
 └──────────────────────────────────────────────────────────────┘
 ```
 
-#### Sync 握手协议 (匹配 MemRW2 3-semaphore 模式)
+#### Sync 握手协议 (双 Condvar 设计)
 
 ```
-主线程 send_request(闭包):                采集线程 try_acquire():
-  1. request_pending = true               1. if request_pending:
-  2. Condvar.wait → BLOCK                     Condvar.notify → "已暂停"
-  3. 执行闭包 (独占 probe)                     Condvar.wait → BLOCK
-  4. request_pending = false              4. 恢复 → 继续采集
-     Condvar.notify → 恢复采集线程
+主线程 send_request(闭包):                 采集线程 try_acquire():
+  1. request_pending = true                 1. if request_pending:
+  2. cv_main.wait ← paused=false                cv_mutex.paused = true
+                                                cv_main.notify → 唤醒主线程
+  3. cv_main返回 (paused=true)                  cv_worker.wait ← done=false
+  4. 执行闭包 (独占 probe)                      ↓ 阻塞
+  5. done_mutex.done = true                  5. cv_worker返回 (done=true)
+     cv_worker.notify → 唤醒采集线程             done = false, 恢复运行
+     request_pending = false
 ```
+
+两个 Condvar 独立: `cv_main` (主线程等) 和 `cv_worker` (采集线程等)，消除共享单 Condvar 的死锁风险。
 
 - **正常运行时**: 采集线程全速采集，主线程无锁 drain 数据渲染。两线程无交互。
 - **同步操作时** (连接/断开/复位/写入/更新slots): 主线程通过 `sync.send_request` 暂停采集线程后独占 probe，完成后恢复。闭包运行在**主线程**。
@@ -409,13 +414,21 @@ pub struct DoubleBuffer<T> {
 // 预分配容量避免频繁分配: with_capacity(2560)
 ```
 
-#### 延迟控制
+#### 延迟控制 + 计时规则
 
 `delay_us: Arc<AtomicU64>` 共享: 主线程 slider 写入, 采集线程读取 → `thread::sleep(delay_us)` 控制采集频率。
 
 - **默认 0** (全速采集, 仅受 probe USB 延迟限制, STM32H7 SWD 10M 可达 ~7KHz)
 - 主线程仅 `request_repaint()` 以 vsync 刷新 UI, 不受 delay 影响
-- 用户通过 UI slider (0~10000µs) 按需降速
+
+**计时规则** (`timer_was_started`):
+
+| 操作 | timer_was_started | 计时行为 |
+|------|-------------------|---------|
+| "清空" | → `false` | 下次"开始"归零 |
+| 首次"开始" | `false` → `true` | `reset_timer()` 归零 |
+| 暂停→继续 | `true` | 累积计时 |
+| 连接/断开 | 不变 | 不影响 |
 
 ### 5. VariablePool 数据结构
 
@@ -506,13 +519,17 @@ Dock 锁: `dock_ui.disable()` + `ui.interact(dock_rect, ...)` 在 `bs_open || di
 "⚙ 设置" → egui::Window (居中, 可取消)
 
 内容:
-  ├─ MCU 型号: ComboBox (9 个常用芯片)
+  ├─ MCU 型号: [搜索过滤...] ← 搜索框
+  │   └─ 固定 200px 列表 (ScrollArea), 支持实时过滤, selectable_label 选中
+  │   └─ 来源: Registry::from_builtin_families() (启动时缓存到 AppSession.all_chips)
   ├─ 协议: SWD / JTAG
-  ├─ 速度: Slider 100-20000 kHz
-  ├─ 刷新按钮: Lister::list_all() 扫描已连接 Probe
-  ├─ 错误显示: 连接失败时红色文字
-  └─ 确定/取消按钮 (设置下次连接生效)
+  ├─ 速度: Slider 100-20000 kHz (默认 10000 = 10MHz)
+  ├─ Probe 设备: ComboBox (Lister::list_all() 扫描)
+  └─ [确定] [取消] (水平布局)
+      └─ 编辑本地副本 (edit_chip/protocol/speed), 确定生效 / 取消丢弃
 ```
+
+**Toast 通知** (`egui-notify 0.22`): 右下角 (Anchor::BottomRight), 写入成功=绿色2s, 失败=红色3s
 
 ## 依赖
 
@@ -576,7 +593,7 @@ egui-notify = "0.22"      # Toast 通知
 
 11. **多线程采集架构 (参考 MemRW2)**:
     - `acq_thread`: 独立采集线程, 非阻塞 `try_acquire` 检查同步请求, 正常运行时全速采集
-    - `Sync`: 两阶段握手 (Mutex+Condvar), `send_request(闭包)` 阻塞主线程直至采集线程暂停
+    - `Sync`: **双 Condvar** 握手 (`cv_main` + `cv_worker`), 消除共享单 Condvar 死锁
     - `ProbeCell` (UnsafeCell): 无 Mutex 开销, Sync 协议保证互斥
     - **Core 缓存**: `session.core(0)` 首次调用后通过 `unsafe transmute` 缓存为 `Core<'static>`, 避免每帧重复初始化 (性能关键: 200-500µs → ~0µs)
     - `AcqSlot`: 纯 32-bit 地址标记, 去重: 多变量共享同地址; `VarSlotMapping` 将变量映射到其槽位集合

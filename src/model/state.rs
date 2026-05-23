@@ -21,6 +21,9 @@ pub struct AppSession {
     pub probe_protocol: String,
     pub probe_speed_khz: u32,
     pub show_probe_settings: bool,
+    pub edit_chip: String,
+    pub edit_protocol: String,
+    pub edit_speed: u32,
     pub timer_was_started: bool,
 }
 
@@ -53,6 +56,9 @@ impl Default for AppSession {
             probe_protocol: "SWD".into(),
             probe_speed_khz: 10000,
             show_probe_settings: false,
+            edit_chip: String::new(),
+            edit_protocol: String::new(),
+            edit_speed: 10000,
             timer_was_started: false,
         }
     }

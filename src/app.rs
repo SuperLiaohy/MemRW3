@@ -201,13 +201,15 @@ impl MemRW3App {
 
         if connected {
             self.session.set_running(false);
-            self.session.timer_was_started = false;
             self.sync.send_request(move || {
                 unsafe { probe.get_mut() }.disconnect();
             });
             self.session.connected = false;
             self.session.connect_error = None;
         } else {
+            for var in self.session.pool.iter() {
+                var.incoming.drain();
+            }
             let sync = self.sync.clone();
             let running = self.session.running.clone();
             sync.send_request(move || {

@@ -32,9 +32,15 @@ pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
 }
 
 fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
-    let session = &mut app.session;
-    let mut show = session.show_probe_settings;
+    let mut show = app.session.show_probe_settings;
     let mut closed = false;
+    let mut confirm = false;
+
+    if show && app.session.edit_chip.is_empty() {
+        app.session.edit_chip = app.session.probe_chip.clone();
+        app.session.edit_protocol = app.session.probe_protocol.clone();
+        app.session.edit_speed = app.session.probe_speed_khz;
+    }
 
     let probe_list: Vec<String> = probe_rs::probe::list::Lister::new()
         .list_all()
@@ -60,7 +66,7 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("MCU 型号:");
-                ui.label(egui::RichText::new(&session.probe_chip).strong());
+                ui.label(egui::RichText::new(&app.session.edit_chip).strong());
             });
             ui.add_sized(
                 [ui.available_width(), 20.0],
@@ -71,10 +77,10 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
             ctx.data_mut(|d| d.insert_temp(search_id, search.clone()));
 
             let filtered: Vec<&String> = if search.is_empty() {
-                session.all_chips.iter().collect()
+                app.session.all_chips.iter().collect()
             } else {
                 let s = search.to_lowercase();
-                session.all_chips.iter().filter(|n| n.to_lowercase().contains(&s)).collect()
+                app.session.all_chips.iter().filter(|n| n.to_lowercase().contains(&s)).collect()
             };
 
             let list_h = 200.0;
@@ -90,8 +96,8 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
             egui::ScrollArea::vertical().show(&mut list_ui, |ui| {
                 ui.set_min_height(list_h);
                 for name in filtered {
-                    if ui.selectable_label(session.probe_chip == *name, name.as_str()).clicked() {
-                        session.probe_chip = name.clone();
+                    if ui.selectable_label(app.session.edit_chip == *name, name.as_str()).clicked() {
+                        app.session.edit_chip = name.clone();
                     }
                 }
             });
@@ -103,16 +109,16 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
             egui::Grid::new("probe_settings").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                 ui.label("协议:");
                 egui::ComboBox::from_id_salt("protocol_combo")
-                    .selected_text(&session.probe_protocol)
+                    .selected_text(&app.session.edit_protocol)
                     .width(80.0)
                     .show_ui(ui, |ui| {
                         for p in &["SWD".to_string(), "JTAG".to_string()] {
-                            ui.selectable_value(&mut session.probe_protocol, p.clone(), p.as_str());
+                            ui.selectable_value(&mut app.session.edit_protocol, p.clone(), p.as_str());
                         }
                     });
                 ui.end_row();
                 ui.label("速度 (kHz):");
-                ui.add(egui::Slider::new(&mut session.probe_speed_khz, 100..=20000).text("kHz"));
+                ui.add(egui::Slider::new(&mut app.session.edit_speed, 100..=20000).text("kHz"));
                 ui.end_row();
                 ui.label("Probe 设备:");
                 egui::ComboBox::from_id_salt("probe_combo")
@@ -132,12 +138,22 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
             ui.separator();
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("确定").clicked() { closed = true; }
+                if ui.button("确定").clicked() { closed = true; confirm = true; }
                 if ui.button("取消").clicked() { closed = true; }
             });
         });
-    if closed { session.show_probe_settings = false; }
-    else { session.show_probe_settings = show; }
+    if closed {
+        app.session.show_probe_settings = false;
+        if confirm {
+            app.session.probe_chip = std::mem::take(&mut app.session.edit_chip);
+            app.session.probe_protocol = std::mem::take(&mut app.session.edit_protocol);
+            app.session.probe_speed_khz = app.session.edit_speed;
+        }
+        app.session.edit_chip.clear();
+        app.session.edit_protocol.clear();
+    } else {
+        app.session.show_probe_settings = show;
+    }
 }
 
 fn connect_button(ui: &mut Ui, app: &mut MemRW3App) {
