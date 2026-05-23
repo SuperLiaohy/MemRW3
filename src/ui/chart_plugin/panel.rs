@@ -41,6 +41,7 @@ pub struct ChartPluginState {
     pub x_mode: XAxisMode,
     pub y_mode: YAxisMode,
     pub acq_hz: f64,
+    pub removed_var_ids: Vec<usize>,
     acq_frame_count: u64,
     acq_last_reset: Instant,
     was_running: bool,
@@ -56,6 +57,7 @@ impl Default for ChartPluginState {
             x_mode: XAxisMode::Auto,
             y_mode: YAxisMode::Auto,
             acq_hz: 0.0,
+            removed_var_ids: Vec::new(),
             acq_frame_count: 0,
             acq_last_reset: Instant::now(),
             was_running: false,
@@ -64,14 +66,18 @@ impl Default for ChartPluginState {
 }
 
 impl ChartPluginState {
-    pub fn add_from_pool(&mut self, pool: &VariablePool, variable_id: usize) {
+    pub fn add_legend(&mut self, variable_id: usize, pool: &VariablePool, curve_name: String, color: Color32) {
         if let Some(var) = pool.get(variable_id) {
-            self.legends
-                .push(ChartLegend::new(variable_id, var.name.clone()));
+            let mut legend = ChartLegend::new(variable_id, var.name.clone());
+            legend.curve_name = if curve_name.is_empty() { var.name.clone() } else { curve_name };
+            legend.color = color;
+            self.legends.push(legend);
         }
     }
     pub fn remove_legend(&mut self, index: usize) {
         if index < self.legends.len() {
+            let var_id = self.legends[index].variable_id;
+            self.removed_var_ids.push(var_id);
             self.legends.remove(index);
             if self.editing_legend == Some(index) {
                 self.editing_legend = None;

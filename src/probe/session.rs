@@ -119,8 +119,9 @@ impl ProbeSession {
     }
 
     /// Calculate the set of 32-bit aligned addresses covering [address, address+size).
+    /// Size is capped at 8 (max ProbeSession::val capacity).
     pub fn slot_addresses(address: u64, size: u32) -> Vec<u64> {
-        let end = address.saturating_add(size as u64);
+        let end = address.saturating_add((size as u64).min(8));
         let start = address & !3;
         let mut addrs = Vec::new();
         let mut a = start;
@@ -189,23 +190,24 @@ impl ProbeSession {
         for mapping in &self.var_mappings {
             let mut val = [0u8; 8];
             let mut pos: usize = 0;
+            let size = (mapping.size as usize).min(8);
             for (i, slot) in mapping.slots.iter().enumerate() {
                 let sv = match slot_values.get(&slot.address) {
                     Some(v) => v,
                     None => continue,
                 };
                 if i == 0 {
-                    let start = mapping.byte_offset;
-                    let copy_len = (4 - start).min(mapping.size as usize - pos);
+                    let start = mapping.byte_offset.min(3);
+                    let copy_len = (4 - start).min(size - pos);
                     val[pos..pos + copy_len]
                         .copy_from_slice(&sv[start..start + copy_len]);
                     pos += copy_len;
                 } else {
-                    let copy_len = 4.min(mapping.size as usize - pos);
+                    let copy_len = 4.min(size - pos);
                     val[pos..pos + copy_len].copy_from_slice(&sv[..copy_len]);
                     pos += copy_len;
                 }
-                if pos >= mapping.size as usize {
+                if pos >= size {
                     break;
                 }
             }

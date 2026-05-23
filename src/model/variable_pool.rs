@@ -10,6 +10,7 @@ pub struct PooledVariable {
     pub ext_type: ExtendType,
     pub size: u32,
     pub incoming: Arc<DoubleBuffer<(f64, [u8; 8])>>,
+    pub plugins_cnt: usize,
 }
 
 #[derive(Default)]
@@ -31,6 +32,7 @@ impl VariablePool {
             ext_type: config.ext_type.clone(),
             size: config.size,
             incoming: Arc::new(DoubleBuffer::new()),
+            plugins_cnt: 0,
         });
         self.id_index.insert(id, idx);
         id
@@ -50,6 +52,10 @@ impl VariablePool {
 
     pub fn get(&self, id: usize) -> Option<&PooledVariable> {
         self.id_index.get(&id).and_then(|&i| self.variables.get(i))
+    }
+
+    pub fn get_mut(&mut self, id: usize) -> Option<&mut PooledVariable> {
+        self.id_index.get(&id).and_then(|&i| self.variables.get_mut(i))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &PooledVariable> {

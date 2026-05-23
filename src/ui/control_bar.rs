@@ -1,7 +1,6 @@
 use eframe::egui::{self, Color32, RichText, Ui};
 use std::sync::atomic::Ordering;
 use crate::app::MemRW3App;
-use crate::model::AppSession;
 
 pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
     egui::Frame::NONE
@@ -16,13 +15,13 @@ pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
                 ui.separator();
                 run_control(ui, app);
                 ui.separator();
-                settings_button(ui, &mut app.session);
+                settings_button(ui, app);
                 ui.separator();
                 delay_slider(ui, app);
                 ui.separator();
                 reset_button(ui, app);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    sampling_status(ui, &app.session);
+                    sampling_status(ui, app);
                 });
             });
         });
@@ -86,9 +85,9 @@ fn connect_button(ui: &mut Ui, app: &mut MemRW3App) {
     }
 }
 
-fn settings_button(ui: &mut Ui, session: &mut AppSession) {
+fn settings_button(ui: &mut Ui, app: &mut MemRW3App) {
     if ui.add(egui::Button::new(RichText::new("⚙ 设置").size(13.0))).clicked() {
-        session.show_probe_settings = true;
+        app.session.show_probe_settings = true;
     }
 }
 
@@ -125,11 +124,19 @@ fn reset_button(ui: &mut Ui, app: &mut MemRW3App) {
     }
 }
 
-fn sampling_status(ui: &mut Ui, session: &AppSession) {
+fn sampling_status(ui: &mut Ui, app: &MemRW3App) {
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
-    ui.label(RichText::new(format!("Hz: {:.1}", session.sampling_hz)).size(13.0).color(Color32::from_rgb(80, 160, 255)));
+    let pool_n = app.session.pool.iter().count();
+    let slot_n = app.slot_count.load(Ordering::Relaxed);
+    ui.label(
+        RichText::new(format!("Vari:{} Slot:{}", pool_n, slot_n))
+            .size(12.0)
+            .color(Color32::from_rgb(150, 200, 255)),
+    );
     ui.separator();
-    let (text, color) = if session.is_running() {
+    ui.label(RichText::new(format!("Hz: {:.1}", app.session.sampling_hz)).size(13.0).color(Color32::from_rgb(80, 160, 255)));
+    ui.separator();
+    let (text, color) = if app.session.is_running() {
         ("● 采集中", Color32::from_rgb(80, 220, 80))
     } else {
         ("○ 已暂停", Color32::from_rgb(255, 180, 60))

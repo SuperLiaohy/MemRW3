@@ -10,20 +10,34 @@ pub struct TablePluginState {
     pub entries: Vec<TableEntry>,
     pub editing_entry: Option<usize>,
     pub show_entry_dialog: bool,
+    pub removed_var_ids: Vec<usize>,
 }
 
 impl Default for TablePluginState {
-    fn default() -> Self { Self { entries: Vec::new(), editing_entry: None, show_entry_dialog: false } }
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            editing_entry: None,
+            show_entry_dialog: false,
+            removed_var_ids: Vec::new(),
+        }
+    }
 }
 
 impl TablePluginState {
-    pub fn add_from_pool(&mut self, pool: &VariablePool, variable_id: usize) {
+    pub fn add_entry(&mut self, variable_id: usize, pool: &VariablePool, display_name: String) {
         if let Some(var) = pool.get(variable_id) {
-            self.entries.push(TableEntry::new(variable_id, var.name.clone()));
+            let mut entry = TableEntry::new(variable_id, var.name.clone());
+            if !display_name.is_empty() {
+                entry.display_name = display_name;
+            }
+            self.entries.push(entry);
         }
     }
     pub fn remove_entry(&mut self, index: usize) {
         if index < self.entries.len() {
+            let var_id = self.entries[index].variable_id;
+            self.removed_var_ids.push(var_id);
             self.entries.remove(index);
             if self.editing_entry == Some(index) { self.editing_entry = None; }
         }
