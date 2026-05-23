@@ -49,7 +49,7 @@ impl Default for AppSession {
             extend_configs: HashMap::new(),
             probe_chip: "STM32F407VG".into(),
             probe_chips: vec![
-                "STM32F407VG".into(), "STM32F429ZI".into(), "STM32H743ZI".into(),
+                "STM32F407VG".into(), "STM32F429ZI".into(), "STM32H723VGTX".into(),
                 "nRF52840_xxAA".into(), "STM32F103C8".into(), "RP2040".into(),
                 "STM32G474RE".into(), "STM32L476RG".into(), "ATSAMD51P19A".into(),
             ],

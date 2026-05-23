@@ -92,7 +92,7 @@ impl MemRW3App {
         let probe = Arc::new(ProbeCell::new(ProbeSession::default()));
         let sync = Arc::new(Sync::new());
         let acq_stop = Arc::new(AtomicBool::new(false));
-        let delay_us = Arc::new(AtomicU64::new(1000));
+        let delay_us = Arc::new(AtomicU64::new(0));
 
         let acq_probe = probe.clone();
         let acq_sync = sync.clone();

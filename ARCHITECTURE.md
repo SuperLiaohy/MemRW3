@@ -289,7 +289,7 @@ UI 线程 (每帧):
     push_value(time, val) → 图表绘制
 ```
 
-#### ProbeCell (无 Mutex)
+#### ProbeCell (无 Mutex) + Core 缓存
 
 `ProbeSession` 通过 `Arc<ProbeCell>` 共享, `ProbeCell` 是 `UnsafeCell` 包装:
 
@@ -299,6 +299,39 @@ pub struct ProbeCell(UnsafeCell<ProbeSession>);
 // - 采集线程: 仅正常运行时访问
 // - 主线程: 仅在 send_request 闭包内访问 (采集线程已暂停)
 ```
+
+**Core 缓存** (性能关键):
+
+`probe_rs::Session::core(0)` 是昂贵的操作 (~200-500µs, 包含 halt 核心、读 CPUID、DAP 寄存器初始化)。Demo 中只调用一次, 我们原先每帧调用一次 → 这是 7K vs 1K Hz 差距的根源。
+
+修复: 首次 `core(0)` 后通过 `unsafe transmute` 缓存为 `Core<'static>`, 后续采集直接复用。
+
+```rust
+pub struct ProbeSession {
+    cached_core: Option<probe_rs::Core<'static>>,  // 声明先于 session, 先 drop
+    session: Option<Session>,
+    // ...
+}
+
+fn ensure_core(&mut self) -> bool {
+    if self.cached_core.is_some() { return true; }
+    // 首次: 获取 core, transmute 为 'static (两者同属 self, 同生命周期)
+    self.cached_core = Some(unsafe { std::mem::transmute(session.core(0)?) });
+}
+
+fn acquire_from_slots(&mut self) {
+    self.ensure_core();
+    // raw pointer 避免 &mut self 与 &self.slots 的借用冲突
+    let core = unsafe { &mut *(self.cached_core.as_mut().unwrap() as *mut _) };
+    for slot in &self.slots {
+        core.read_word_32(slot.address) → slot.incoming.push((ts, val));
+    }
+}
+```
+
+- 读错误时 `self.cached_core = None` → 下帧自动重建
+- 连接/断开/复位时 `self.cached_core = None` → 强制重建
+- `cached_core` 声明先于 `session` (Rust 按声明序 drop) → drop 时 session 仍存活
 
 `AcqSlot` 缓存变量地址/大小/类型, 采集线程无需持有 `VariablePool` 锁:
 
@@ -323,7 +356,11 @@ pub struct DoubleBuffer<T> {
 
 #### 延迟控制
 
-`delay_us: Arc<AtomicU64>` 共享: 主线程 slider 写入, 采集线程读取 → `thread::sleep(delay_us)` 控制采集频率。主线程仅 `request_repaint()` 以 vsync 刷新 UI。
+`delay_us: Arc<AtomicU64>` 共享: 主线程 slider 写入, 采集线程读取 → `thread::sleep(delay_us)` 控制采集频率。
+
+- **默认 0** (全速采集, 仅受 probe USB 延迟限制, STM32H7 SWD 10M 可达 ~7KHz)
+- 主线程仅 `request_repaint()` 以 vsync 刷新 UI, 不受 delay 影响
+- 用户通过 UI slider (0~10000µs) 按需降速
 
 ### 5. VariablePool 数据结构
 
@@ -469,9 +506,10 @@ anyhow = "1.0"            # 错误处理
     - `acq_thread`: 独立采集线程, 非阻塞 `try_acquire` 检查同步请求, 正常运行时全速采集
     - `Sync`: 两阶段握手 (Mutex+Condvar), `send_request(闭包)` 阻塞主线程直至采集线程暂停
     - `ProbeCell` (UnsafeCell): 无 Mutex 开销, Sync 协议保证互斥
+    - **Core 缓存**: `session.core(0)` 首次调用后通过 `unsafe transmute` 缓存为 `Core<'static>`, 避免每帧重复初始化 (性能关键: 200-500µs → ~0µs)
     - `AcqSlot`: 缓存变量地址/大小/类型, 采集线程无需访问 VariablePool
-    - `DoubleBuffer`: SPSC 无锁双缓冲, `fetch_xor` 原子翻转, 预分配容量
-    - `delay_us: Arc<AtomicU64>`: 采集线程 sleep 控制频率, 主线程 `request_repaint()` 独立刷新 UI
+    - `DoubleBuffer`: SPSC 无锁双缓冲, `fetch_xor` 原子翻转, 预分配容量 2560
+    - `delay_us: Arc<AtomicU64>`: 默认 0 (全速), 采集线程 sleep 节流, 主线程独立 vsync 刷新
 
 12. **Tree View 默认折叠, 搜索居中滚动 + 点击滚动**: 使用 `NodeBuilder::default_open(false)` 初始化所有树节点为折叠状态; 搜索后通过 `count_nodes_before()` (基于 `tree_state` 展开状态) 计算可见节点数, 使用 `viewport_h` 居中偏移公式 `ScrollArea::vertical_scroll_offset()` 居中显示; 点击节点也设 `scroll_target_id` 实现滚到居中。
 
