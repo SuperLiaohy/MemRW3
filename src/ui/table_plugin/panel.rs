@@ -121,7 +121,11 @@ fn render_table(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool) 
                 ui.label(RichText::new(&entry.display_name).size(12.0));
 
                 let current_val = pool.get(entry.variable_id)
-                    .map(|v| format_value(&v.current_value, &v.ext_type))
+                    .map(|v| {
+                        v.incoming.latest()
+                            .map(|(_, data)| format_value(&data, &v.ext_type))
+                            .unwrap_or_else(|| "--".into())
+                    })
                     .unwrap_or_else(|| "--".into());
                 ui.label(RichText::new(&current_val).size(12.0));
 

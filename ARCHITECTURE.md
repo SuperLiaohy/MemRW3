@@ -46,14 +46,16 @@ src/
 ├── main.rs                 # 入口: 启动空DwarfApp → eframe
 ├── types.rs                # 数据类型: TreeNode, BasicType, ExtendType, ExtendConfig, CuInfo, DwarfApp, TypeRef
 ├── dwarf.rs                # DWARF 解析 (gimli), basic_type 映射, address 存offset
-├── app.rs                  # 主 App + 布局编排 (控制栏 + DockArea + BottomSheet 模态 + 对话窗锁)
+├── app.rs                  # 主 App + 布局编排 + MemRW3App (控制栏 + DockArea + BottomSheet 模态 + 对话窗锁)
+├── sync.rs                 # 同步原语: Sync (两阶段握手) - 匹配 MemRW2 的 3-semaphore 模式
 ├── model/
 │   ├── mod.rs
 │   ├── state.rs            # AppSession (连接/采样/BottomSheet/load_error/extend_configs)
-│   └── variable_pool.rs    # VariablePool (Vec + HashMap, O(1) 增删查, 仅存extend数据)
+│   ├── variable_pool.rs    # VariablePool (Vec + HashMap, O(1) 增删查, 仅存extend数据)
+│   └── double_buffer.rs    # 无锁双缓冲 (SPSC, [UnsafeCell<Vec<T>>; 2] + AtomicUsize)
 ├── probe/
-│   ├── mod.rs
-│   └── session.rs          # ProbeSession (probe-rs 连接/采集/读写)
+│   ├── mod.rs              # ProbeCell (UnsafeCell wrapper, Sync协议保证互斥)
+│   └── session.rs          # ProbeSession + AcqSlot (probe-rs 连接/采集/读写)
 └── ui/
     ├── mod.rs
     ├── control_bar.rs      # 控制栏 (连接/采集/Probe配置Dialog)
@@ -123,13 +125,13 @@ pub struct PooledVariable {
     pub address: u64,          // extend_address
     pub ext_type: ExtendType,  // extend_type
     pub size: u32,             // extend_size
-    pub current_value: Vec<u8>,
+    pub incoming: Arc<DoubleBuffer<(f64, [u8; 8])>>,  // 无锁双缓冲, 采集线程push, UI线程drain
 }
 ```
 
 - 不再包含 `TreeNode`，只存实际用于采集和显示的数据
 - `VariablePool.add(&ExtendConfig)` 创建条目
-- 采集时 probe 直接读 `var.address` / `var.size`
+- `incoming` 通过 `Arc` 共享给 `AcqSlot`（采集线程无锁写入）和 Chart/Table 面板（UI 线程无锁 drain）
 - Chart/Table 面板直接使用 `var.ext_type` 进行值解码和格式化
 
 ### BasicType vs ExtendType
@@ -230,40 +232,98 @@ BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭]
         └─ Table: 显示名 → 存入 TableEntry
 ```
 
-### 4. 数据采集
+### 4. 数据采集 (多线程架构)
+
+#### 线程模型
 
 ```
-控制栏点"开始" → session.running = true
-
-每帧循环 (MemRW3App::ui):
-  ├─ self.probe.running = self.session.running       // 同步状态
-  ├─ self.probe.acquire(&mut pool, delay_us)         // 采集
-  │   └─ 节流: last_read.elapsed() >= delay_us 时才执行
-  │   └─ 使用 PooledVariable 的 extend 属性:
-  │       addr = var.address
-  │       size = var.size
-  │       read 按 size 选择: read_word_8/16/32/64 或 block read
-  │   └─ var.current_value = 读取的字节 Vec<u8>
-  └─ ctx.request_repaint()                            // 持续刷新
-
-Chart 面板 (chart_panel):
-  └─ if running: 从 pool.get(legend.variable_id) 读取
-  │   └─ decode_value_f64(&current_value, &var.ext_type)
-  │       按 ExtendType 解析: u8/u16/u32/u64 → 无符号整型
-  │                         i8/i16/i32/i64 → 有符号整型
-  │                         Float → f32→f64, Double → f64
-  │                         Other → 0.0 (不绘制)
-  └─ push_value(time, val) → 图表自动绘制曲线
-
-Table 面板 (table_panel):
-  └─ 从 pool.get(entry.variable_id) 读取
-      └─ format_value(&current_value, &var.ext_type)
-          按 ExtendType 格式化:
-          u8/u16/u32/u64 → "0xXXXX (十进制)"
-          i8/i16/i32/i64 → "0xXXXX (有符号十进制)"
-          Float → "小数", Double → "小数"
-          Other → hex dump
+┌─ 主线程 (UI) ───────────────────────────────────────────────┐
+│  egui frame loop:                                            │
+│    request_repaint() ← 持续刷新                               │
+│    drain DoubleBuffer ← 无锁读取采集数据                        │
+│    sync.send_request(|| { probe操作 }) ← 同步时阻塞主线程       │
+└──────────────────────────────────────────────────────────────┘
+         ↑ ↓ Sync 握手                     ↑ ↓ Arc<DoubleBuffer>
+┌─ 采集线程 (acq_thread) ───────────────────────────────────────┐
+│  loop:                                                       │
+│    sync.try_acquire() ← 非阻塞检查同步请求                     │
+│    if running:                                                │
+│      acquire_from_slots() → push to DoubleBuffer ← 无锁写入   │
+│      thread::sleep(delay_us) ← 采集节流                       │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+#### Sync 握手协议 (匹配 MemRW2 3-semaphore 模式)
+
+```
+主线程 send_request(闭包):                采集线程 try_acquire():
+  1. request_pending = true               1. if request_pending:
+  2. Condvar.wait → BLOCK                     Condvar.notify → "已暂停"
+  3. 执行闭包 (独占 probe)                     Condvar.wait → BLOCK
+  4. request_pending = false              4. 恢复 → 继续采集
+     Condvar.notify → 恢复采集线程
+```
+
+- **正常运行时**: 采集线程全速采集，主线程无锁 drain 数据渲染。两线程无交互。
+- **同步操作时** (连接/断开/复位/写入/更新slots): 主线程通过 `sync.send_request` 暂停采集线程后独占 probe，完成后恢复。闭包运行在**主线程**。
+
+#### 数据流 (无锁路径)
+
+```
+[变量树添加变量]
+  ├─ VariablePool.add(config) → PooledVariable { incoming: Arc<DoubleBuffer<...>> }
+  └─ push_slot() → sync → acq_thread.slots.push(AcqSlot { incoming: clone(Arc) })
+                          ↑ 指向同一个 DoubleBuffer
+[点击"开始"]
+  └─ rebuild_slots() → sync → acq_thread.slots = 全量 AcqSlot 列表
+
+采集线程:
+  for slot in slots:
+    probe-rs read(slot.address, slot.size) → slot.incoming.push((ts, val))
+    ↑ 无锁 push 到 DoubleBuffer
+
+UI 线程 (每帧):
+  for legend in chart_state.legends:
+    var.incoming.drain() → Vec<(time, value)>
+    ↑ 同一个 Arc<DoubleBuffer>, 无锁 drain
+    push_value(time, val) → 图表绘制
+```
+
+#### ProbeCell (无 Mutex)
+
+`ProbeSession` 通过 `Arc<ProbeCell>` 共享, `ProbeCell` 是 `UnsafeCell` 包装:
+
+```rust
+pub struct ProbeCell(UnsafeCell<ProbeSession>);
+// 安全性: Sync 握手协议保证不会并发访问
+// - 采集线程: 仅正常运行时访问
+// - 主线程: 仅在 send_request 闭包内访问 (采集线程已暂停)
+```
+
+`AcqSlot` 缓存变量地址/大小/类型, 采集线程无需持有 `VariablePool` 锁:
+
+```rust
+pub struct AcqSlot {
+    pub address: u64,
+    pub size: u32,
+    pub incoming: Arc<DoubleBuffer<(f64, [u8; 8])>>,
+}
+```
+
+#### DoubleBuffer (SPSC 无锁双缓冲)
+
+```rust
+pub struct DoubleBuffer<T> {
+    bufs: [UnsafeCell<Vec<T>>; 2],
+    write_idx: AtomicUsize,  // fetch_xor(1) 原子翻转
+}
+// push() → 采集线程; drain() → UI 线程
+// 预分配容量避免频繁分配: with_capacity(2560)
+```
+
+#### 延迟控制
+
+`delay_us: Arc<AtomicU64>` 共享: 主线程 slider 写入, 采集线程读取 → `thread::sleep(delay_us)` 控制采集频率。主线程仅 `request_repaint()` 以 vsync 刷新 UI。
 
 ### 5. VariablePool 数据结构
 
@@ -276,8 +336,8 @@ Vec<PooledVariable> + HashMap<usize, usize> (id → index)
   ├─ get(id)      → O(1) id_index → Vec[index]
   └─ iter_mut()   → 直接迭代 Vec (采集循环用)
 
-PooledVariable { id, name, address, ext_type, size, current_value: Vec<u8> }
-                                                      ↑ 采集的原始字节, 解析由各面板按 ext_type 完成
+PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<...>> }
+                                                         ↑ Arc 共享: 采集线程 push, UI 线程 drain
 ```
 
 ### 6. Chart 图表面板特性
@@ -405,7 +465,13 @@ anyhow = "1.0"            # 错误处理
 
 10. **添加配置回调注入**: `vari_properties_ui()` 通过 `FnOnce` 闭包接收插件定制的添加 UI, 避免 centralized enum dispatch; 添加后回写用户选择的曲线名/颜色/显示名
 
-11. **probe-rs 采集在主线程**: 每帧节流读取, `request_repaint()` 保持 UI 刷新, 无需额外线程
+11. **多线程采集架构 (参考 MemRW2)**:
+    - `acq_thread`: 独立采集线程, 非阻塞 `try_acquire` 检查同步请求, 正常运行时全速采集
+    - `Sync`: 两阶段握手 (Mutex+Condvar), `send_request(闭包)` 阻塞主线程直至采集线程暂停
+    - `ProbeCell` (UnsafeCell): 无 Mutex 开销, Sync 协议保证互斥
+    - `AcqSlot`: 缓存变量地址/大小/类型, 采集线程无需访问 VariablePool
+    - `DoubleBuffer`: SPSC 无锁双缓冲, `fetch_xor` 原子翻转, 预分配容量
+    - `delay_us: Arc<AtomicU64>`: 采集线程 sleep 控制频率, 主线程 `request_repaint()` 独立刷新 UI
 
 12. **Tree View 默认折叠, 搜索居中滚动 + 点击滚动**: 使用 `NodeBuilder::default_open(false)` 初始化所有树节点为折叠状态; 搜索后通过 `count_nodes_before()` (基于 `tree_state` 展开状态) 计算可见节点数, 使用 `viewport_h` 居中偏移公式 `ScrollArea::vertical_scroll_offset()` 居中显示; 点击节点也设 `scroll_target_id` 实现滚到居中。
 

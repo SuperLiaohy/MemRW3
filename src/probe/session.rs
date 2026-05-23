@@ -1,20 +1,26 @@
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Instant;
 use probe_rs::{MemoryInterface, Session};
 use probe_rs::probe::list::Lister;
 
-use crate::model::VariablePool;
+use crate::model::DoubleBuffer;
+
+pub struct AcqSlot {
+    pub address: u64,
+    pub size: u32,
+    pub incoming: Arc<DoubleBuffer<(f64, [u8; 8])>>,
+}
 
 pub struct ProbeSession {
     session: Option<Session>,
     pub connected: bool,
-    pub running: bool,
     pub chip_name: String,
     pub available_chips: Vec<String>,
     pub protocol: String,
     pub speed_khz: u32,
-    pub show_settings: bool,
-    last_read: Instant,
     pub last_error: Option<String>,
+    pub slots: Vec<AcqSlot>,
+    pub timer: Instant,
 }
 
 impl Default for ProbeSession {
@@ -22,7 +28,6 @@ impl Default for ProbeSession {
         Self {
             session: None,
             connected: false,
-            running: false,
             chip_name: "STM32F407VG".into(),
             available_chips: vec![
                 "STM32F407VG".into(), "STM32F429ZI".into(), "STM32H743ZI".into(),
@@ -31,9 +36,9 @@ impl Default for ProbeSession {
             ],
             protocol: "SWD".into(),
             speed_khz: 4000,
-            show_settings: false,
-            last_read: Instant::now(),
             last_error: None,
+            slots: Vec::new(),
+            timer: Instant::now(),
         }
     }
 }
@@ -52,15 +57,22 @@ impl ProbeSession {
             ..Default::default()
         };
         match Session::auto_attach(&self.chip_name, config) {
-            Ok(session) => { self.session = Some(session); self.connected = true; true }
-            Err(e) => { self.last_error = Some(format!("连接失败: {e}")); false }
+            Ok(session) => {
+                self.session = Some(session);
+                self.connected = true;
+                self.timer = Instant::now();
+                true
+            }
+            Err(e) => {
+                self.last_error = Some(format!("连接失败: {e}"));
+                false
+            }
         }
     }
 
     pub fn disconnect(&mut self) {
         self.session = None;
         self.connected = false;
-        self.running = false;
     }
 
     pub fn reset_target(&mut self) -> bool {
@@ -68,58 +80,86 @@ impl ProbeSession {
         if let Some(ref mut session) = self.session {
             match session.core(0).and_then(|mut core| core.reset()) {
                 Ok(_) => true,
-                Err(e) => { self.last_error = Some(format!("复位失败: {e}")); false }
+                Err(e) => {
+                    self.last_error = Some(format!("复位失败: {e}"));
+                    false
+                }
             }
-        } else { false }
+        } else {
+            false
+        }
     }
 
     pub fn list_probes(&mut self) -> Vec<String> {
-        Lister::new().list_all().iter().map(|p| p.identifier.clone()).collect()
+        Lister::new()
+            .list_all()
+            .iter()
+            .map(|p| p.identifier.clone())
+            .collect()
     }
 
-    pub fn acquire(&mut self, pool: &mut VariablePool, delay_us: f64) {
-        if !self.connected || !self.running { return; }
-        let delay = Duration::from_micros(delay_us as u64);
-        if self.last_read.elapsed() < delay { return; }
-        self.last_read = Instant::now();
-
-        if let Some(ref mut session) = self.session {
-            let mut core = match session.core(0) {
-                Ok(c) => c,
-                Err(e) => { self.last_error = Some(format!("获取核心失败: {e}")); return; }
-            };
-            for var in pool.iter_mut() {
-                let addr = var.address;
-                if addr == 0 { continue; }
-                let size = var.size;
-                let val = match size {
-                    1 => match core.read_word_8(addr as u64) {
-                        Ok(v) => v.to_le_bytes().to_vec(),
-                        Err(e) => { self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}")); continue; }
-                    },
-                    2 => match core.read_word_16(addr as u64) {
-                        Ok(v) => v.to_le_bytes().to_vec(),
-                        Err(e) => { self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}")); continue; }
-                    },
-                    4 => match core.read_word_32(addr as u64) {
-                        Ok(v) => v.to_le_bytes().to_vec(),
-                        Err(e) => { self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}")); continue; }
-                    },
-                    8 => match core.read_word_64(addr as u64) {
-                        Ok(v) => v.to_le_bytes().to_vec(),
-                        Err(e) => { self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}")); continue; }
-                    },
-                    n => {
-                        let mut buf = vec![0u8; n as usize];
-                        if let Err(e) = core.read(addr as u64, &mut buf) {
-                            self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}"));
-                            continue;
-                        }
-                        buf
-                    }
-                };
-                var.current_value = val;
+    pub fn acquire_from_slots(&mut self) {
+        if !self.connected {
+            return;
+        }
+        let ts = self.timer.elapsed().as_secs_f64();
+        let session = match self.session.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+        let mut core = match session.core(0) {
+            Ok(c) => c,
+            Err(e) => {
+                self.last_error = Some(format!("获取核心失败: {e}"));
+                return;
             }
+        };
+        for slot in &self.slots {
+            let addr = slot.address;
+            if addr == 0 {
+                continue;
+            }
+            let mut val = [0u8; 8];
+            match slot.size {
+                1 => match core.read_word_8(addr) {
+                    Ok(v) => val[..1].copy_from_slice(&v.to_le_bytes()),
+                    Err(e) => {
+                        self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}"));
+                        continue;
+                    }
+                },
+                2 => match core.read_word_16(addr) {
+                    Ok(v) => val[..2].copy_from_slice(&v.to_le_bytes()),
+                    Err(e) => {
+                        self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}"));
+                        continue;
+                    }
+                },
+                4 => match core.read_word_32(addr) {
+                    Ok(v) => val[..4].copy_from_slice(&v.to_le_bytes()),
+                    Err(e) => {
+                        self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}"));
+                        continue;
+                    }
+                },
+                8 => match core.read_word_64(addr) {
+                    Ok(v) => val.copy_from_slice(&v.to_le_bytes()),
+                    Err(e) => {
+                        self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}"));
+                        continue;
+                    }
+                },
+                n => {
+                    let mut buf = vec![0u8; n as usize];
+                    if let Err(e) = core.read(addr, &mut buf) {
+                        self.last_error = Some(format!("读取 {addr:#010x} 失败: {e}"));
+                        continue;
+                    }
+                    let len = buf.len().min(8);
+                    val[..len].copy_from_slice(&buf[..len]);
+                }
+            }
+            slot.incoming.push((ts, val));
         }
     }
 

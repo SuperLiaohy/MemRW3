@@ -2,6 +2,7 @@ mod app;
 mod dwarf;
 mod model;
 mod probe;
+mod sync;
 mod types;
 mod ui;
 

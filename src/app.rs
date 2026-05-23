@@ -2,10 +2,19 @@ use eframe::egui;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer, tab_viewer};
 use object::Object;
-use std::{fs, sync::Arc};
+use std::{
+    fs,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
 
-use crate::model::{AppSession, DockTab};
-use crate::probe::ProbeSession;
+use crate::model::{AppSession, DockTab, VariablePool};
+use crate::probe::{AcqSlot, ProbeCell, ProbeSession};
+use crate::sync::Sync;
 use crate::types::DwarfApp;
 use crate::ui;
 use crate::ui::chart_plugin::ChartPluginState;
@@ -24,9 +33,49 @@ pub struct MemRW3App {
     pub dwarf_app: DwarfApp,
     pub elf_path: String,
     pub session: AppSession,
-    pub probe: ProbeSession,
     pub chart_state: ChartPluginState,
     pub table_state: TablePluginState,
+    probe: Arc<ProbeCell>,
+    sync: Arc<Sync>,
+    pub delay_us: Arc<AtomicU64>,
+    acq_stop: Arc<AtomicBool>,
+    _acq_handle: Option<JoinHandle<()>>,
+}
+
+fn acq_thread(
+    probe: Arc<ProbeCell>,
+    running: Arc<AtomicBool>,
+    delay_us: Arc<AtomicU64>,
+    sync: Arc<Sync>,
+    stop: Arc<AtomicBool>,
+) {
+    while !stop.load(Ordering::Relaxed) {
+        sync.try_acquire();
+
+        if !running.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+
+        while running.load(Ordering::Acquire) {
+            sync.try_acquire();
+
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let probe_ref = unsafe { probe.get_mut() };
+            if !probe_ref.connected {
+                break;
+            }
+            probe_ref.acquire_from_slots();
+
+            let d = delay_us.load(Ordering::Acquire);
+            if d > 0 {
+                thread::sleep(Duration::from_micros(d));
+            }
+        }
+    }
 }
 
 impl MemRW3App {
@@ -34,17 +83,38 @@ impl MemRW3App {
         let mut tree = DockState::new(vec![TabKind::Chart]);
         tree.main_surface_mut()
             .split_right(NodeIndex::root(), 0.5, vec![TabKind::Table]);
+
+        let session = AppSession {
+            bottom_sheet_height: 250.0,
+            ..Default::default()
+        };
+
+        let probe = Arc::new(ProbeCell::new(ProbeSession::default()));
+        let sync = Arc::new(Sync::new());
+        let acq_stop = Arc::new(AtomicBool::new(false));
+        let delay_us = Arc::new(AtomicU64::new(1000));
+
+        let acq_probe = probe.clone();
+        let acq_sync = sync.clone();
+        let acq_running = session.running.clone();
+        let acq_delay = delay_us.clone();
+        let acq_stop_th = acq_stop.clone();
+        let _acq_handle = Some(thread::spawn(move || {
+            acq_thread(acq_probe, acq_running, acq_delay, acq_sync, acq_stop_th);
+        }));
+
         Self {
             tree,
             dwarf_app,
             elf_path: String::new(),
-            session: AppSession {
-                bottom_sheet_height: 250.0,
-                ..Default::default()
-            },
-            probe: ProbeSession::default(),
+            session,
             chart_state: ChartPluginState::default(),
             table_state: TablePluginState::default(),
+            probe,
+            sync,
+            delay_us,
+            acq_stop,
+            _acq_handle,
         }
     }
 
@@ -94,36 +164,83 @@ impl MemRW3App {
         self.dwarf_app = DwarfApp::new(cus);
         self.session.load_error = None;
     }
-}
 
-struct TabViewerCtx<'a> {
-    session: &'a mut AppSession,
-    chart_state: &'a mut ChartPluginState,
-    table_state: &'a mut TablePluginState,
-}
+    pub fn sync_connect(&mut self) {
+        let chip = self.session.probe_chip.clone();
+        let protocol = self.session.probe_protocol.clone();
+        let speed = self.session.probe_speed_khz;
+        let probe = self.probe.clone();
+        let connected = self.session.connected;
 
-impl<'a> TabViewerCtx<'a> {
-    fn render_main(&mut self, ui: &mut Ui, tab: &TabKind) {
-        match tab {
-            TabKind::Chart => {
-                let a = ui::chart_plugin::chart_panel(
-                    ui,
-                    self.chart_state,
-                    &self.session.pool,
-                    self.session.running,
-                );
-                if a == ui::chart_plugin::PanelAction::OpenTree {
-                    self.session.active_bottom_sheet = Some(DockTab::Chart);
+        if connected {
+            self.session.set_running(false);
+            self.sync.send_request(move || {
+                unsafe { probe.get_mut() }.disconnect();
+            });
+            self.session.connected = false;
+            self.session.connect_error = None;
+        } else {
+            let sync = self.sync.clone();
+            let running = self.session.running.clone();
+            sync.send_request(move || {
+                let p = unsafe { probe.get_mut() };
+                p.chip_name = chip;
+                p.protocol = protocol;
+                p.speed_khz = speed;
+                if !p.connect() {
+                    running.store(false, Ordering::Release);
                 }
-            }
-            TabKind::Table => {
-                let a = ui::table_plugin::table_panel(ui, self.table_state, &self.session.pool);
-                if a == ui::table_plugin::PanelAction::OpenTree {
-                    self.session.active_bottom_sheet = Some(DockTab::Table);
-                }
+            });
+            self.session.connected = unsafe { self.probe.get_mut() }.connected;
+            if !self.session.connected {
+                self.session.connect_error = unsafe { self.probe.get_mut() }.last_error.clone();
+                self.session.set_running(false);
+            } else {
+                self.session.connect_error = None;
             }
         }
     }
+
+    pub fn sync_reset(&mut self) {
+        let probe = self.probe.clone();
+        self.sync.send_request(move || {
+            unsafe { probe.get_mut() }.reset_target();
+        });
+    }
+
+    pub fn rebuild_slots(&self) {
+        let probe = self.probe.clone();
+        let slots: Vec<AcqSlot> = self.session.pool.iter().map(|var| AcqSlot {
+            address: var.address,
+            size: var.size,
+            incoming: var.incoming.clone(),
+        }).collect();
+        self.sync.send_request(move || {
+            unsafe { probe.get_mut() }.slots = slots;
+        });
+    }
+
+    fn push_slot(&self, address: u64, size: u32, incoming: Arc<crate::model::DoubleBuffer<(f64, [u8; 8])>>) {
+        let probe = self.probe.clone();
+        let slot = AcqSlot { address, size, incoming };
+        self.sync.send_request(move || {
+            unsafe { probe.get_mut() }.slots.push(slot);
+        });
+    }
+}
+
+impl Drop for MemRW3App {
+    fn drop(&mut self) {
+        self.acq_stop.store(true, Ordering::Relaxed);
+    }
+}
+
+struct TabViewerCtx<'a> {
+    chart_state: &'a mut ChartPluginState,
+    table_state: &'a mut TablePluginState,
+    pool: &'a VariablePool,
+    running: bool,
+    open_tree: &'a mut Option<DockTab>,
 }
 
 impl<'a> TabViewer for TabViewerCtx<'a> {
@@ -138,7 +255,20 @@ impl<'a> TabViewer for TabViewerCtx<'a> {
         tab_viewer::OnCloseResponse::Ignore
     }
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
-        self.render_main(ui, tab);
+        match tab {
+            TabKind::Chart => {
+                let a = ui::chart_plugin::chart_panel(ui, self.chart_state, self.pool, self.running);
+                if a == ui::chart_plugin::PanelAction::OpenTree {
+                    *self.open_tree = Some(DockTab::Chart);
+                }
+            }
+            TabKind::Table => {
+                let a = ui::table_plugin::table_panel(ui, self.table_state, self.pool);
+                if a == ui::table_plugin::PanelAction::OpenTree {
+                    *self.open_tree = Some(DockTab::Table);
+                }
+            }
+        }
     }
 }
 
@@ -179,15 +309,18 @@ fn bottom_sheet_handle(ui: &mut Ui, drag_state: &mut Option<(f32, f32)>, current
 
 impl eframe::App for MemRW3App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        if self.session.is_running() {
+            ui.ctx().request_repaint();
+        }
+
         let total_h = ui.available_height();
         let ctrl_h = (total_h * 0.06).clamp(40.0, 56.0);
         let bs_open = self.session.active_bottom_sheet.is_some();
         let dialog_open = self.chart_state.show_line_dialog
-            || self.table_state.show_entry_dialog
-            || self.probe.show_settings;
+            || self.table_state.show_entry_dialog;
+        let running = self.session.is_running();
 
         ui.vertical(|ui| {
-            // ── Control Bar (locked when BottomSheet or dialogs are open) ──
             let (ctrl_rect, _) = ui.allocate_at_least(
                 egui::vec2(ui.available_width(), ctrl_h),
                 egui::Sense::hover(),
@@ -198,23 +331,14 @@ impl eframe::App for MemRW3App {
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
             ctrl_ui.add_enabled_ui(!bs_open && !dialog_open, |ui| {
-                ui::control_bar(ui, &mut self.session, &mut self.probe);
+                ui::control_bar(ui, self);
             });
 
-            self.probe.running = self.session.running;
-            self.probe
-                .acquire(&mut self.session.pool, self.session.delay_us);
-            if self.session.running {
-                ui.ctx().request_repaint();
-            }
-
             let remaining = ui.available_height();
-            // 1. 将最小高度提高到 250.0，确保树状视图始终有空间显示
             let min_limit = remaining * 0.5;
             let max_h = (remaining * 0.9).max(min_limit);
             let min_h = min_limit.min(max_h);
             let bs_h = if bs_open {
-                // 2. 覆盖写回 bottom_sheet_height：防止快速拖拽越界导致数值跑飞而产生“拖动卡死”感
                 self.session.bottom_sheet_height = self.session.bottom_sheet_height.clamp(min_h, max_h);
                 self.session.bottom_sheet_height
             } else {
@@ -235,10 +359,13 @@ impl eframe::App for MemRW3App {
                     dock_ui.disable();
                 }
 
+                let mut open_tree = self.session.active_bottom_sheet;
                 let mut viewer = TabViewerCtx {
-                    session: &mut self.session,
                     chart_state: &mut self.chart_state,
                     table_state: &mut self.table_state,
+                    pool: &self.session.pool,
+                    running,
+                    open_tree: &mut open_tree,
                 };
                 DockArea::new(&mut self.tree)
                     .style(egui_dock::Style::from_egui(ui.style()))
@@ -246,12 +373,9 @@ impl eframe::App for MemRW3App {
                     .show_leaf_collapse_buttons(false)
                     .show_inside(&mut dock_ui, &mut viewer);
 
+                self.session.active_bottom_sheet = open_tree;
                 self.session.sampling_hz = self.chart_state.acq_hz;
 
-                // Full-dock click interceptor: rendered AFTER DockArea, BEFORE BottomSheet.
-                // egui Z-order: later widgets take input priority → this steals all clicks
-                // from exposed dock tabs (which use ui.interact() that ignores enabled state).
-                // BottomSheet, rendered after this, overrides for its own area.
                 if bs_open || dialog_open {
                     ui.interact(dock_rect, ui.id().with("dock_blocker"), egui::Sense::click_and_drag());
                 }
@@ -269,12 +393,7 @@ impl eframe::App for MemRW3App {
                     egui::Frame::NONE
                         .fill(card_bg)
                         .stroke(card_stroke)
-                        .corner_radius(egui::CornerRadius {
-                            nw: 16,
-                            ne: 16,
-                            sw: 0,
-                            se: 0,
-                        })
+                        .corner_radius(egui::CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 })
                         .show(ui, |ui| {
                             let target = bottom_sheet_handle(
                                 ui,
@@ -285,7 +404,6 @@ impl eframe::App for MemRW3App {
                             egui::Frame::NONE
                                 .inner_margin(egui::Margin::symmetric(10, 6))
                                 .show(ui, |ui| {
-                                    // ── ELF file path picker (top of BottomSheet) ──
                                     ui.horizontal(|ui| {
                                         ui.label("ELF 文件:");
                                         ui.add_sized(
@@ -293,9 +411,7 @@ impl eframe::App for MemRW3App {
                                             egui::TextEdit::singleline(&mut self.elf_path)
                                                 .hint_text("输入 firmware.elf 路径..."),
                                         );
-                                        if ui.button("加载").clicked() {
-                                            self.load_elf();
-                                        }
+                                        if ui.button("加载").clicked() { self.load_elf(); }
                                         if let Some(ref err) = self.session.load_error {
                                             ui.colored_label(Color32::from_rgb(255, 80, 80), err);
                                         }
@@ -303,17 +419,11 @@ impl eframe::App for MemRW3App {
                                     ui.add_space(4.0);
                                     ui.separator();
                                     ui.add_space(2.0);
-
                                     ui.horizontal(|ui| {
                                         ui.heading("变量列表 (DWARF Tree)");
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui.button("关闭").clicked() {
-                                                    self.session.active_bottom_sheet = None;
-                                                }
-                                            },
-                                        );
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.button("关闭").clicked() { self.session.active_bottom_sheet = None; }
+                                        });
                                     });
                                     ui.add_space(4.0);
                                     ui.separator();
@@ -323,192 +433,89 @@ impl eframe::App for MemRW3App {
                                     let right_w = (total_w * 0.32).clamp(220.0, 350.0);
                                     let left_w = (total_w - right_w - 8.0).max(200.0);
                                     ui.horizontal(|ui| {
-                                        let (left_rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(left_w, rem_h),
-                                            egui::Sense::hover(),
-                                        );
-                                        let mut left_ui = ui.new_child(
-                                            egui::UiBuilder::new()
-                                                .max_rect(left_rect)
-                                                .layout(egui::Layout::top_down(egui::Align::Min)),
-                                        );
+                                        let (left_rect, _) = ui.allocate_exact_size(egui::vec2(left_w, rem_h), egui::Sense::hover());
+                                        let mut left_ui = ui.new_child(egui::UiBuilder::new().max_rect(left_rect).layout(egui::Layout::top_down(egui::Align::Min)));
                                         ui::vari_tree_ui(&mut left_ui, &mut self.dwarf_app);
                                         ui.separator();
-                                        let (right_rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(ui.available_width(), rem_h),
-                                            egui::Sense::hover(),
-                                        );
-                                        let mut right_ui = ui.new_child(
-                                            egui::UiBuilder::new()
-                                                .max_rect(right_rect)
-                                                .layout(egui::Layout::top_down(egui::Align::Min)),
-                                        );
+                                        let (right_rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), rem_h), egui::Sense::hover());
+                                        let mut right_ui = ui.new_child(egui::UiBuilder::new().max_rect(right_rect).layout(egui::Layout::top_down(egui::Align::Min)));
                                         let selected = self.dwarf_app.selected_node.clone();
                                         if let Some(ref node) = selected {
-                                            let pool = &mut self.session.pool;
-                                            let already_added = pool.contains(node.id);
+                                            let already_added = self.session.pool.contains(node.id);
                                             let node_id = node.id;
                                             let node_size = node.size;
                                             let node_basic_type = node.basic_type.clone();
-                                            let default_type =
-                                                crate::types::basic_type_to_extend(&node_basic_type);
-
-                                            // Get or create ExtendConfig
-                                            let config = self
-                                                .session
-                                                .extend_configs
-                                                .entry(node_id)
-                                                .or_insert_with(|| crate::types::ExtendConfig {
-                                                    name: String::new(),
-                                                    address: 0,
-                                                    ext_type: default_type,
-                                                    size: node_size,
-                                                    array_index: None,
-                                                    array_count: None,
-                                                });
-
-                                            // Array element: sync tree + selected_node so
-                                            // compute_extend_name/address naturally produce [index].
-                                            if let Some((count, elem_size)) =
-                                                self.dwarf_app.parent_array_info(node_id)
-                                            {
+                                            let default_type = crate::types::basic_type_to_extend(&node_basic_type);
+                                            let config = self.session.extend_configs.entry(node_id).or_insert_with(|| crate::types::ExtendConfig {
+                                                name: String::new(), address: 0, ext_type: default_type, size: node_size, array_index: None, array_count: None,
+                                            });
+                                            if let Some((count, elem_size)) = self.dwarf_app.parent_array_info(node_id) {
                                                 config.array_count = Some(count);
-                                                // Read index from node name (may be set by search)
                                                 if node.name.starts_with('[') {
-                                                    if let Ok(parsed) =
-                                                        node.name[1..node.name.len() - 1]
-                                                            .parse::<u64>()
-                                                    {
-                                                        if parsed < count {
-                                                            config.array_index = Some(parsed);
-                                                        }
+                                                    if let Ok(parsed) = node.name[1..node.name.len()-1].parse::<u64>() {
+                                                        if parsed < count { config.array_index = Some(parsed); }
                                                     }
                                                 }
-                                                if config.array_index.is_none() {
-                                                    config.array_index = Some(0);
-                                                }
+                                                if config.array_index.is_none() { config.array_index = Some(0); }
                                                 let idx = config.array_index.unwrap_or(0);
                                                 let new_name = format!("[{}]", idx);
                                                 let new_addr = elem_size * idx;
-
-                                                if let Some(tree_node) =
-                                                    self.dwarf_app.find_node_mut(node_id)
-                                                {
+                                                if let Some(tree_node) = self.dwarf_app.find_node_mut(node_id) {
                                                     tree_node.name = new_name.clone();
                                                     tree_node.address = new_addr;
                                                 }
-                                                self.dwarf_app
-                                                    .selected_node
-                                                    .as_mut()
-                                                    .map(|sel| {
-                                                        sel.name = new_name;
-                                                        sel.address = new_addr;
-                                                    });
-
-                                                config.name = self
-                                                    .dwarf_app
-                                                    .compute_extend_name(node_id);
-                                                config.address = self
-                                                    .dwarf_app
-                                                    .compute_extend_address(node_id)
-                                                    .unwrap_or(0);
+                                                self.dwarf_app.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
+                                                config.name = self.dwarf_app.compute_extend_name(node_id);
+                                                config.address = self.dwarf_app.compute_extend_address(node_id).unwrap_or(0);
                                             } else {
-                                                // Non-array: ensure name/address are set on first access
                                                 if config.name.is_empty() {
-                                                    config.name = self
-                                                        .dwarf_app
-                                                        .compute_extend_name(node_id);
-                                                    config.address = self
-                                                        .dwarf_app
-                                                        .compute_extend_address(node_id)
-                                                        .unwrap_or(0);
+                                                    config.name = self.dwarf_app.compute_extend_name(node_id);
+                                                    config.address = self.dwarf_app.compute_extend_address(node_id).unwrap_or(0);
                                                 }
                                             }
-
-                                            // Color persistence via egui memory
-                                            let color_id = ui.make_persistent_id(format!(
-                                                "chart_add_color_{}",
-                                                node.id
-                                            ));
-                                            let mut chart_color = ui.data_mut(|d| {
-                                                *d.get_temp_mut_or(
-                                                    color_id,
-                                                    Color32::from_rgb(66, 133, 244),
-                                                )
-                                            });
+                                            let color_id = ui.make_persistent_id(format!("chart_add_color_{}", node.id));
+                                            let mut chart_color = ui.data_mut(|d| *d.get_temp_mut_or(color_id, Color32::from_rgb(66,133,244)));
                                             let mut chart_curve_name = String::new();
                                             let mut table_display_name = String::new();
                                             let added = match target_tab {
                                                 Some(DockTab::Chart) => {
-                                                    let result = ui::vari_properties_ui(
-                                                        &mut right_ui,
-                                                        node,
-                                                        config,
-                                                        |ui, node_name| {
-                                                            ui::chart_plugin::chart_add_config_ui(
-                                                                ui,
-                                                                node_name,
-                                                                &mut chart_curve_name,
-                                                                &mut chart_color,
-                                                            );
-                                                            ui.button("添加到 Chart").clicked()
-                                                        },
-                                                    );
-                                                    ui.data_mut(|d| {
-                                                        d.insert_temp(color_id, chart_color)
+                                                    let result = ui::vari_properties_ui(&mut right_ui, node, config, |ui, node_name| {
+                                                        ui::chart_plugin::chart_add_config_ui(ui, node_name, &mut chart_curve_name, &mut chart_color);
+                                                        ui.button("添加到 Chart").clicked()
                                                     });
+                                                    ui.data_mut(|d| { d.insert_temp(color_id, chart_color) });
                                                     result
                                                 }
-                                                Some(DockTab::Table) => ui::vari_properties_ui(
-                                                    &mut right_ui,
-                                                    node,
-                                                    config,
-                                                    |ui, node_name| {
-                                                        ui::table_plugin::table_add_config_ui(
-                                                            ui,
-                                                            node_name,
-                                                            &mut table_display_name,
-                                                        );
-                                                        ui.button("添加到 Table").clicked()
-                                                    },
-                                                ),
+                                                Some(DockTab::Table) => ui::vari_properties_ui(&mut right_ui, node, config, |ui, node_name| {
+                                                    ui::table_plugin::table_add_config_ui(ui, node_name, &mut table_display_name);
+                                                    ui.button("添加到 Table").clicked()
+                                                }),
                                                 None => false,
                                             };
                                             if added && !already_added {
                                                 let var_id = self.session.pool.add(config);
                                                 self.session.selected_variables.insert(var_id);
+                                                if let Some(var) = self.session.pool.get(var_id) {
+                                                    self.push_slot(var.address, var.size, var.incoming.clone());
+                                                }
                                                 match target_tab {
                                                     Some(DockTab::Chart) => {
-                                                        self.chart_state.add_from_pool(
-                                                            &self.session.pool,
-                                                            var_id,
-                                                        );
-                                                        if let Some(legend) =
-                                                            self.chart_state.legends.last_mut()
-                                                        {
-                                                            legend.curve_name =
-                                                                chart_curve_name.clone();
+                                                        self.chart_state.add_from_pool(&self.session.pool, var_id);
+                                                        if let Some(legend) = self.chart_state.legends.last_mut() {
+                                                            legend.curve_name = chart_curve_name.clone();
                                                             legend.color = chart_color;
                                                         }
                                                     }
                                                     Some(DockTab::Table) => {
-                                                        self.table_state.add_from_pool(
-                                                            &self.session.pool,
-                                                            var_id,
-                                                        );
-                                                        if let Some(entry) =
-                                                            self.table_state.entries.last_mut()
-                                                        {
-                                                            entry.display_name =
-                                                                table_display_name.clone();
+                                                        self.table_state.add_from_pool(&self.session.pool, var_id);
+                                                        if let Some(entry) = self.table_state.entries.last_mut() {
+                                                            entry.display_name = table_display_name.clone();
                                                         }
                                                     }
                                                     None => {}
                                                 }
                                             }
-                                        } else {
-                                            right_ui.label("选择节点以查看属性");
-                                        }
+                                        } else { right_ui.label("选择节点以查看属性"); }
                                     });
                                 });
                         });
@@ -519,27 +526,11 @@ impl eframe::App for MemRW3App {
 }
 
 pub fn setup_fonts(ctx: &egui::Context) {
-    let font_bytes = fs::read(CHINESE_FONT_PATH).unwrap_or_else(|_| {
-        eprintln!("未找到中文字体: {CHINESE_FONT_PATH}");
-        Vec::new()
-    });
-    if font_bytes.is_empty() {
-        return;
-    }
+    let font_bytes = fs::read(CHINESE_FONT_PATH).unwrap_or_else(|_| { eprintln!("未找到中文字体: {CHINESE_FONT_PATH}"); Vec::new() });
+    if font_bytes.is_empty() { return; }
     let mut fonts = FontDefinitions::default();
-    fonts.font_data.insert(
-        "DroidSansFallback".to_owned(),
-        Arc::new(FontData::from_owned(font_bytes)),
-    );
-    fonts
-        .families
-        .entry(FontFamily::Proportional)
-        .or_default()
-        .insert(0, "DroidSansFallback".to_owned());
-    fonts
-        .families
-        .entry(FontFamily::Monospace)
-        .or_default()
-        .push("DroidSansFallback".to_owned());
+    fonts.font_data.insert("DroidSansFallback".to_owned(), Arc::new(FontData::from_owned(font_bytes)));
+    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "DroidSansFallback".to_owned());
+    fonts.families.entry(FontFamily::Monospace).or_default().push("DroidSansFallback".to_owned());
     ctx.set_fonts(fonts);
 }

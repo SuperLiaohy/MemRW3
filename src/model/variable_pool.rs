@@ -1,17 +1,18 @@
+use std::sync::Arc;
 use crate::types::{ExtendConfig, ExtendType};
+use crate::model::DoubleBuffer;
 use std::collections::HashMap;
 
-#[derive(Clone)]
 pub struct PooledVariable {
     pub id: usize,
     pub name: String,
     pub address: u64,
     pub ext_type: ExtendType,
     pub size: u32,
-    pub current_value: Vec<u8>,
+    pub incoming: Arc<DoubleBuffer<(f64, [u8; 8])>>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct VariablePool {
     variables: Vec<PooledVariable>,
     id_index: HashMap<usize, usize>,
@@ -29,7 +30,7 @@ impl VariablePool {
             address: config.address,
             ext_type: config.ext_type.clone(),
             size: config.size,
-            current_value: Vec::new(),
+            incoming: Arc::new(DoubleBuffer::new()),
         });
         self.id_index.insert(id, idx);
         id
@@ -51,19 +52,11 @@ impl VariablePool {
         self.id_index.get(&id).and_then(|&i| self.variables.get(i))
     }
 
-    pub fn get_mut(&mut self, id: usize) -> Option<&mut PooledVariable> {
-        self.id_index.get(&id).and_then(|&i| self.variables.get_mut(i))
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut PooledVariable> {
-        self.variables.iter_mut()
+    pub fn iter(&self) -> impl Iterator<Item = &PooledVariable> {
+        self.variables.iter()
     }
 
     pub fn contains(&self, id: usize) -> bool {
         self.id_index.contains_key(&id)
-    }
-
-    pub fn len(&self) -> usize {
-        self.variables.len()
     }
 }

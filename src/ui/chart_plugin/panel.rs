@@ -41,10 +41,9 @@ pub struct ChartPluginState {
     pub x_mode: XAxisMode,
     pub y_mode: YAxisMode,
     pub acq_hz: f64,
-    timer_start: Option<Instant>,
-    elapsed_time: f64,
     acq_frame_count: u64,
     acq_last_reset: Instant,
+    was_running: bool,
 }
 
 impl Default for ChartPluginState {
@@ -57,10 +56,9 @@ impl Default for ChartPluginState {
             x_mode: XAxisMode::Auto,
             y_mode: YAxisMode::Auto,
             acq_hz: 0.0,
-            timer_start: None,
-            elapsed_time: 0.0,
             acq_frame_count: 0,
             acq_last_reset: Instant::now(),
+            was_running: false,
         }
     }
 }
@@ -139,27 +137,33 @@ pub fn chart_panel(
     let mut action = PanelAction::None;
 
     if running {
-        if state.timer_start.is_none() {
-            state.timer_start = Some(Instant::now());
+        if !state.was_running {
             state.acq_frame_count = 0;
             state.acq_last_reset = Instant::now();
+            state.was_running = true;
         }
-        state.elapsed_time = state
-            .timer_start
-            .map_or(0.0, |ts| ts.elapsed().as_secs_f64());
         for legend in &mut state.legends {
             if let Some(var) = pool.get(legend.variable_id) {
-                let val = decode_value_f64(&var.current_value, &var.ext_type);
-                legend.push_value(state.elapsed_time, val);
+                let drained = var.incoming.drain();
+                if drained.is_empty() {
+                    continue;
+                }
+                let n = drained.len() as u64;
+                for (t, data) in &drained {
+                    let val = decode_value_f64(data, &var.ext_type);
+                    legend.push_value(*t, val);
+                }
+                state.acq_frame_count += n;
             }
         }
-        state.acq_frame_count += 1;
         let elapsed = state.acq_last_reset.elapsed().as_secs_f64();
         if elapsed >= 1.0 {
             state.acq_hz = state.acq_frame_count as f64 / elapsed;
             state.acq_frame_count = 0;
             state.acq_last_reset = Instant::now();
         }
+    } else {
+        state.was_running = false;
     }
 
     ui.vertical(|ui| {
@@ -185,8 +189,6 @@ pub fn chart_panel(
                         legend.data_history.clear();
                     }
                     state.auto_scroll = true;
-                    state.timer_start = None;
-                    state.elapsed_time = 0.0;
                     state.acq_hz = 0.0;
                     state.acq_frame_count = 0;
                 }
