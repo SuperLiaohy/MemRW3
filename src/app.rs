@@ -796,6 +796,7 @@ struct SavedVariable {
 #[derive(Serialize, Deserialize)]
 struct SavedChartLegend {
     variable_name: String,
+    variable_address: u64,
     curve_name: String,
     color: [u8; 4],
     visible: bool,
@@ -805,6 +806,7 @@ struct SavedChartLegend {
 #[derive(Serialize, Deserialize)]
 struct SavedTableEntry {
     variable_name: String,
+    variable_address: u64,
     display_name: String,
 }
 
@@ -837,14 +839,10 @@ impl MemRW3App {
                 .legends
                 .iter()
                 .map(|l| {
-                    let var_name = self
-                        .session
-                        .pool
-                        .get(l.variable_id)
-                        .map(|v| v.name.clone())
-                        .unwrap_or_default();
+                    let v = self.session.pool.get(l.variable_id);
                     SavedChartLegend {
-                        variable_name: var_name,
+                        variable_name: v.map(|v| v.name.clone()).unwrap_or_default(),
+                        variable_address: v.map(|v| v.address).unwrap_or(0),
                         curve_name: l.curve_name.clone(),
                         color: [l.color.r(), l.color.g(), l.color.b(), l.color.a()],
                         visible: l.visible,
@@ -857,14 +855,10 @@ impl MemRW3App {
                 .entries
                 .iter()
                 .map(|e| {
-                    let var_name = self
-                        .session
-                        .pool
-                        .get(e.variable_id)
-                        .map(|v| v.name.clone())
-                        .unwrap_or_default();
+                    let v = self.session.pool.get(e.variable_id);
                     SavedTableEntry {
-                        variable_name: var_name,
+                        variable_name: v.map(|v| v.name.clone()).unwrap_or_default(),
+                        variable_address: v.map(|v| v.address).unwrap_or(0),
                         display_name: e.display_name.clone(),
                     }
                 })
@@ -895,21 +889,15 @@ impl MemRW3App {
             }
         };
 
-        // Restore probe settings
         self.session.probe_chip = config.probe_chip;
         self.session.probe_protocol = config.probe_protocol;
         self.session.probe_speed_khz = config.probe_speed_khz;
         self.elf_path = config.elf_path;
 
-        // Load ELF
-        self.load_elf();
-
-        // Clear existing pool and plugins
         self.session.pool = VariablePool::default();
         self.chart_state.legends.clear();
         self.table_state.entries.clear();
 
-        // Restore variables
         for sv in &config.variables {
             let ext_type = match sv.ext_type.as_str() {
                 "U8" => crate::types::ExtendType::U8,
@@ -924,7 +912,7 @@ impl MemRW3App {
                 "Double" => crate::types::ExtendType::Double,
                 _ => crate::types::ExtendType::Other,
             };
-            let config = crate::types::ExtendConfig {
+            let c = crate::types::ExtendConfig {
                 name: sv.name.clone(),
                 address: sv.address,
                 ext_type,
@@ -932,37 +920,69 @@ impl MemRW3App {
                 array_index: None,
                 array_count: None,
             };
-            self.session.pool.add(&config);
+            self.session.pool.add(&c);
         }
 
-        // Restore chart legends
         for sl in &config.chart_legends {
-            let var_id = self.session.pool.iter().find(|v| v.name == sl.variable_name).map(|v| v.id);
-            if let Some(var_id) = var_id {
-                let mut legend = crate::ui::chart_plugin::ChartLegend::new(var_id, sl.curve_name.clone());
-                legend.color = Color32::from_rgba_premultiplied(sl.color[0], sl.color[1], sl.color[2], sl.color[3]);
-                legend.visible = sl.visible;
-                legend.buffer_size = sl.buffer_size;
-                self.chart_state.legends.push(legend);
-                if let Some(var) = self.session.pool.get_mut(var_id) {
-                    var.plugins_cnt += 1;
+            let var_id = self
+                .session
+                .pool
+                .find_by_name_addr(&sl.variable_name, sl.variable_address)
+                .map(|v| v.id);
+            match var_id {
+                Some(id) => {
+                    let mut legend = crate::ui::chart_plugin::ChartLegend::new(id, sl.curve_name.clone());
+                    legend.color = Color32::from_rgba_premultiplied(sl.color[0], sl.color[1], sl.color[2], sl.color[3]);
+                    legend.visible = sl.visible;
+                    legend.buffer_size = sl.buffer_size;
+                    self.chart_state.legends.push(legend);
+                    if let Some(var) = self.session.pool.get_mut(id) {
+                        var.plugins_cnt += 1;
+                    }
+                }
+                None => {
+                    self.session.pool = VariablePool::default();
+                    self.chart_state.legends.clear();
+                    self.table_state.entries.clear();
+                    self.toasts
+                        .error(format!("图表变量 \"{}\" 匹配失败", sl.variable_name))
+                        .duration(Some(Duration::from_secs(10)))
+                        .closable(true);
+                    return;
                 }
             }
         }
 
         for se in &config.table_entries {
-            let var_id = self.session.pool.iter().find(|v| v.name == se.variable_name).map(|v| v.id);
-            if let Some(var_id) = var_id {
-                let mut entry = crate::ui::table_plugin::TableEntry::new(var_id, se.display_name.clone());
-                entry.display_name = se.display_name.clone();
-                self.table_state.entries.push(entry);
-                if let Some(var) = self.session.pool.get_mut(var_id) {
-                    var.plugins_cnt += 1;
+            let var_id = self
+                .session
+                .pool
+                .find_by_name_addr(&se.variable_name, se.variable_address)
+                .map(|v| v.id);
+            match var_id {
+                Some(id) => {
+                    let mut entry = crate::ui::table_plugin::TableEntry::new(id, se.display_name.clone());
+                    entry.display_name = se.display_name.clone();
+                    self.table_state.entries.push(entry);
+                    if let Some(var) = self.session.pool.get_mut(id) {
+                        var.plugins_cnt += 1;
+                    }
+                }
+                None => {
+                    self.session.pool = VariablePool::default();
+                    self.chart_state.legends.clear();
+                    self.table_state.entries.clear();
+                    self.toasts
+                        .error(format!("表格变量 \"{}\" 匹配失败", se.variable_name))
+                        .duration(Some(Duration::from_secs(10)))
+                        .closable(true);
+                    return;
                 }
             }
         }
 
         self.toasts.success("配置已加载").duration(Some(Duration::from_secs(2)));
+        self.trace_variables();
     }
 }
 

@@ -24,9 +24,11 @@ pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
                 if ui.button(RichText::new("保存").size(12.0)).clicked() {
                     app.save_config();
                 }
-                if ui.button(RichText::new("加载").size(12.0)).clicked() {
-                    app.load_config();
-                }
+                ui.add_enabled_ui(!app.session.is_running(), |ui| {
+                    if ui.button(RichText::new("加载").size(12.0)).clicked() {
+                        app.load_config();
+                    }
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     sampling_status(ui, app);
                 });
@@ -174,9 +176,11 @@ fn connect_button(ui: &mut Ui, app: &mut MemRW3App) {
 }
 
 fn settings_button(ui: &mut Ui, app: &mut MemRW3App) {
-    if ui.add(egui::Button::new(RichText::new("⚙ 设置").size(13.0))).clicked() {
-        app.session.show_probe_settings = true;
-    }
+    ui.add_enabled_ui(!app.session.connected, |ui| {
+        if ui.add(egui::Button::new(RichText::new("⚙ 设置").size(13.0))).clicked() {
+            app.session.show_probe_settings = true;
+        }
+    });
 }
 
 fn run_control(ui: &mut Ui, app: &mut MemRW3App) {
@@ -211,9 +215,11 @@ fn delay_slider(ui: &mut Ui, app: &mut MemRW3App) {
 }
 
 fn reset_button(ui: &mut Ui, app: &mut MemRW3App) {
-    if ui.add(egui::Button::new(RichText::new("Reset").size(13.0))).clicked() {
-        app.sync_reset();
-    }
+    ui.add_enabled_ui(app.session.connected, |ui| {
+        if ui.add(egui::Button::new(RichText::new("Reset").size(13.0))).clicked() {
+            app.sync_reset();
+        }
+    });
 }
 
 fn sampling_status(ui: &mut Ui, app: &MemRW3App) {
