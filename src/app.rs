@@ -287,7 +287,8 @@ impl MemRW3App {
             });
             self.session.connected = unsafe { self.probe.get_mut() }.connected;
             if !self.session.connected {
-                self.session.connect_error = unsafe { self.probe.get_mut() }.last_error.clone();
+                let err = unsafe { self.probe.get_mut() }.last_error.clone().unwrap_or_default();
+                self.toasts.error(err).duration(Some(Duration::from_secs(8))).closable(true);
                 self.session.set_running(false);
             } else {
                 self.session.connect_error = None;
@@ -673,7 +674,8 @@ impl eframe::App for MemRW3App {
                                             self.trace_variables();
                                         }
                                         if let Some(ref err) = self.session.load_error {
-                                            ui.colored_label(Color32::from_rgb(255, 80, 80), err);
+                                            self.toasts.error(err.clone()).duration(Some(Duration::from_secs(8))).closable(true);
+                                            self.session.load_error = None;
                                         }
                                     });
                                     ui.add_space(4.0);

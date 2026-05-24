@@ -209,9 +209,6 @@ fn connect_button(ui: &mut Ui, app: &mut MemRW3App) {
     if ui.add(egui::Button::new(RichText::new(label).size(13.0))).clicked() {
         app.sync_connect();
     }
-    if let Some(ref err) = app.session.connect_error {
-        ui.colored_label(Color32::from_rgb(255, 80, 80), err);
-    }
 }
 
 fn settings_button(ui: &mut Ui, app: &mut MemRW3App) {
