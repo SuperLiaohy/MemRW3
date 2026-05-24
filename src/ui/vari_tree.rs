@@ -78,9 +78,6 @@ fn show_tree(ui: &mut Ui, app: &mut DwarfApp) {
     for action in actions {
         if let Action::SetSelected(ids) = action {
             app.selected_node = ids.first().and_then(|id| app.find_node_by_id(*id));
-            if let Some(&id) = ids.first() {
-                app.scroll_target_id = Some(id);
-            }
         }
     }
 }

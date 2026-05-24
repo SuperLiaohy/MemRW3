@@ -610,7 +610,7 @@ serde_json = "1"          # JSON
     - **Hz**: `acq_cycle_count: Arc<AtomicU64>` 采集线程每轮 +1, 主线程每秒计算采集轮询频率
     - **计时**: `timer_was_started` 追踪, 首次"开始"和清空后第一次"开始"归零, 暂停再继续累积
 
-12. **Tree View 默认折叠, 搜索居中滚动 + 点击滚动**: 使用 `NodeBuilder::default_open(false)` 初始化所有树节点为折叠状态; 搜索后通过 `count_nodes_before()` (基于 `tree_state` 展开状态) 计算可见节点数, 使用 `viewport_h` 居中偏移公式 `ScrollArea::vertical_scroll_offset()` 居中显示; 点击节点也设 `scroll_target_id` 实现滚到居中。
+12. **Tree View 默认折叠, 搜索居中滚动**: 使用 `NodeBuilder::default_open(false)` 初始化所有树节点为折叠状态; 搜索后通过 `count_nodes_before()` (基于 `tree_state` 展开状态) 计算可见节点数, 使用 `viewport_h` 居中偏移公式 `ScrollArea::vertical_scroll_offset()` 居中显示。点击节点仅选中不滚动。
 
 13. **ELF 文件延迟加载**: 不通过命令行参数加载, App 启动为空, 用户在 BottomSheet 顶部输入路径并点击"加载"触发 `load_elf()`
 
@@ -627,6 +627,4 @@ serde_json = "1"          # JSON
     - `[idx]` 记号自动展开为独立层级，匹配时校验 index 是否在 `[0, count)` 范围内
     - 搜索成功后更新树节点 name/address 并同步 `config.array_index`
 
-16. **BottomSheet 拖拽**: 改用初始点 + 屏幕坐标相对位移替代 `drag_delta()` 逐帧累加，消除坐标漂移。写入前 `clamp(min_h, max_h)` 确保无越界帧。
-
-17. **搜索居中滚动**: `scroll_target_id` 驱动，`count_nodes_before()` 基于 `tree_state` 计算可见节点数，`viewport_h` 居中偏移公式 `(count*24 - viewport_h/2 + 12).max(0)` 统一搜索和点击滚动。
+16. **BottomSheet**: 使用 `egui::Modal` + 底部锚定 `Area`，固定窗口 70% 高度全宽
