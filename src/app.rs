@@ -440,13 +440,11 @@ impl<'a> TabViewer for TabViewerCtx<'a> {
 }
 
 fn bottom_sheet_handle(ui: &mut egui::Ui, drag_state: &mut Option<(f32, f32)>, current_h: f32) -> f32 {
-    // 【修复1】：强制获取有限的宽度，防止出现 Infinity 导致中心点跑飞
     let mut w = ui.available_width();
     if !w.is_finite() || w <= 0.0 {
         w = ui.ctx().screen_rect().width(); // 如果不正常，回退到屏幕宽度
     }
 
-    // 【修复2】：强制分配确定的高度和宽度
     let (rect, response) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::drag());
     
     if response.hovered() || response.dragged() {
@@ -458,13 +456,11 @@ fn bottom_sheet_handle(ui: &mut egui::Ui, drag_state: &mut Option<(f32, f32)>, c
     } else if response.hovered() {
         ui.visuals().widgets.hovered.bg_fill
     } else if ui.visuals().dark_mode {
-        // 稍微调亮一点，防止跟暗色背景融为一体
         egui::Color32::from_gray(120) 
     } else {
         egui::Color32::from_gray(200)
     };
     
-    // 因为 rect 现在是绝对准确的，center() 一定是在屏幕正中央
     let capsule = egui::Rect::from_center_size(rect.center(), egui::vec2(40.0, 4.0));
     ui.painter()
         .rect_filled(capsule, egui::CornerRadius::same(2), handle_color);
@@ -475,7 +471,6 @@ fn bottom_sheet_handle(ui: &mut egui::Ui, drag_state: &mut Option<(f32, f32)>, c
                 *drag_state = Some((pointer.y, current_h));
             }
             let (origin_y, initial_h) = drag_state.unwrap();
-            // 往上拖 pointer.y 变小，位移是正数，高度增加（符合真实直觉）
             let displacement = origin_y - pointer.y; 
             return initial_h + displacement;
         }
@@ -611,37 +606,51 @@ impl eframe::App for MemRW3App {
                 let bs_id = egui::Id::new("bottom_sheet");
                 let window_w = ui.ctx().viewport_rect().width();
                 let window_h = ui.ctx().viewport_rect().height();
-                let bs_area = egui::Area::new(bs_id)
-                    .anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::ZERO)
-                    .fixed_pos(egui::pos2(ui.min_rect().left(), ui.min_rect().bottom()))
-                    .order(egui::Order::Foreground)
-                    .constrain(true);
-                egui::Modal::new(bs_id)
-                    .area(bs_area)
-                    .frame(egui::Frame::NONE
-                        .fill(ui.visuals().window_fill())
-                        .stroke(ui.visuals().window_stroke())
-                        .corner_radius(egui::CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 }))
-                    .show(ui.ctx(), |ui| {
 
-                        let target = bottom_sheet_handle(
-                            ui,
-                            &mut self.session.bottom_sheet_drag,
-                            self.session.bottom_sheet_height,
+                egui::Area::new("modal_overlay".into())
+                    .fixed_pos(ui.ctx().viewport_rect().min)
+                    .show(ui.ctx(), |ui| {
+                        ui.painter().rect_filled(
+                            ui.ctx().viewport_rect(),
+                            0.0,
+                            egui::Color32::from_black_alpha(100),
                         );
-                        self.session.bottom_sheet_height = target.clamp(window_h * 0.3, window_h * 0.8);
-                        ui.set_height(self.session.bottom_sheet_height);
+                        if ui.interact(ui.ctx().viewport_rect(), ui.next_auto_id(), egui::Sense::click()).clicked() {
+                            self.session.active_bottom_sheet = None;
+                        }
+                    });
+             
+                egui::Area::new(bs_id)
+                    .anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::ZERO)
+                    .fixed_pos(egui::pos2(0.0, ui.viewport_rect().bottom()))
+                    .order(egui::Order::Foreground)
+                    .constrain(true)
+                    .show(ui.ctx(), |ui| {
                         ui.set_width(window_w);
 
-                        let target_tab = self.session.active_bottom_sheet;
+                        let card_bg = ui.visuals().window_fill();
+                        let card_stroke = ui.visuals().window_stroke();
 
+                        let target_tab = self.session.active_bottom_sheet;
                         egui::Frame::NONE
-                            .inner_margin(egui::Margin {
-                                left: 14,   // 左右给大一点边距，更美观
-                                right: 14,
-                                top: 26,     // 上面边距稍微收紧
-                                bottom: 10,
-                            })
+                            .fill(card_bg)
+                            .stroke(card_stroke)
+                            .corner_radius(egui::CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 })
+                            .show(ui, |ui| {
+                            let target = bottom_sheet_handle(
+                                ui,
+                                &mut self.session.bottom_sheet_drag,
+                                self.session.bottom_sheet_height,
+                            );
+                            self.session.bottom_sheet_height = target.clamp(window_h * 0.3, window_h * 0.8);
+                            ui.set_height(self.session.bottom_sheet_height);
+                            egui::Frame::NONE
+                                .inner_margin(egui::Margin {
+                                    left: 14,   // 左右给大一点边距，更美观
+                                    right: 14,
+                                    top: 26,     // 上面边距稍微收紧
+                                    bottom: 10,
+                                })
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.label("ELF 文件:");
@@ -795,7 +804,8 @@ impl eframe::App for MemRW3App {
                                         } else { right_ui.label("选择节点以查看属性"); }
                                     });
                                 });
-                });
+                        });
+                    });
             }
         });
         self.toasts.show(ui.ctx());
