@@ -1,8 +1,8 @@
 use crate::types::*;
 use anyhow::{bail, Context, Result};
 use gimli::{
-    AttributeValue, DebuggingInformationEntry, Dwarf, EndianSlice, EntriesTreeNode,
-    RunTimeEndian, SectionId, Unit, UnitOffset, UnitSectionOffset,
+    AttributeValue, DebugInfoOffset, DebuggingInformationEntry, Dwarf, EndianSlice,
+    EntriesTreeNode, RunTimeEndian, SectionId, Unit, UnitOffset, UnitSectionOffset,
 };
 use object::{Object, ObjectSection};
 use std::collections::{BTreeSet, HashMap};
@@ -153,14 +153,30 @@ pub fn collect_cus(dwarf: &Dwarf<EndianSlice<RunTimeEndian>>) -> Result<Vec<CuIn
                     format!("{}::{}", namespace, name)
                 };
 
-                let Some(type_offset) = entry.attr_value(gimli::DW_AT_type)? else {
+                let Some(type_attr) = entry.attr_value(gimli::DW_AT_type)? else {
                     continue;
                 };
-                let Some(unit_offset) = type_offset_to_unit_offset(&unit, type_offset)? else {
-                    continue;
+                let type_ref = match type_attr {
+                    AttributeValue::UnitRef(unit_offset) => {
+                        resolve_type(dwarf, &unit, unit_offset, unit.header.offset(), &type_defs)?
+                    }
+                    AttributeValue::DebugInfoRef(di_offset) => {
+                        match find_unit_for_debug_info_ref(dwarf, di_offset)? {
+                            Some((target_unit, uo)) => resolve_type(
+                                dwarf, &target_unit, uo, target_unit.header.offset(), &type_defs,
+                            ).unwrap_or_else(|_| TypeRef {
+                                name: None,
+                                size: None,
+                                kind: TypeKind::Other,
+                                unit_offset: uo,
+                                unit_header_offset: target_unit.header.offset(),
+                                element_type: None,
+                            }),
+                            None => continue,
+                        }
+                    }
+                    _ => continue,
                 };
-                let type_ref =
-                    resolve_type(dwarf, &unit, unit_offset, unit.header.offset(), &type_defs)?;
                 let node = build_variable_node(dwarf, &unit, &full_name, &type_ref, address, &type_defs, &mut next_id)?;
                 variables.push(node);
             }
@@ -181,6 +197,58 @@ pub fn type_offset_to_unit_offset(
     match value {
         AttributeValue::UnitRef(offset) => Ok(Some(offset)),
         AttributeValue::DebugInfoRef(_) => Ok(None),
+        _ => Ok(None),
+    }
+}
+
+fn find_unit_for_debug_info_ref<'a>(
+    dwarf: &'a Dwarf<EndianSlice<'a, RunTimeEndian>>,
+    di_offset: DebugInfoOffset<usize>,
+) -> Result<Option<(Unit<EndianSlice<'a, RunTimeEndian>>, UnitOffset)>> {
+    let target = di_offset.0;
+    let mut scan = dwarf.units();
+    while let Some(header) = scan.next()? {
+        let hdr_start: usize = match header.offset() {
+            UnitSectionOffset::DebugInfoOffset(di) => di.0,
+            UnitSectionOffset::DebugTypesOffset(dt) => dt.0,
+        };
+        if target >= hdr_start && target < hdr_start + header.length_including_self() as usize {
+            let unit = dwarf.unit(header)?;
+            // UnitOffset is relative to the CU header start, not entries_buf.
+            // gimli internally subtracts header_size() when accessing entries_buf.
+            let uo = target.saturating_sub(hdr_start);
+            return Ok(Some((unit, UnitOffset(uo))));
+        }
+    }
+    Ok(None)
+}
+
+/// Helper for resolve_type_impl: resolve a DW_AT_type attribute, handling
+/// both intra-unit (UnitRef) and cross-unit (DebugInfoRef) references.
+/// For cross-unit refs, restarts resolution with the target unit.
+fn follow_type_attr_or_resolve(
+    dwarf: &Dwarf<EndianSlice<RunTimeEndian>>,
+    unit: &Unit<EndianSlice<RunTimeEndian>>,
+    unit_header_offset: UnitSectionOffset,
+    attr: AttributeValue<EndianSlice<RunTimeEndian>>,
+    outer_name: Option<String>,
+    type_defs: &HashMap<String, TypeDefInfo>,
+) -> Result<Option<(UnitOffset, UnitSectionOffset, Option<TypeRef>)>> {
+    match attr {
+        AttributeValue::UnitRef(offset) => {
+            Ok(Some((offset, unit_header_offset, None)))
+        }
+        AttributeValue::DebugInfoRef(di_offset) => {
+            match find_unit_for_debug_info_ref(dwarf, di_offset)? {
+                Some((target_unit, uo)) => {
+                    let uho = target_unit.header.offset();
+                    // restart resolution with target unit
+                    let typeref = resolve_type(dwarf, &target_unit, uo, uho, type_defs)?;
+                    Ok(Some((uo, uho, Some(typeref))))
+                }
+                None => Ok(None),
+            }
+        }
         _ => Ok(None),
     }
 }
@@ -370,12 +438,13 @@ pub fn resolve_type_impl(
             // Prefer the outermost typedef name
             let effective_name = typedef_name.or(outer_name);
             if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                if let Some(next) = type_offset_to_unit_offset(unit, attr)? {
+                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(dwarf, unit, unit_header_offset, attr, effective_name.clone(), type_defs)? {
+                    if let Some(typeref) = pre { return Ok(typeref); }
                     return resolve_type_impl(
                         dwarf,
                         unit,
                         next,
-                        unit_header_offset,
+                        uho,
                         effective_name,
                         type_defs,
                     );
@@ -398,9 +467,12 @@ pub fn resolve_type_impl(
                 .and_then(|a| attr_value_to_u64(a))
                 .or(Some(u64::from(unit.header.address_size())));
             let pointed_name = if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                if let Some(next) = type_offset_to_unit_offset(unit, attr)? {
-                    let inner =
-                        resolve_type_impl(dwarf, unit, next, unit_header_offset, None, type_defs)?;
+                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(dwarf, unit, unit_header_offset, attr, None, type_defs)? {
+                    let inner = if let Some(typeref) = pre {
+                        typeref
+                    } else {
+                        resolve_type_impl(dwarf, unit, next, uho, None, type_defs)?
+                    };
                     inner.name.unwrap_or_else(|| "<unnamed>".to_string())
                 } else {
                     "<unnamed>".to_string()
@@ -421,12 +493,13 @@ pub fn resolve_type_impl(
         // Const / volatile: transparent pass-through
         gimli::DW_TAG_const_type | gimli::DW_TAG_volatile_type => {
             if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                if let Some(next) = type_offset_to_unit_offset(unit, attr)? {
+                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(dwarf, unit, unit_header_offset, attr, outer_name.clone(), type_defs)? {
+                    if let Some(typeref) = pre { return Ok(typeref); }
                     return resolve_type_impl(
                         dwarf,
                         unit,
                         next,
-                        unit_header_offset,
+                        uho,
                         outer_name,
                         type_defs,
                     );
@@ -445,8 +518,9 @@ pub fn resolve_type_impl(
         // Reference type: "T &"
         gimli::DW_TAG_reference_type => {
             let inner = if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                if let Some(next) = type_offset_to_unit_offset(unit, attr)? {
-                    resolve_type_impl(dwarf, unit, next, unit_header_offset, outer_name, type_defs)?
+                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(dwarf, unit, unit_header_offset, attr, outer_name.clone(), type_defs)? {
+                    if let Some(typeref) = pre { typeref }
+                    else { resolve_type_impl(dwarf, unit, next, uho, outer_name, type_defs)? }
                 } else {
                     TypeRef {
                         name: outer_name.or_else(|| Some("<unnamed>".to_string())),
@@ -484,8 +558,9 @@ pub fn resolve_type_impl(
         // Rvalue reference type: "T &&"
         gimli::DW_TAG_rvalue_reference_type => {
             let inner = if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                if let Some(next) = type_offset_to_unit_offset(unit, attr)? {
-                    resolve_type_impl(dwarf, unit, next, unit_header_offset, outer_name, type_defs)?
+                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(dwarf, unit, unit_header_offset, attr, outer_name.clone(), type_defs)? {
+                    if let Some(typeref) = pre { typeref }
+                    else { resolve_type_impl(dwarf, unit, next, uho, outer_name, type_defs)? }
                 } else {
                     TypeRef {
                         name: outer_name.or_else(|| Some("<unnamed>".to_string())),
@@ -524,15 +599,12 @@ pub fn resolve_type_impl(
         gimli::DW_TAG_array_type => {
             let (element_type_ref, elem_name, elem_size) =
                 if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                    if let Some(next) = type_offset_to_unit_offset(unit, attr)? {
-                        let inner = resolve_type_impl(
-                            dwarf,
-                            unit,
-                            next,
-                            unit_header_offset,
-                            None,
-                            type_defs,
-                        )?;
+                    if let Some((next, uho, pre)) = follow_type_attr_or_resolve(dwarf, unit, unit_header_offset, attr, None, type_defs)? {
+                        let inner = if let Some(typeref) = pre {
+                            typeref
+                        } else {
+                            resolve_type_impl(dwarf, unit, next, uho, None, type_defs)?
+                        };
                         let elem_name = inner
                             .name
                             .clone()
@@ -674,15 +746,11 @@ pub fn resolve_type_impl(
 
         // Base type (int, float, char, ...) or anything else
         _ => {
-            let name = match entry.attr_value(gimli::DW_AT_name)? {
-                Some(attr) => attr_to_string(dwarf, unit, attr)?,
-                None => None,
-            }
-            .or(outer_name);
-            let size = match entry.attr_value(gimli::DW_AT_byte_size)? {
-                Some(attr) => attr_value_to_u64(attr),
-                None => None,
-            };
+            let name = entry.attr_value(gimli::DW_AT_name).ok().flatten()
+                .and_then(|attr| attr_to_string(dwarf, unit, attr).ok().flatten())
+                .or(outer_name);
+            let size = entry.attr_value(gimli::DW_AT_byte_size).ok().flatten()
+                .and_then(attr_value_to_u64);
             let kind = match entry.tag() {
                 gimli::DW_TAG_structure_type => TypeKind::Struct,
                 gimli::DW_TAG_union_type => TypeKind::Union,
@@ -739,12 +807,11 @@ pub fn location_address(
     let address = match op {
         gimli::Operation::Address { address } => Some(address),
         gimli::Operation::AddressIndex { index } => {
-            let addr = dwarf.debug_addr.get_address(
+            dwarf.debug_addr.get_address(
                 unit.encoding().address_size,
                 unit.addr_base,
                 index,
-            )?;
-            Some(addr)
+            ).ok()
         }
         _ => None,
     };
@@ -798,17 +865,40 @@ pub fn collect_fields(
             };
             let offset = member_offset(unit, entry)?;
             let type_ref = if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                if let Some(unit_offset) = type_offset_to_unit_offset(unit, attr)? {
-                    resolve_type(dwarf, unit, unit_offset, unit.header.offset(), type_defs)?
-                } else {
-                    TypeRef {
+                match attr {
+                    AttributeValue::UnitRef(unit_offset) => {
+                        resolve_type(dwarf, unit, unit_offset, unit.header.offset(), type_defs)?
+                    }
+                    AttributeValue::DebugInfoRef(di_offset) => {
+                        match find_unit_for_debug_info_ref(dwarf, di_offset)? {
+                            Some((target_unit, uo)) => resolve_type(
+                                dwarf, &target_unit, uo, target_unit.header.offset(), type_defs,
+                            ).unwrap_or_else(|_| TypeRef {
+                                name: None,
+                                size: None,
+                                kind: TypeKind::Other,
+                                unit_offset: entry.offset(),
+                                unit_header_offset: unit.header.offset(),
+                                element_type: None,
+                            }),
+                            None => TypeRef {
+                                name: None,
+                                size: None,
+                                kind: TypeKind::Other,
+                                unit_offset: entry.offset(),
+                                unit_header_offset: unit.header.offset(),
+                                element_type: None,
+                            },
+                        }
+                    }
+                    _ => TypeRef {
                         name: None,
                         size: None,
                         kind: TypeKind::Other,
                         unit_offset: entry.offset(),
                         unit_header_offset: unit.header.offset(),
                         element_type: None,
-                    }
+                    },
                 }
             } else {
                 TypeRef {

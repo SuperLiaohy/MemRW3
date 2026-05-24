@@ -714,7 +714,9 @@ impl eframe::App for MemRW3App {
                                                 config.array_count = Some(count);
                                                 if node.name.starts_with('[') {
                                                     if let Ok(parsed) = node.name[1..node.name.len()-1].parse::<u64>() {
-                                                        if parsed < count { config.array_index = Some(parsed); }
+                                                        if parsed < count && config.array_index != Some(parsed) {
+                                                            config.array_index = Some(parsed);
+                                                        }
                                                     }
                                                 }
                                                 if config.array_index.is_none() { config.array_index = Some(0); }
@@ -802,6 +804,24 @@ impl eframe::App for MemRW3App {
                                             }
                                             if added && is_new_var {
                                                 self.push_slot_for_new_var(var_id);
+                                            }
+                                            // Re-sync tree/selected_node after vari_properties_ui
+                                            // (DragValue may have changed array_index)
+                                            {
+                                                let par = self.dwarf_app.parent_array_info(node_id);
+                                                if let Some((_count, elem_size)) = par {
+                                                    let cfg = self.session.extend_configs.get(&node_id);
+                                                    if let Some(cfg) = cfg {
+                                                        let idx = cfg.array_index.unwrap_or(0);
+                                                        let new_name = format!("[{}]", idx);
+                                                        let new_addr = elem_size * idx;
+                                                        if let Some(tree_node) = self.dwarf_app.find_node_mut(node_id) {
+                                                            tree_node.name = new_name.clone();
+                                                            tree_node.address = new_addr;
+                                                        }
+                                                        self.dwarf_app.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
+                                                    }
+                                                }
                                             }
                                         } else { right_ui.label("选择节点以查看属性"); }
                                     });
