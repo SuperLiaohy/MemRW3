@@ -435,11 +435,18 @@ pub fn chart_panel(
                     (ext_info, legend.curve_name.clone())
                 };
                 let mut action: Option<super::line_dialog::DialogAction> = None;
-                egui::Window::new(format!("曲线属性 - {}", win_title))
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                    .show(ui.ctx(), |ui| {
+                egui::Modal::new(egui::Id::new("line_dialog_modal")).show(ui.ctx(), |ui| {
+                    ui.set_width(320.0);
+                    egui::Frame::NONE
+                    .inner_margin(egui::Margin {
+                        left: 20,
+                        right: 20,
+                        top: 16,
+                        bottom: 16,
+                    })
+                    .show(ui, |ui| {
+                        ui.heading(format!("曲线属性 - {}", win_title));
+                        ui.separator();
                         let (ext_name, ext_addr, ext_type, ext_size) =
                             ext_info.unwrap_or((String::new(), 0, ExtendType::U32, 0));
                         action = super::line_dialog::line_dialog_ui(
@@ -453,6 +460,7 @@ pub fn chart_panel(
                             state.logging_active,
                         );
                     });
+                });
                 if let Some(act) = action {
                     match act {
                         super::line_dialog::DialogAction::Delete => {

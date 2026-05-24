@@ -439,21 +439,32 @@ impl<'a> TabViewer for TabViewerCtx<'a> {
     }
 }
 
-fn bottom_sheet_handle(ui: &mut Ui, drag_state: &mut Option<(f32, f32)>, current_h: f32) -> f32 {
-    let (rect, response) =
-        ui.allocate_at_least(egui::vec2(ui.available_width(), 20.0), egui::Sense::drag());
+fn bottom_sheet_handle(ui: &mut egui::Ui, drag_state: &mut Option<(f32, f32)>, current_h: f32) -> f32 {
+    // 【修复1】：强制获取有限的宽度，防止出现 Infinity 导致中心点跑飞
+    let mut w = ui.available_width();
+    if !w.is_finite() || w <= 0.0 {
+        w = ui.ctx().screen_rect().width(); // 如果不正常，回退到屏幕宽度
+    }
+
+    // 【修复2】：强制分配确定的高度和宽度
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::drag());
+    
     if response.hovered() || response.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
+    
     let handle_color = if response.dragged() {
         ui.visuals().widgets.active.bg_fill
     } else if response.hovered() {
         ui.visuals().widgets.hovered.bg_fill
     } else if ui.visuals().dark_mode {
-        Color32::from_gray(80)
+        // 稍微调亮一点，防止跟暗色背景融为一体
+        egui::Color32::from_gray(120) 
     } else {
-        Color32::from_gray(200)
+        egui::Color32::from_gray(200)
     };
+    
+    // 因为 rect 现在是绝对准确的，center() 一定是在屏幕正中央
     let capsule = egui::Rect::from_center_size(rect.center(), egui::vec2(40.0, 4.0));
     ui.painter()
         .rect_filled(capsule, egui::CornerRadius::same(2), handle_color);
@@ -464,7 +475,8 @@ fn bottom_sheet_handle(ui: &mut Ui, drag_state: &mut Option<(f32, f32)>, current
                 *drag_state = Some((pointer.y, current_h));
             }
             let (origin_y, initial_h) = drag_state.unwrap();
-            let displacement = origin_y - pointer.y;
+            // 往上拖 pointer.y 变小，位移是正数，高度增加（符合真实直觉）
+            let displacement = origin_y - pointer.y; 
             return initial_h + displacement;
         }
         current_h
@@ -523,15 +535,7 @@ impl eframe::App for MemRW3App {
             let remaining = ui.available_height();
             let dock_h = remaining;
 
-            let min_limit = dock_h * 0.5;
-            let max_h = (dock_h * 0.9).max(min_limit);
-            let min_h = min_limit.min(max_h);
-            let bs_h = if bs_open {
-                self.session.bottom_sheet_height = self.session.bottom_sheet_height.clamp(min_h, max_h);
-                self.session.bottom_sheet_height
-            } else {
-                0.0
-            };
+            if bs_open {}
             if dock_h > 0.0 {
                 let (dock_rect, _) = ui.allocate_at_least(
                     egui::vec2(ui.available_width(), dock_h),
@@ -544,7 +548,6 @@ impl eframe::App for MemRW3App {
                 );
 
                 if bs_open || dialog_open {
-                    dock_ui.disable();
                 }
 
                 let mut open_tree = self.session.active_bottom_sheet;
@@ -565,7 +568,6 @@ impl eframe::App for MemRW3App {
                 self.session.active_bottom_sheet = open_tree;
 
                 if bs_open || dialog_open {
-                    ui.interact(dock_rect, ui.id().with("dock_blocker"), egui::Sense::click_and_drag());
                 }
 
                 let removed_chart: Vec<usize> = self.chart_state.removed_var_ids.drain(..).collect();
@@ -606,27 +608,40 @@ impl eframe::App for MemRW3App {
             }
 
             if bs_open {
-                let bs_rect = egui::Rect::from_min_max(
-                    egui::pos2(ui.min_rect().left(), ui.min_rect().bottom() - bs_h),
-                    egui::pos2(ui.min_rect().right(), ui.min_rect().bottom()),
-                );
-                let _resp = ui.allocate_ui_at_rect(bs_rect, |ui| {
-                    let card_bg = ui.visuals().window_fill();
-                    let card_stroke = ui.visuals().window_stroke();
-                    let target_tab = self.session.active_bottom_sheet;
-                    egui::Frame::NONE
-                        .fill(card_bg)
-                        .stroke(card_stroke)
-                        .corner_radius(egui::CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 })
-                        .show(ui, |ui| {
-                            let target = bottom_sheet_handle(
-                                ui,
-                                &mut self.session.bottom_sheet_drag,
-                                self.session.bottom_sheet_height,
-                            );
-                            self.session.bottom_sheet_height = target.clamp(min_h, max_h);
-                            egui::Frame::NONE
-                                .inner_margin(egui::Margin::symmetric(10, 6))
+                let bs_id = egui::Id::new("bottom_sheet");
+                let window_w = ui.ctx().viewport_rect().width();
+                let window_h = ui.ctx().viewport_rect().height();
+                let bs_area = egui::Area::new(bs_id)
+                    .anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::ZERO)
+                    .fixed_pos(egui::pos2(ui.min_rect().left(), ui.min_rect().bottom()))
+                    .order(egui::Order::Foreground)
+                    .constrain(true);
+                egui::Modal::new(bs_id)
+                    .area(bs_area)
+                    .frame(egui::Frame::NONE
+                        .fill(ui.visuals().window_fill())
+                        .stroke(ui.visuals().window_stroke())
+                        .corner_radius(egui::CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 }))
+                    .show(ui.ctx(), |ui| {
+
+                        let target = bottom_sheet_handle(
+                            ui,
+                            &mut self.session.bottom_sheet_drag,
+                            self.session.bottom_sheet_height,
+                        );
+                        self.session.bottom_sheet_height = target.clamp(window_h * 0.3, window_h * 0.8);
+                        ui.set_height(self.session.bottom_sheet_height);
+                        ui.set_width(window_w);
+
+                        let target_tab = self.session.active_bottom_sheet;
+
+                        egui::Frame::NONE
+                            .inner_margin(egui::Margin {
+                                left: 14,   // 左右给大一点边距，更美观
+                                right: 14,
+                                top: 26,     // 上面边距稍微收紧
+                                bottom: 10,
+                            })
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.label("ELF 文件:");
@@ -780,7 +795,6 @@ impl eframe::App for MemRW3App {
                                         } else { right_ui.label("选择节点以查看属性"); }
                                     });
                                 });
-                        });
                 });
             }
         });

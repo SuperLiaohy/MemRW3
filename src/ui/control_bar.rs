@@ -41,11 +41,12 @@ pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
 }
 
 fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
-    let mut show = app.session.show_probe_settings;
-    let mut closed = false;
+    if !app.session.show_probe_settings {
+        return;
+    }
     let mut confirm = false;
 
-    if show && app.session.edit_chip.is_empty() {
+    if app.session.edit_chip.is_empty() {
         app.session.edit_chip = app.session.probe_chip.clone();
         app.session.edit_protocol = app.session.probe_protocol.clone();
         app.session.edit_speed = app.session.probe_speed_khz;
@@ -67,101 +68,139 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
     let search_id = egui::Id::new("mcu_search");
     let mut search = ctx.data_mut(|d| d.get_temp::<String>(search_id).unwrap_or_default());
 
-    egui::Window::new("Probe 设置")
-        .collapsible(false).resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .default_width(320.0)
-        .open(&mut show)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("MCU 型号:");
-                ui.label(egui::RichText::new(&app.session.edit_chip).strong());
-            });
-            ui.add_sized(
-                [ui.available_width(), 20.0],
-                egui::TextEdit::singleline(&mut search)
-                    .hint_text("搜索过滤...")
-                    .id(search_id),
-            );
-            ctx.data_mut(|d| d.insert_temp(search_id, search.clone()));
+    egui::Modal::new(egui::Id::new("probe_settings_modal")).show(ctx, |ui| {
+        ui.set_width(320.0);
 
-            let filtered: Vec<&String> = if search.is_empty() {
-                app.session.all_chips.iter().collect()
-            } else {
-                let s = search.to_lowercase();
-                app.session.all_chips.iter().filter(|n| n.to_lowercase().contains(&s)).collect()
-            };
+        egui::Frame::NONE
+            .inner_margin(egui::Margin {
+                left: 20,
+                right: 20,
+                top: 16,
+                bottom: 16,
+            })
+            .show(ui, |ui| {
+                // --- 标题部分 ---
+                ui.heading("Probe 设置");
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(8.0);
 
-            let list_h = 200.0;
-            let (list_rect, _) = ui.allocate_at_least(
-                egui::vec2(ui.available_width(), list_h),
-                egui::Sense::hover(),
-            );
-            let mut list_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(list_rect)
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-            );
-            egui::ScrollArea::vertical().show(&mut list_ui, |ui| {
-                ui.set_min_height(list_h);
-                for name in filtered {
-                    if ui.selectable_label(app.session.edit_chip == *name, name.as_str()).clicked() {
-                        app.session.edit_chip = name.clone();
+                // --- 芯片搜索与列表部分 ---
+                ui.horizontal(|ui| {
+                    ui.label("MCU 型号:");
+                    ui.label(egui::RichText::new(&app.session.edit_chip).strong());
+                });
+                ui.add_space(4.0);
+
+                // 搜索框填满可用宽度
+                ui.add_sized(
+                    [ui.available_width(), 20.0],
+                    egui::TextEdit::singleline(&mut search)
+                        .hint_text("搜索过滤...")
+                        .id(search_id),
+                );
+                ctx.data_mut(|d| d.insert_temp(search_id, search.clone()));
+
+                let filtered: Vec<&String> = if search.is_empty() {
+                    app.session.all_chips.iter().collect()
+                } else {
+                    let s = search.to_lowercase();
+                    app.session.all_chips.iter().filter(|n| n.to_lowercase().contains(&s)).collect()
+                };
+
+                ui.add_space(4.0);
+
+                // 2. 简化 ScrollArea 布局，不需要手动 allocate rect
+                egui::Frame::none()
+                    .fill(ui.visuals().faint_bg_color) // 给列表加一个浅色背景区分
+                    .rounding(4.0)
+                    .inner_margin(4.0)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(200.0)
+                            .auto_shrink([false, false]) // 固定高度，不随内容减少而塌陷
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width()); // 让可选项填满整行
+                                for name in filtered {
+                                    if ui.selectable_label(app.session.edit_chip == *name, name.as_str()).clicked() {
+                                        app.session.edit_chip = name.clone();
+                                    }
+                                }
+                            });
+                    });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // --- 硬件设置部分 ---
+                // 3. 优化 Grid 的列宽和间距
+                egui::Grid::new("probe_settings_grid")
+                    .num_columns(2)
+                    .spacing([16.0, 10.0]) // 增加一点行列间距
+                    .min_col_width(70.0)   // 保证左侧 Label 宽度一致
+                    .show(ui, |ui| {
+                        ui.label("协议:");
+                        egui::ComboBox::from_id_salt("protocol_combo")
+                            .selected_text(&app.session.edit_protocol)
+                            .width(ui.available_width()) // 下拉框占满右侧剩余宽度
+                            .show_ui(ui, |ui| {
+                                for p in &["SWD".to_string(), "JTAG".to_string()] {
+                                    ui.selectable_value(&mut app.session.edit_protocol, p.clone(), p.as_str());
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("速度 (kHz):");
+                        ui.add(
+                            egui::Slider::new(&mut app.session.edit_speed, 100..=20000)
+                                .text("kHz")
+                                .trailing_fill(true) // 进度条填充效果
+                        );
+                        ui.end_row();
+
+                        ui.label("Probe 设备:");
+                        egui::ComboBox::from_id_salt("probe_combo")
+                            .selected_text(&probe_text)
+                            .width(ui.available_width()) // 下拉框占满右侧剩余宽度
+                            .show_ui(ui, |ui| {
+                                if probe_list.is_empty() {
+                                    ui.label("(无可用设备, 请插入调试器)");
+                                }
+                                for name in &probe_list {
+                                    ui.label(name);
+                                }
+                            });
+                        ui.end_row();
+                    });
+
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // --- 底部按钮部分 ---
+                // 4. 使用从右向左的布局，让“确定/取消”按钮靠右对齐
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("确定").clicked() { 
+                        confirm = true; 
+                        app.session.show_probe_settings = false; 
                     }
-                }
-            });
-
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(4.0);
-
-            egui::Grid::new("probe_settings").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                ui.label("协议:");
-                egui::ComboBox::from_id_salt("protocol_combo")
-                    .selected_text(&app.session.edit_protocol)
-                    .width(80.0)
-                    .show_ui(ui, |ui| {
-                        for p in &["SWD".to_string(), "JTAG".to_string()] {
-                            ui.selectable_value(&mut app.session.edit_protocol, p.clone(), p.as_str());
-                        }
-                    });
-                ui.end_row();
-                ui.label("速度 (kHz):");
-                ui.add(egui::Slider::new(&mut app.session.edit_speed, 100..=20000).text("kHz"));
-                ui.end_row();
-                ui.label("Probe 设备:");
-                egui::ComboBox::from_id_salt("probe_combo")
-                    .selected_text(&probe_text)
-                    .width(180.0)
-                    .show_ui(ui, |ui| {
-                        if probe_list.is_empty() {
-                            ui.label("(无可用设备, 请插入调试器)");
-                        }
-                        for name in &probe_list {
-                            ui.label(name);
-                        }
-                    });
-                ui.end_row();
-            });
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ui.button("确定").clicked() { closed = true; confirm = true; }
-                if ui.button("取消").clicked() { closed = true; }
+                    ui.add_space(8.0); // 两个按钮之间的间距
+                    if ui.button("取消").clicked() { 
+                        app.session.show_probe_settings = false; 
+                    }
+                });
             });
         });
-    if closed {
-        app.session.show_probe_settings = false;
-        if confirm {
-            app.session.probe_chip = std::mem::take(&mut app.session.edit_chip);
-            app.session.probe_protocol = std::mem::take(&mut app.session.edit_protocol);
-            app.session.probe_speed_khz = app.session.edit_speed;
-        }
+
+    if confirm {
+        app.session.probe_chip = std::mem::take(&mut app.session.edit_chip);
+        app.session.probe_protocol = std::mem::take(&mut app.session.edit_protocol);
+        app.session.probe_speed_khz = app.session.edit_speed;
+    }
+    if !app.session.show_probe_settings {
         app.session.edit_chip.clear();
         app.session.edit_protocol.clear();
-    } else {
-        app.session.show_probe_settings = show;
     }
 }
 

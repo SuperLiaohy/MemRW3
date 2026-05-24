@@ -98,10 +98,18 @@ pub fn table_panel(
                 let ext_info = pool.get(entry.variable_id).map(|v| {
                     (v.name.clone(), v.address, v.ext_type.clone(), v.size)
                 });
-                egui::Window::new(format!("变量属性 - {}", entry.display_name))
-                    .collapsible(false).resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                    .show(ui.ctx(), |ui| {
+                egui::Modal::new(egui::Id::new("table_entry_modal")).show(ui.ctx(), |ui| {
+                    ui.set_width(320.0);
+                    egui::Frame::NONE
+                    .inner_margin(egui::Margin {
+                        left: 20,
+                        right: 20,
+                        top: 16,
+                        bottom: 16,
+                    })
+                    .show(ui, |ui| {
+                        ui.heading(format!("变量属性 - {}", entry.display_name));
+                        ui.separator();
                         let (ext_name, ext_addr, ext_type, ext_size) =
                             ext_info.unwrap_or((String::new(), 0, ExtendType::U32, 0));
                         if let Some(remove) = table_entry_dialog_ui(
@@ -111,6 +119,8 @@ pub fn table_panel(
                             should_close = true;
                         }
                     });
+   
+                });
                 if should_close {
                     state.show_entry_dialog = false;
                     if dialog_remove { state.remove_entry(edit_idx); }
