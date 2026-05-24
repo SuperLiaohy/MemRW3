@@ -1001,11 +1001,116 @@ impl MemRW3App {
 }
 
 pub fn setup_fonts(ctx: &egui::Context) {
-    let font_bytes = fs::read(CHINESE_FONT_PATH).unwrap_or_else(|_| { eprintln!("未找到中文字体: {CHINESE_FONT_PATH}"); Vec::new() });
-    if font_bytes.is_empty() { return; }
-    let mut fonts = FontDefinitions::default();
-    fonts.font_data.insert("DroidSansFallback".to_owned(), Arc::new(FontData::from_owned(font_bytes)));
-    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "DroidSansFallback".to_owned());
-    fonts.families.entry(FontFamily::Monospace).or_default().push("DroidSansFallback".to_owned());
+    let mut fonts = egui::FontDefinitions::default();
+    
+    if let Some((name, data, path)) = load_chinese_font() {
+        println!("✅ 使用字体: {}", path);
+        fonts.font_data.insert(name.clone(), data);
+        
+        // 添加为备选字体，不覆盖默认英文字体
+        fonts.families.entry(egui::FontFamily::Proportional).or_default().push(name.clone());
+        fonts.families.entry(egui::FontFamily::Monospace).or_default().push(name);
+    } else {
+        println!("⚠️ 未找到中文字体，中文可能无法显示\n💡 Linux: sudo apt install fonts-noto-cjk");
+    }
+    
     ctx.set_fonts(fonts);
+}
+
+fn load_chinese_font() -> Option<(String, Arc<egui::FontData>, String)> {
+    get_font_paths()
+        .into_iter()
+        .find_map(|path| {
+            let path = std::path::PathBuf::from(path);
+            path.exists().then(|| {
+                std::fs::read(&path).ok().map(|bytes| {
+                    ("chinese_font".to_owned(), Arc::new(egui::FontData::from_owned(bytes)), path.display().to_string())
+                })
+            }).flatten()
+        })
+        .or_else(scan_font_directories)
+}
+
+fn get_font_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    
+    #[cfg(target_os = "windows")]
+    paths.extend([
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\msyh.ttf",
+        r"C:\Windows\Fonts\simsun.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+    ].map(String::from));
+    
+    #[cfg(target_os = "macos")]
+    paths.extend([
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/Library/Fonts/NotoSansCJK.ttc",
+    ].map(String::from));
+    
+    #[cfg(target_os = "linux")]
+    {
+        paths.extend([
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+        ].map(String::from));
+        
+        if let Ok(home) = std::env::var("HOME") {
+            paths.push(format!("{home}/.local/share/fonts/NotoSansCJK-Regular.ttc"));
+            paths.push(format!("{home}/.fonts/NotoSansCJK-Regular.ttc"));
+        }
+    }
+    
+    paths
+}
+
+#[cfg(target_os = "linux")]
+fn scan_font_directories() -> Option<(String, Arc<egui::FontData>, String)> {
+    const KEYWORDS: &[&str] = &["noto", "cjk", "wqy", "droid", "arphic", "uming", "microhei", "song", "hei"];
+    const VALID_EXTS: &[&str] = &["ttf", "ttc", "otf"];
+    
+    for dir in ["/usr/share/fonts", "/usr/local/share/fonts"] {
+        if let Some(font) = find_font(dir, KEYWORDS, VALID_EXTS) {
+            return Some(font);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn find_font(dir: &str, keywords: &[&str], valid_exts: &[&str]) -> Option<(String, Arc<egui::FontData>, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return None };
+    
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        
+        if path.is_dir() {
+            if let Some(found) = find_font(path.to_str()?, keywords, valid_exts) {
+                return Some(found);
+            }
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if valid_exts.contains(&ext) {
+                let name = path.file_name()?.to_str()?.to_lowercase();
+                if keywords.iter().any(|kw| name.contains(kw)) {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        return Some((
+                            "scanned_font".to_owned(),
+                            Arc::new(egui::FontData::from_owned(bytes)),
+                            path.display().to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn scan_font_directories() -> Option<(String, Arc<egui::FontData>, String)> {
+    None
 }
