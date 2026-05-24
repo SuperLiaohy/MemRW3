@@ -210,8 +210,11 @@ impl MemRW3App {
 
         for var in pool.iter_mut() {
             let name = var.name.clone();
-            let path: Vec<String> = name.split('.').map(|s| s.to_string()).collect();
+            let path = crate::types::expand_bracket_path(&name);
             let node_ids = self.dwarf_app.trace_exact(&path);
+            for &node_id in &node_ids {
+                self.dwarf_app.apply_array_path(node_id, &path);
+            }
 
             match node_ids.len() {
                 1 => {

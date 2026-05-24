@@ -932,14 +932,26 @@ pub fn member_offset(
         Some(AttributeValue::Data4(value)) => Ok(value as u64),
         Some(AttributeValue::Data8(value)) => Ok(value),
         Some(AttributeValue::Exprloc(expr)) => {
-            let mut ops = expr.operations(unit.encoding());
-            if let Some(op) = ops.next()? {
-                if let gimli::Operation::UnsignedConstant { value } = op {
-                    return Ok(value);
-                }
-            }
-            Ok(0)
+            parse_data_member_expr(expr.operations(unit.encoding()))
         }
+        Some(AttributeValue::Block(data)) => {
+            // DWARF3: DW_FORM_block{1,2,4} with DW_OP_plus_uconst
+            let expr = gimli::Expression(data);
+            parse_data_member_expr(expr.operations(unit.encoding()))
+        }
+        _ => Ok(0),
+    }
+}
+
+fn parse_data_member_expr<R: gimli::Reader>(
+    mut ops: gimli::OperationIter<R>,
+) -> Result<u64> {
+    let Some(op) = ops.next()? else {
+        return Ok(0);
+    };
+    match op {
+        gimli::Operation::UnsignedConstant { value } => Ok(value),
+        gimli::Operation::PlusConstant { value } => Ok(value),
         _ => Ok(0),
     }
 }

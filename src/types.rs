@@ -172,33 +172,7 @@ impl DwarfApp {
             return;
         }
 
-        // Expand [idx] notation into separate levels:
-        //   "A[0][0]"  → ["A", "[0]", "[0]"]
-        //   "A.B[1]"   → ["A", "B", "[1]"]
-        let mut expanded: Vec<String> = Vec::new();
-        for part in query.split('.') {
-            if let Some(bracket) = part.find('[') {
-                let base = &part[..bracket];
-                if !base.is_empty() {
-                    expanded.push(base.to_string());
-                }
-                let rest = &part[bracket..];
-                let mut pos = 0;
-                while let Some(rel_start) = rest[pos..].find('[') {
-                    let abs_start = pos + rel_start;
-                    if let Some(rel_end) = rest[abs_start + 1..].find(']') {
-                        let idx_str = &rest[abs_start + 1..abs_start + 1 + rel_end];
-                        expanded.push(format!("[{}]", idx_str));
-                        pos = abs_start + 1 + rel_end + 1;
-                    } else {
-                        break;
-                    }
-                }
-            } else {
-                expanded.push(part.to_string());
-            }
-        }
-
+        let expanded = expand_bracket_path(&query);
         let total = expanded.len();
         if total == 0 {
             return;
@@ -224,43 +198,9 @@ impl DwarfApp {
             }
         }
 
-        // Array index post-processing: walk up array ancestors,
-        // apply indices from the expanded query (inner→outer).
-        let searched_indices: Vec<u64> = expanded
-            .iter()
-            .filter(|s| s.starts_with('['))
-            .filter_map(|s| s[1..s.len() - 1].parse::<u64>().ok())
-            .collect();
-        let mut to_update: Vec<(usize, u64)> = Vec::new();
-        for &result_id in &self.search_results {
-            let mut node_id = result_id;
-            let mut idx_iter = searched_indices.iter().rev();
-            loop {
-                let Some(node) = self.find_node_by_id(node_id) else { break };
-                let Some(parent_id) = node.parent_id else { break };
-                let Some(parent) = self.find_node_by_id(parent_id) else { break };
-                if let BasicType::ArrayElem(_, count) = parent.basic_type {
-                    if let Some(&idx) = idx_iter.next() {
-                        if idx < count {
-                            to_update.push((node_id, idx));
-                        }
-                    }
-                }
-                node_id = parent_id;
-            }
-        }
-        for (node_id, idx) in to_update {
-            let node_size = self.find_node_by_id(node_id).map(|n| n.size as u64).unwrap_or(0);
-            if let Some(tn) = self.find_node_mut(node_id) {
-                tn.name = format!("[{}]", idx);
-                tn.address = node_size * idx;
-            }
-            if let Some(ref mut sel) = self.selected_node {
-                if sel.id == node_id {
-                    sel.name = format!("[{}]", idx);
-                    sel.address = node_size * idx;
-                }
-            }
+        let results: Vec<usize> = self.search_results.iter().copied().collect();
+        for &result_id in &results {
+            self.apply_array_path(result_id, &expanded);
         }
 
         for cu in &self.cus {
@@ -277,6 +217,46 @@ impl DwarfApp {
             self.tree_state.borrow_mut().set_selected(all);
             self.selected_node = self.find_any_node_by_id(first_id);
             self.scroll_target_id = Some(first_id);
+        }
+    }
+
+    pub fn apply_array_path(&mut self, node_id: usize, expanded_path: &[String]) {
+        let indices: Vec<u64> = expanded_path
+            .iter()
+            .filter(|s| s.starts_with('['))
+            .filter_map(|s| s[1..s.len() - 1].parse::<u64>().ok())
+            .collect();
+        if indices.is_empty() {
+            return;
+        }
+        let mut cur = node_id;
+        let mut idx_iter = indices.iter().rev();
+        loop {
+            let Some(parent_id) = self.find_node_by_id(cur).and_then(|n| n.parent_id) else {
+                break;
+            };
+            let Some(parent) = self.find_node_by_id(parent_id) else {
+                break;
+            };
+            if let BasicType::ArrayElem(_, count) = parent.basic_type {
+                if let Some(&idx) = idx_iter.next() {
+                    if idx < count {
+                        let elem_size =
+                            self.find_node_by_id(cur).map(|n| n.size as u64).unwrap_or(0);
+                        if let Some(tn) = self.find_node_mut(cur) {
+                            tn.name = format!("[{}]", idx);
+                            tn.address = elem_size * idx;
+                        }
+                        if let Some(ref mut sel) = self.selected_node {
+                            if sel.id == cur {
+                                sel.name = format!("[{}]", idx);
+                                sel.address = elem_size * idx;
+                            }
+                        }
+                    }
+                }
+            }
+            cur = parent_id;
         }
     }
 
@@ -569,4 +549,31 @@ fn compute_addr_in_tree(node: &TreeNode, target_id: usize, current_addr: u64, is
         }
     }
     None
+}
+
+pub fn expand_bracket_path(path: &str) -> Vec<String> {
+    let mut expanded = Vec::new();
+    for part in path.split('.') {
+        if let Some(bracket) = part.find('[') {
+            let base = &part[..bracket];
+            if !base.is_empty() {
+                expanded.push(base.to_string());
+            }
+            let rest = &part[bracket..];
+            let mut pos = 0;
+            while let Some(rel_start) = rest[pos..].find('[') {
+                let abs_start = pos + rel_start;
+                if let Some(rel_end) = rest[abs_start + 1..].find(']') {
+                    let idx_str = &rest[abs_start + 1..abs_start + 1 + rel_end];
+                    expanded.push(format!("[{}]", idx_str));
+                    pos = abs_start + 1 + rel_end + 1;
+                } else {
+                    break;
+                }
+            }
+        } else {
+            expanded.push(part.to_string());
+        }
+    }
+    expanded
 }
