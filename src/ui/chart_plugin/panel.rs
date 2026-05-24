@@ -54,6 +54,7 @@ pub struct ChartPluginState {
     logging_active: bool,
     pub log_started: bool,
     pub log_stopped: bool,
+    pub cursor_txt: String,
     acq_frame_count: u64,
     acq_last_reset: Instant,
     was_running: bool,
@@ -80,6 +81,7 @@ impl Default for ChartPluginState {
             logging_active: false,
             log_started: false,
             log_stopped: false,
+            cursor_txt: String::new(),
             acq_frame_count: 0,
             acq_last_reset: Instant::now(),
             was_running: false,
@@ -264,6 +266,9 @@ pub fn chart_panel(
                             action = PanelAction::OpenTree;
                         }
                     });
+                    if !state.cursor_txt.is_empty() {
+                        ui.label(RichText::new(&state.cursor_txt).size(11.0).color(Color32::from_rgb(180, 180, 180)));
+                    }
                 });
             });
             ui.add_space(2.0);
@@ -538,6 +543,8 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         egui::vec2(ui.available_width(), plot_height),
     );
 
+    let mut cursor_labels: Option<(f32, f32, Vec<(String, f64, f64, Color32)>)> = None;
+
     Plot::new("chart_plot")
         .height(plot_height)
         .show_axes([true, show_y_axis])
@@ -549,9 +556,6 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         .allow_double_click_reset(false)
         .x_axis_formatter(|t, _range| fmt_time(t.value))
         .y_axis_formatter(|v, _range| y_axis_fmt(v.value))
-        .label_formatter(|name, value| {
-            format!("{}\nt: {}\nv: {:.3}", name, fmt_time(value.x), value.y)
-        })
         .set_margin_fraction(egui::vec2(0.02, 0.05))
         .show(ui, |plot_ui| {
             for legend in &state.legends {
@@ -570,6 +574,28 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 );
             }
 
+            if let Some(cursor) = plot_ui.pointer_coordinate() {
+                let t = cursor.x;
+                let screen = plot_ui.screen_from_plot(cursor);
+                let mut data: Vec<(String, f64, f64, Color32)> = Vec::new();
+                for legend in &state.legends {
+                    if !legend.visible || legend.data_history.len() < 2 { continue; }
+                    let (dt, dv) = find_point_at(&legend.data_history, t);
+                    data.push((legend.curve_name.clone(), dt, dv, legend.color));
+                }
+                if !data.is_empty() {
+                    cursor_labels = Some((screen.x, screen.y, data));
+                }
+                state.cursor_txt = format!("t:{} v:{:.3}", fmt_time(t), cursor.y);
+                plot_ui.vline(
+                    egui_plot::VLine::new("cursor", t)
+                        .color(Color32::from_rgba_premultiplied(128, 128, 128, 80))
+                        .width(1.0),
+                );
+            } else {
+                state.cursor_txt.clear();
+            }
+
             if plot_ui.response().drag_started() {
                 state.auto_scroll = false;
             }
@@ -586,6 +612,33 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 }
             }
         });
+
+    if let Some((sx, sy, cursor_data)) = &cursor_labels {
+        let font_id = egui::FontId::proportional(11.0);
+        let mut max_w = 0.0f32;
+        let mut total_h = 0.0f32;
+        for (name, dt, dv, _) in cursor_data {
+            let line = format!("{}: {:.3} @ {}", name, dv, fmt_time(*dt));
+            let g = ui.painter().layout_no_wrap(line, font_id.clone(), Color32::WHITE);
+            max_w = max_w.max(g.size().x);
+            total_h += g.size().y + 1.0;
+        }
+        let w = max_w + 8.0;
+        let h = total_h + 4.0;
+        let x = (*sx + 16.0).min(plot_rect.right() - w);
+        let mut y = *sy + 8.0;
+        if y + h > plot_rect.bottom() { y = plot_rect.bottom() - h; }
+        let r = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+        ui.painter().rect_filled(r, egui::CornerRadius::same(3), Color32::from_rgba_premultiplied(0, 0, 0, 210));
+        let mut ty = r.top() + 2.0;
+        for (name, dt, dv, color) in cursor_data {
+            let line = format!("{}: {} @ {:.3}", name, fmt_time(*dt), dv);
+            let g = ui.painter().layout_no_wrap(line, font_id.clone(), *color);
+            let gh = g.size().y;
+            ui.painter().galley(egui::pos2(r.left() + 4.0, ty), g, *color);
+            ty += gh + 1.0;
+        }
+    }
 
     legend_overlay(
         ui,
@@ -725,6 +778,15 @@ fn decode_value_f64(data: &[u8], ext_type: &crate::types::ExtendType) -> f64 {
         }
         Other => 0.0,
     }
+}
+
+fn find_point_at(data: &std::collections::VecDeque<(f64, f64)>, t: f64) -> (f64, f64) {
+    if data.is_empty() { return (t, 0.0); }
+    let idx = data.partition_point(|&(x, _)| x < t);
+    if idx == 0 { return data[0]; }
+    if idx >= data.len() { return data[data.len() - 1]; }
+    let p0 = data[idx - 1]; let p1 = data[idx];
+    if (t - p0.0).abs() < (p1.0 - t).abs() { p0 } else { p1 }
 }
 
 fn y_axis_fmt(v: f64) -> String {
