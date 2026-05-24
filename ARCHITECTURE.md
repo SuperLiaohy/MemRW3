@@ -512,31 +512,15 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 
 ### 9. 模态 (Modal) 行为 + Toast 通知
 
-全部模态采用双层拦截机制：`add_enabled_ui` + Z-order click interceptor (`ui.interact`)，确保 egui_dock 的 tab headers 也被阻止。
+全部模态使用 `egui::Modal` 实现穿透防护。
 
-**Toast 通知** (`egui-notify`): Table 写入结果通过右上角 toast 显示 — 成功(绿色 2s)、失败(红色 3s)、校验错误(红色 3s)。`self.toasts.show(ctx)` 每帧在 ui() 末尾调用。
+| 覆盖层 | 实现 | 退出方式 |
+|--------|------|----------|
+| 曲线属性 line_dialog | `Modal::new("line_dialog_modal").show(ctx)` | [确定]/[取消]/[删除] |
+| 变量属性 table_dialog | `Modal::new("table_entry_modal").show(ctx)` | [确定]/[取消]/[删除] |
+| 设置 Dialog | `Modal::new("probe_settings_modal").show(ctx)` | [确定]/[取消] |
 
-| 覆盖层 | 阻塞范围 | 拦截方式 | 退出方式 |
-|--------|----------|----------|----------|
-| BottomSheet | 全界面 (控制栏 + DockArea) | `dock_ui.disable()` + `ui.interact(dock_rect)` + `ctrl_ui.add_enabled_ui(false)` | [关闭] 按钮 |
-| 曲线属性 line_dialog | 全界面 (控制栏 + DockArea) | 同上, `dialog_open` 包含 `show_line_dialog` 时触发全锁 | [确定]/[取消]/[删除] |
-| 变量属性 table_dialog | 全界面 (控制栏 + DockArea) | 同上, `dialog_open` 包含 `show_entry_dialog` 时触发全锁 | [确定]/[取消]/[删除] |
-| 设置 Dialog | 全界面 (控制栏 + DockArea) | 同上, `dialog_open` 包含 `probe.show_settings` 时触发全锁 | [确定]/[取消] |
-
-**`dialog_open`** 在 `app.rs` 顶部计算，聚合三者的开闭状态：
-
-```rust
-let dialog_open = self.chart_state.show_line_dialog
-    || self.table_state.show_entry_dialog
-    || self.session.show_probe_settings;
-```
-
-控制栏锁: `ctrl_ui.add_enabled_ui(!bs_open && !dialog_open, ...)`  
-Dock 锁: `dock_ui.disable()` + `ui.interact(dock_rect, ...)` 在 `bs_open || dialog_open` 时触发
-
-**Z-order 拦截原理**: `ui.interact()` 在 DockArea 渲染**之后**、BottomSheet 渲染**之前**执行。egui 的 hit-testing 按插入逆序（后渲染优先）处理，因此：
-- interceptor 覆盖 dock 区域（吞掉所有点击）
-- BottomSheet 在 interceptor 之后渲染，其自身控件优先于 interceptor
+**Toast 通知** (`egui-notify 0.22`): 右下角 (Anchor::BottomRight), 写入成功=绿色2s可关闭, 失败=红色3s可关闭, 追踪失败=红色15s可关闭。`self.toasts.show(ctx)` 每帧在 ui() 末尾调用。
 
 ### 9. 控制栏配置 Dialog
 
@@ -602,16 +586,9 @@ serde_json = "1"          # JSON
    - 采集直接读 `var.address`、`var.size`，解码直接用 `var.ext_type`
    - 对话窗显示的是 PooledVariable 的 extend 属性，非 TreeNode 的 basic 属性
 
-6. **BottomSheet 模态覆盖 + 全界面锁**
-   - 不在每个 Tab 内分割空间, 而是在 DockArea 上方叠加
-   - 打开时通过双层机制锁定全界面: `dock_ui.disable()` + Z-order `ui.interact(dock_rect, ...)` click interceptor
-   - 控制栏通过 `add_enabled_ui(!bs_open && !dialog_open)` 锁定
-   - 只能通过 [关闭] 按钮退出, 防止误触
+6. **BottomSheet 手动模拟 Modal 覆盖**: 用 `egui::Area` 来实现
 
-7. **对话窗全界面锁**
-   - line_dialog、table_dialog、probe_settings 三个对话窗统一通过 `dialog_open` 标志
-   - 与 BottomSheet 使用相同的拦截机制，全界面不可交互直至对话窗关闭
-   - `egui::Window` 的自身交互不受影响（Window 在更高 Layer，优先于 interceptor）
+7. **Modal 统一管理**: line_dialog / table_dialog / probe_settings 均使用 `egui::Modal::new().show(ctx)` 实现穿透防护，无需手动拦截
 
 8. **VariablePool 用 Vec+HashMap**: 模拟链表 + 哈希对, O(1) 增删查, 比纯 HashMap 更适合频繁迭代的采集场景
 
