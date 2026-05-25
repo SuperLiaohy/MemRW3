@@ -700,122 +700,40 @@ impl eframe::App for MemRW3App {
                                     ui.horizontal(|ui| {
                                         let (left_rect, _) = ui.allocate_exact_size(egui::vec2(left_w, rem_h), egui::Sense::hover());
                                         let mut left_ui = ui.new_child(egui::UiBuilder::new().max_rect(left_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-                                        ui::vari_tree_ui(&mut left_ui, &mut self.dwarf_app);
+                                        egui::ScrollArea::both()
+                                            .id_salt("left_tree_scroll")
+                                            .auto_shrink([false, false]) 
+                                            .show(&mut left_ui, |ui| {
+                                                ui::vari_tree_ui(ui, &mut self.dwarf_app);
+                                            });
                                         ui.separator();
                                         let (right_rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), rem_h), egui::Sense::hover());
                                         let mut right_ui = ui.new_child(egui::UiBuilder::new().max_rect(right_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-                                        let selected = self.dwarf_app.selected_node.clone();
-                                        if let Some(ref node) = selected {
-                                            let node_id = node.id;
-                                            let node_size = node.size;
-                                            let node_basic_type = node.basic_type.clone();
-                                            let default_type = crate::types::basic_type_to_extend(&node_basic_type);
-                                            let config = self.session.extend_configs.entry(node_id).or_insert_with(|| crate::types::ExtendConfig {
-                                                name: String::new(), address: 0, ext_type: default_type, size: node_size, array_index: None, array_count: None,
-                                            });
-                                            if let Some((count, elem_size)) = self.dwarf_app.parent_array_info(node_id) {
-                                                config.array_count = Some(count);
-                                                if node.name.starts_with('[') {
-                                                    if let Ok(parsed) = node.name[1..node.name.len()-1].parse::<u64>() {
-                                                        if parsed < count && config.array_index != Some(parsed) {
-                                                            config.array_index = Some(parsed);
+                                        egui::ScrollArea::both()
+                                            .id_salt("right_props_scroll")
+                                            .auto_shrink([false, false])
+                                            .show(&mut right_ui, |ui| {
+                                                
+                                                let selected = self.dwarf_app.selected_node.clone();
+                                                if let Some(ref node) = selected {
+                                                    let node_id = node.id;
+                                                    let node_size = node.size;
+                                                    let node_basic_type = node.basic_type.clone();
+                                                    let default_type = crate::types::basic_type_to_extend(&node_basic_type);
+                                                    let config = self.session.extend_configs.entry(node_id).or_insert_with(|| crate::types::ExtendConfig {
+                                                        name: String::new(), address: 0, ext_type: default_type, size: node_size, array_index: None, array_count: None,
+                                                    });
+                                                    if let Some((count, elem_size)) = self.dwarf_app.parent_array_info(node_id) {
+                                                        config.array_count = Some(count);
+                                                        if node.name.starts_with('[') {
+                                                            if let Ok(parsed) = node.name[1..node.name.len()-1].parse::<u64>() {
+                                                                if parsed < count && config.array_index != Some(parsed) {
+                                                                    config.array_index = Some(parsed);
+                                                                }
+                                                            }
                                                         }
-                                                    }
-                                                }
-                                                if config.array_index.is_none() { config.array_index = Some(0); }
-                                                let idx = config.array_index.unwrap_or(0);
-                                                let new_name = format!("[{}]", idx);
-                                                let new_addr = elem_size * idx;
-                                                if let Some(tree_node) = self.dwarf_app.find_node_mut(node_id) {
-                                                    tree_node.name = new_name.clone();
-                                                    tree_node.address = new_addr;
-                                                }
-                                                self.dwarf_app.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
-                                                config.name = self.dwarf_app.compute_extend_name(node_id);
-                                                config.address = self.dwarf_app.compute_extend_address(node_id).unwrap_or(0);
-                                            } else {
-                                                if config.name.is_empty() {
-                                                    config.name = self.dwarf_app.compute_extend_name(node_id);
-                                                    config.address = self.dwarf_app.compute_extend_address(node_id).unwrap_or(0);
-                                                }
-                                            }
-                                            let already_exists = self
-                                                .session
-                                                .pool
-                                                .find_by_name_addr(&config.name, config.address);
-                                            let (var_id, is_new_var) = if let Some(var) = already_exists {
-                                                (var.id, false)
-                                            } else {
-                                                let id = self.session.pool.add(config);
-                                                self.session.selected_variables.insert(id);
-                                                (id, true)
-                                            };
-                                            let color_id = ui.make_persistent_id(format!("chart_add_color_{}", node.id));
-                                            let name_id = ui.make_persistent_id(format!("chart_add_name_{}", node.id));
-                                            let table_name_id = ui.make_persistent_id(format!("table_add_name_{}", node.id));
-                                            let mut chart_color = ui.data_mut(|d| *d.get_temp_mut_or(color_id, Color32::from_rgb(66,133,244)));
-                                            let mut chart_curve_name = ui.data_mut(|d| {
-                                                d.get_temp::<String>(name_id).unwrap_or_default()
-                                            });
-                                            let mut table_display_name = ui.data_mut(|d| {
-                                                d.get_temp::<String>(table_name_id).unwrap_or_default()
-                                            });
-                                            let added = match target_tab {
-                                                Some(DockTab::Chart) => {
-                                                    let result = ui::vari_properties_ui(&mut right_ui, node, config, |ui, node_name| {
-                                                        ui::chart_plugin::chart_add_config_ui(ui, node_name, &mut chart_curve_name, &mut chart_color);
-                                                        ui.button("添加到 Chart").clicked()
-                                                    });
-                                                    ui.data_mut(|d| {
-                                                        d.insert_temp(color_id, chart_color);
-                                                        d.insert_temp(name_id, chart_curve_name.clone());
-                                                    });
-                                                    if result {
-                                                        self.chart_state.add_legend(
-                                                            var_id,
-                                                            &self.session.pool,
-                                                            std::mem::take(&mut chart_curve_name),
-                                                            chart_color,
-                                                        );
-                                                    }
-                                                    result
-                                                }
-                                                Some(DockTab::Table) => {
-                                                    let result = ui::vari_properties_ui(&mut right_ui, node, config, |ui, node_name| {
-                                                        ui::table_plugin::table_add_config_ui(ui, node_name, &mut table_display_name);
-                                                        ui.button("添加到 Table").clicked()
-                                                    });
-                                                    ui.data_mut(|d| { d.insert_temp(table_name_id, table_display_name.clone()); });
-                                                    if result {
-                                                        self.table_state.add_entry(
-                                                            var_id,
-                                                            &self.session.pool,
-                                                            std::mem::take(&mut table_display_name),
-                                                        );
-                                                    }
-                                                    result
-                                                }
-                                                None => false,
-                                            };
-                                            if added {
-                                                if let Some(var) = self.session.pool.get_mut(var_id) {
-                                                    var.plugins_cnt += 1;
-                                                }
-                                            } else if is_new_var {
-                                                self.session.pool.remove(var_id);
-                                                self.session.selected_variables.remove(&var_id);
-                                            }
-                                            if added && is_new_var {
-                                                self.push_slot_for_new_var(var_id);
-                                            }
-                                            // Re-sync tree/selected_node after vari_properties_ui
-                                            // (DragValue may have changed array_index)
-                                            {
-                                                let par = self.dwarf_app.parent_array_info(node_id);
-                                                if let Some((_count, elem_size)) = par {
-                                                    let cfg = self.session.extend_configs.get(&node_id);
-                                                    if let Some(cfg) = cfg {
-                                                        let idx = cfg.array_index.unwrap_or(0);
+                                                        if config.array_index.is_none() { config.array_index = Some(0); }
+                                                        let idx = config.array_index.unwrap_or(0);
                                                         let new_name = format!("[{}]", idx);
                                                         let new_addr = elem_size * idx;
                                                         if let Some(tree_node) = self.dwarf_app.find_node_mut(node_id) {
@@ -823,10 +741,103 @@ impl eframe::App for MemRW3App {
                                                             tree_node.address = new_addr;
                                                         }
                                                         self.dwarf_app.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
+                                                        config.name = self.dwarf_app.compute_extend_name(node_id);
+                                                        config.address = self.dwarf_app.compute_extend_address(node_id).unwrap_or(0);
+                                                    } else {
+                                                        if config.name.is_empty() {
+                                                            config.name = self.dwarf_app.compute_extend_name(node_id);
+                                                            config.address = self.dwarf_app.compute_extend_address(node_id).unwrap_or(0);
+                                                        }
                                                     }
-                                                }
-                                            }
-                                        } else { right_ui.label("选择节点以查看属性"); }
+                                                    let already_exists = self
+                                                        .session
+                                                        .pool
+                                                        .find_by_name_addr(&config.name, config.address);
+                                                    let (var_id, is_new_var) = if let Some(var) = already_exists {
+                                                        (var.id, false)
+                                                    } else {
+                                                        let id = self.session.pool.add(config);
+                                                        self.session.selected_variables.insert(id);
+                                                        (id, true)
+                                                    };
+                                                    let color_id = ui.make_persistent_id(format!("chart_add_color_{}", node.id));
+                                                    let name_id = ui.make_persistent_id(format!("chart_add_name_{}", node.id));
+                                                    let table_name_id = ui.make_persistent_id(format!("table_add_name_{}", node.id));
+                                                    let mut chart_color = ui.data_mut(|d| *d.get_temp_mut_or(color_id, Color32::from_rgb(66,133,244)));
+                                                    let mut chart_curve_name = ui.data_mut(|d| {
+                                                        d.get_temp::<String>(name_id).unwrap_or_default()
+                                                    });
+                                                    let mut table_display_name = ui.data_mut(|d| {
+                                                        d.get_temp::<String>(table_name_id).unwrap_or_default()
+                                                    });
+                                                    let added = match target_tab {
+                                                        Some(DockTab::Chart) => {
+                                                            let result = ui::vari_properties_ui(ui, node, config, |ui, node_name| {
+                                                                ui::chart_plugin::chart_add_config_ui(ui, node_name, &mut chart_curve_name, &mut chart_color);
+                                                                ui.button("添加到 Chart").clicked()
+                                                            });
+                                                            ui.data_mut(|d| {
+                                                                d.insert_temp(color_id, chart_color);
+                                                                d.insert_temp(name_id, chart_curve_name.clone());
+                                                            });
+                                                            if result {
+                                                                self.chart_state.add_legend(
+                                                                    var_id,
+                                                                    &self.session.pool,
+                                                                    std::mem::take(&mut chart_curve_name),
+                                                                    chart_color,
+                                                                );
+                                                            }
+                                                            result
+                                                        }
+                                                        Some(DockTab::Table) => {
+                                                            let result = ui::vari_properties_ui(ui, node, config, |ui, node_name| {
+                                                                ui::table_plugin::table_add_config_ui(ui, node_name, &mut table_display_name);
+                                                                ui.button("添加到 Table").clicked()
+                                                            });
+                                                            ui.data_mut(|d| { d.insert_temp(table_name_id, table_display_name.clone()); });
+                                                            if result {
+                                                                self.table_state.add_entry(
+                                                                    var_id,
+                                                                    &self.session.pool,
+                                                                    std::mem::take(&mut table_display_name),
+                                                                );
+                                                            }
+                                                            result
+                                                        }
+                                                        None => false,
+                                                    };
+                                                    if added {
+                                                        if let Some(var) = self.session.pool.get_mut(var_id) {
+                                                            var.plugins_cnt += 1;
+                                                        }
+                                                    } else if is_new_var {
+                                                        self.session.pool.remove(var_id);
+                                                        self.session.selected_variables.remove(&var_id);
+                                                    }
+                                                    if added && is_new_var {
+                                                        self.push_slot_for_new_var(var_id);
+                                                    }
+                                                    // Re-sync tree/selected_node after vari_properties_ui
+                                                    // (DragValue may have changed array_index)
+                                                    {
+                                                        let par = self.dwarf_app.parent_array_info(node_id);
+                                                        if let Some((_count, elem_size)) = par {
+                                                            let cfg = self.session.extend_configs.get(&node_id);
+                                                            if let Some(cfg) = cfg {
+                                                                let idx = cfg.array_index.unwrap_or(0);
+                                                                let new_name = format!("[{}]", idx);
+                                                                let new_addr = elem_size * idx;
+                                                                if let Some(tree_node) = self.dwarf_app.find_node_mut(node_id) {
+                                                                    tree_node.name = new_name.clone();
+                                                                    tree_node.address = new_addr;
+                                                                }
+                                                                self.dwarf_app.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
+                                                            }
+                                                        }
+                                                    }
+                                                } else { ui.label("选择节点以查看属性"); }
+                                            });
                                     });
                                 });
                         });
