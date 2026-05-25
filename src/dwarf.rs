@@ -959,7 +959,7 @@ fn parse_data_member_expr<R: gimli::Reader>(
 pub fn type_name_to_basic_type(name: &str, size: u64, kind: TypeKind) -> BasicType {
     // Pointer types have '*' in their name
     if name.contains('*') || name.contains(" *") {
-        return BasicType::Pointer;
+        return BasicType::Pointer(size as u8);
     }
 
     // Struct/Union/Class types
