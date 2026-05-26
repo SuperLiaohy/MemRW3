@@ -263,6 +263,7 @@ impl MemRW3App {
         let chip = self.session.probe_chip.clone();
         let protocol = self.session.probe_protocol.clone();
         let speed = self.session.probe_speed_khz;
+        let probe_id = self.session.probe_id.clone();
         let probe = self.probe.clone();
         let connected = self.session.connected;
 
@@ -273,6 +274,7 @@ impl MemRW3App {
             });
             self.session.connected = false;
             self.session.connect_error = None;
+            self.toasts.info("已断开连接").duration(Some(Duration::from_secs(5))).closable(true);
         } else {
             for var in self.session.pool.iter() {
                 var.incoming.drain();
@@ -284,16 +286,20 @@ impl MemRW3App {
                 p.chip_name = chip;
                 p.protocol = protocol;
                 p.speed_khz = speed;
+                p.selected_probe_id = probe_id;
                 if !p.connect() {
                     running.store(false, Ordering::Release);
                 }
             });
-            self.session.connected = unsafe { self.probe.get_mut() }.connected;
+            let p = self.probe.get();
+            self.session.connected = p.connected;
+            self.toasts.info(format!("连接配置: chip:{},freq:{},protocol:{},id:{}", p.chip_name, p.speed_khz, p.protocol, p.selected_probe_id.as_ref().unwrap_or(&"auto".into()))).duration(Some(Duration::from_secs(5))).closable(true);
             if !self.session.connected {
-                let err = unsafe { self.probe.get_mut() }.last_error.clone().unwrap_or_default();
-                self.toasts.error(err).duration(Some(Duration::from_secs(8))).closable(true);
+                let err = p.last_error.clone().unwrap_or_default();
+                self.toasts.error(err).duration(Some(Duration::from_secs(5))).closable(true);
                 self.session.set_running(false);
             } else {
+                self.toasts.success("连接成功").duration(Some(Duration::from_secs(5))).closable(true);
                 self.session.connect_error = None;
             }
         }

@@ -23,4 +23,8 @@ impl ProbeCell {
     pub unsafe fn get_mut(&self) -> &mut ProbeSession {
         unsafe { &mut *self.0.get() }
     }
+
+    pub fn get(&self) -> &ProbeSession {
+        unsafe { &*self.0.get() }
+    }
 }

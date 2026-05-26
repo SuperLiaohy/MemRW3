@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use eframe::egui::debug_text::print;
 use probe_rs::{MemoryInterface, Session};
 use probe_rs::probe::list::Lister;
 
@@ -30,6 +31,7 @@ pub struct ProbeSession {
     pub available_chips: Vec<String>,
     pub protocol: String,
     pub speed_khz: u32,
+    pub selected_probe_id: Option<String>,
     pub last_error: Option<String>,
     /// Deduplicated 32-bit aligned read slots.
     pub slots: Vec<Arc<AcqSlot>>,
@@ -52,6 +54,7 @@ impl Default for ProbeSession {
             ],
             protocol: "SWD".into(),
             speed_khz: 10000,
+            selected_probe_id: None,
             last_error: None,
             slots: Vec::new(),
             var_mappings: Vec::new(),
@@ -69,20 +72,76 @@ impl ProbeSession {
             "JTAG" => Some(probe_rs::probe::WireProtocol::Jtag),
             _ => None,
         };
-        let config = probe_rs::SessionConfig {
-            speed: Some(self.speed_khz),
-            protocol,
-            ..Default::default()
-        };
-        match Session::auto_attach(&self.chip_name, config) {
-            Ok(session) => {
-                self.session = Some(session);
-                self.connected = true;
-                true
+
+
+        // 1. 枚举当前所有连入的调试器
+        let lister = probe_rs::probe::list::Lister::new();
+        let probes = lister.list_all();
+
+        if probes.is_empty() {
+            self.last_error = Some("连接失败: 未检测到任何调试器".to_string());
+            return false;
+        }
+
+        let target_probe_info = if let Some(target_id) = &self.selected_probe_id {
+            match probes.into_iter().find(|p| format!("{},SN:{}", p.identifier, p.serial_number.as_deref().unwrap_or("N/A")) == target_id.to_string()) {
+                Some(probe) => Some(probe),
+                None =>  {self.last_error = Some("连接失败: 找不到指定的调试器（可能已被拔出）".to_string());return false;},
             }
-            Err(e) => {
-                self.last_error = Some(format!("连接失败: {e}"));
-                false
+        } else {
+            None
+        };
+        
+        if let Some(probe_info) = target_probe_info {
+            match probe_info.open() {
+                Ok(mut probe) => {
+                    // 4. 先在 probe 层级设置协议和速率，然后再 Attach
+                    if let Some(proto) = protocol {
+                        if let Err(e) = probe.select_protocol(proto) {
+                            self.last_error = Some(format!("协议设置失败: {e}"));
+                            return false;
+                        }
+                    }
+
+                    if let Err(e) = probe.set_speed(self.speed_khz) {
+                        self.last_error = Some(format!("速率设置失败: {e}"));
+                        return false;
+                    }
+                    
+                    // 5. 将配置好的 Probe Attach 到指定芯片
+                    match probe.attach(self.chip_name.clone(), Default::default()) {
+                        Ok(session) => {
+                            self.session = Some(session);
+                            self.connected = true;
+                            true
+                        }
+                        Err(e) => {
+                            self.last_error = Some(format!("连接芯片失败: {e}"));
+                            false
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.last_error = Some(format!("打开调试器失败: {e}, 请多次尝试或检查连接")) ;
+                    false
+                }
+            }
+        } else {
+            let config = probe_rs::SessionConfig {
+                speed: Some(self.speed_khz),
+                protocol,
+                ..Default::default()
+            };
+            match Session::auto_attach(&self.chip_name, config) {
+                Ok(session) => {
+                    self.session = Some(session);
+                    self.connected = true;
+                    true
+                }
+                Err(e) => {
+                    self.last_error = Some(format!("连接失败: {e}, 请多次尝试或检查连接"));
+                    false
+                }
             }
         }
     }

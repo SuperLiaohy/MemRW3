@@ -20,10 +20,13 @@ pub struct AppSession {
     pub all_chips: Vec<String>,
     pub probe_protocol: String,
     pub probe_speed_khz: u32,
+    pub probe_id: Option<String>,
+    pub cached_probe_list: Option<Vec<String>>,
     pub show_probe_settings: bool,
     pub edit_chip: String,
     pub edit_protocol: String,
     pub edit_speed: u32,
+    pub edit_id: Option<String>,
     pub timer_was_started: bool,
 }
 
@@ -55,10 +58,13 @@ impl Default for AppSession {
             all_chips: Vec::new(),
             probe_protocol: "SWD".into(),
             probe_speed_khz: 10000,
+            probe_id: None,
+            cached_probe_list: None,
             show_probe_settings: false,
             edit_chip: String::new(),
             edit_protocol: String::new(),
             edit_speed: 10000,
+            edit_id: None,
             timer_was_started: false,
         }
     }

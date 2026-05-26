@@ -1,5 +1,5 @@
 use eframe::egui::{self, Color32, RichText, Ui};
-use std::sync::atomic::Ordering;
+use std::{fmt::format, sync::atomic::Ordering};
 use crate::app::MemRW3App;
 
 pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
@@ -51,25 +51,31 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
         app.session.edit_protocol = app.session.probe_protocol.clone();
         app.session.edit_speed = app.session.probe_speed_khz;
     }
-
-    let probe_list: Vec<String> = probe_rs::probe::list::Lister::new()
-        .list_all()
-        .iter()
-        .map(|p| p.identifier.clone())
-        .collect();
-    let probe_text = if probe_list.is_empty() {
-        "未检测到 Probe".to_string()
-    } else if probe_list.len() == 1 {
-        probe_list[0].clone()
-    } else {
-        format!("{} 个设备", probe_list.len())
+    if app.session.cached_probe_list.is_none() {
+         app.session.cached_probe_list = Some(probe_rs::probe::list::Lister::new()
+            .list_all()
+            .iter()
+            .map(|p| format!("{},SN:{}", p.identifier, p.serial_number.as_deref().unwrap_or("N/A")))
+            .collect());
+    }
+    if app.session.edit_id.is_none() {
+        app.session.edit_id = app.session.probe_id.clone();
+    }
+    let probe_text = match &app.session.edit_id {
+        Some(id) => id.clone(),
+        None => {
+            if app.session.cached_probe_list.as_ref().unwrap_or(&Vec::new()).is_empty() {
+                "未检测到 Probe".to_string()
+            } else {
+                app.session.cached_probe_list.as_ref().and_then(|list| list.first().cloned()).unwrap_or_else(|| "".to_string())
+            }
+        }
     };
-
     let search_id = egui::Id::new("mcu_search");
     let mut search = ctx.data_mut(|d| d.get_temp::<String>(search_id).unwrap_or_default());
 
     egui::Modal::new(egui::Id::new("probe_settings_modal")).show(ctx, |ui| {
-        ui.set_width(320.0);
+        ui.set_width(450.0);
 
         egui::Frame::NONE
             .inner_margin(egui::Margin {
@@ -160,17 +166,35 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
                         ui.end_row();
 
                         ui.label("Probe 设备:");
-                        egui::ComboBox::from_id_salt("probe_combo")
-                            .selected_text(&probe_text)
-                            .width(ui.available_width()) // 下拉框占满右侧剩余宽度
-                            .show_ui(ui, |ui| {
-                                if probe_list.is_empty() {
-                                    ui.label("(无可用设备, 请插入调试器)");
+                        egui::Frame::none()
+                            // .fill(ui.visuals().extreme_bg_color) // 给下拉框加个背景
+                            // .rounding(4.0)
+                            .inner_margin(2.0)
+                            .show(ui, |ui| {
+                                if ui.button("🔄 刷新").clicked() {
+                                    app.session.cached_probe_list = Some(probe_rs::probe::list::Lister::new()
+                                        .list_all()
+                                        .into_iter()
+                                        .map(|p| format!("{},SN:{}", p.identifier, p.serial_number.as_deref().unwrap_or("N/A")))
+                                        .collect());
                                 }
-                                for name in &probe_list {
-                                    ui.label(name);
-                                }
-                            });
+                                egui::ComboBox::from_id_salt("probe_combo")
+                                    .selected_text(&probe_text)
+                                    // .width(ui.available_width())
+                                    .show_ui(ui, |ui| {
+                                        if app.session.cached_probe_list.as_ref().unwrap_or(&Vec::new()).is_empty() {
+                                            ui.label("(无可用设备, 请插入调试器)");
+                                        } else {
+                                            for name in app.session.cached_probe_list.as_ref().unwrap_or(&Vec::new()) {
+                                                ui.selectable_value(
+                                                    &mut app.session.edit_id,
+                                                    Some(name.clone()),
+                                                    name.as_str()
+                                                );
+                                            }
+                                        }
+                                    });
+                        });
                         ui.end_row();
                     });
 
@@ -197,10 +221,14 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
         app.session.probe_chip = std::mem::take(&mut app.session.edit_chip);
         app.session.probe_protocol = std::mem::take(&mut app.session.edit_protocol);
         app.session.probe_speed_khz = app.session.edit_speed;
+        app.session.probe_id = app.session.edit_id.clone();
+        app.session.cached_probe_list = None;
     }
     if !app.session.show_probe_settings {
         app.session.edit_chip.clear();
         app.session.edit_protocol.clear();
+        app.session.edit_id = None;
+        app.session.cached_probe_list = None;
     }
 }
 
