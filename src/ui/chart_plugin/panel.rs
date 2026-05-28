@@ -2,7 +2,7 @@ use super::legend::ChartLegend;
 use crate::model::VariablePool;
 use crate::types::ExtendType;
 use eframe::egui::{self, Color32, RichText, Ui};
-use egui_plot::{Line, Plot, PlotBounds, PlotPoints};
+use egui_plot::{CoordinatesFormatter, Corner, Legend, Line, Plot, PlotBounds, PlotPoints};
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::time::Instant;
@@ -376,8 +376,12 @@ pub fn chart_panel(
                         }
                     }
                 }
-                if !state.auto_scroll {
-                    ui.colored_label(Color32::LIGHT_BLUE, "手动查看中");
+                if state.auto_scroll {
+                    ui.label(RichText::new("● LIVE").size(11.0).color(Color32::from_rgb(100, 220, 100)));
+                } else {
+                    if ui.button(RichText::new("▶ 恢复实时").size(11.0)).clicked() {
+                        state.auto_scroll = true;
+                    }
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -406,6 +410,26 @@ pub fn chart_panel(
                 });
             });
             ui.add_space(2.0);
+
+            if !state.legends.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("实时:").size(11.0).color(Color32::from_rgb(150, 150, 150)));
+                    for legend in &state.legends {
+                        if !legend.visible {
+                            continue;
+                        }
+                        let val = legend.data_history.back().map(|p| p.1);
+                        if let Some(v) = val {
+                            ui.label(
+                                RichText::new(format!("{}={:.3}", legend.curve_name, v))
+                                    .size(11.0)
+                                    .color(legend.color),
+                            );
+                        }
+                    }
+                });
+                ui.add_space(2.0);
+            }
 
             if state.legends.is_empty() {
                 ui.vertical_centered(|ui| {
@@ -546,60 +570,51 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         }
     };
 
-    let plot_rect = egui::Rect::from_min_size(
-        ui.next_widget_position(),
-        egui::vec2(ui.available_width(), plot_height),
-    );
-
-    let mut cursor_labels: Option<(f32, f32, Vec<(String, f64, f64, Color32)>)> = None;
-
-    Plot::new("chart_plot")
+    let plot_response = Plot::new("chart_plot")
         .height(plot_height)
         .show_axes([true, show_y_axis])
         .show_grid([true, true])
+        .legend(Legend::default().position(Corner::RightTop).background_alpha(0.55))
         .allow_zoom([true, true])
         .allow_drag([true, true])
+        .pan_pointer_button(egui::PointerButton::Primary)
         .allow_scroll(true)
-        .allow_boxed_zoom(true)
+        .allow_boxed_zoom(false)
         .allow_double_click_reset(false)
+        .show_crosshair(true)
+        .x_axis_label("Time")
+        .y_axis_label("Value")
         .x_axis_formatter(|t, _range| fmt_time(t.value))
         .y_axis_formatter(|v, _range| y_axis_fmt(v.value))
+        .label_formatter(|name, value| {
+            if name.is_empty() {
+                String::new()
+            } else {
+                format!("{}: {:.3} @ {}s", name, value.y, fmt_time(value.x))
+            }
+        })
+        .coordinates_formatter(Corner::RightBottom, CoordinatesFormatter::default())
         .set_margin_fraction(egui::vec2(0.02, 0.05))
         .show(ui, |plot_ui| {
             for legend in &state.legends {
                 if !legend.visible || legend.data_history.len() < 2 {
                     continue;
                 }
-                let pts: Vec<[f64; 2]> = legend
-                    .data_history
-                    .iter()
-                    .map(|&(t, val)| [t, val])
-                    .collect();
+                let pts = downsample_data(&legend.data_history, 5000);
+                let latest = legend.data_history.back().map(|p| p.1).unwrap_or(0.0);
+                let display_name = format!("{}  {:.3}", legend.curve_name, latest);
                 plot_ui.line(
-                    Line::new(legend.curve_name.clone(), PlotPoints::new(pts))
+                    Line::new(display_name, PlotPoints::new(pts))
                         .color(legend.color)
-                        .width(1.5),
+                        .width(1.5)
+                        .highlight(true)
+                        .allow_hover(true),
                 );
             }
 
             if let Some(cursor) = plot_ui.pointer_coordinate() {
                 let t = cursor.x;
-                let screen = plot_ui.screen_from_plot(cursor);
-                let mut data: Vec<(String, f64, f64, Color32)> = Vec::new();
-                for legend in &state.legends {
-                    if !legend.visible || legend.data_history.len() < 2 { continue; }
-                    let (dt, dv) = find_point_at(&legend.data_history, t);
-                    data.push((legend.curve_name.clone(), dt, dv, legend.color));
-                }
-                if !data.is_empty() {
-                    cursor_labels = Some((screen.x, screen.y, data));
-                }
                 state.cursor_txt = format!("t:{} v:{:.3}", fmt_time(t), cursor.y);
-                plot_ui.vline(
-                    egui_plot::VLine::new("cursor", t)
-                        .color(Color32::from_rgba_premultiplied(128, 128, 128, 80))
-                        .width(1.0),
-                );
             } else {
                 state.cursor_txt.clear();
             }
@@ -621,96 +636,21 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             }
         });
 
-    if let Some((sx, sy, cursor_data)) = &cursor_labels {
-        let font_id = egui::FontId::proportional(11.0);
-        let mut max_w = 0.0f32;
-        let mut total_h = 0.0f32;
-        for (name, dt, dv, _) in cursor_data {
-            let line = format!("{}: {:.3} @ {}", name, dv, fmt_time(*dt));
-            let g = ui.painter().layout_no_wrap(line, font_id.clone(), Color32::WHITE);
-            max_w = max_w.max(g.size().x);
-            total_h += g.size().y + 1.0;
+    if plot_response.response.clicked_by(egui::PointerButton::Secondary) {
+        if let Some(hovered_id) = plot_response.hovered_plot_item {
+            for (i, legend) in state.legends.iter().enumerate() {
+                let expected_id = egui::Id::new(&legend.curve_name);
+                if expected_id == hovered_id {
+                    state.editing_legend = Some(i);
+                    state.show_line_dialog = true;
+                    state.edit_curve_name = legend.curve_name.clone();
+                    state.edit_color = legend.color;
+                    state.edit_buffer_size = legend.buffer_size;
+                    state.edit_visible = legend.visible;
+                    break;
+                }
+            }
         }
-        let w = max_w + 8.0;
-        let h = total_h + 4.0;
-        let x = (*sx + 16.0).min(plot_rect.right() - w);
-        let mut y = *sy + 8.0;
-        if y + h > plot_rect.bottom() { y = plot_rect.bottom() - h; }
-        let r = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
-        ui.painter().rect_filled(r, egui::CornerRadius::same(3), Color32::from_rgba_premultiplied(0, 0, 0, 210));
-        let mut ty = r.top() + 2.0;
-        for (name, dt, dv, color) in cursor_data {
-            let line = format!("{}: {} @ {:.3}", name, fmt_time(*dt), dv);
-            let g = ui.painter().layout_no_wrap(line, font_id.clone(), *color);
-            let gh = g.size().y;
-            ui.painter().galley(egui::pos2(r.left() + 4.0, ty), g, *color);
-            ty += gh + 1.0;
-        }
-    }
-
-    legend_overlay(
-        ui,
-        state,
-        egui::pos2(plot_rect.right() - 5.0, plot_rect.top() + 5.0),
-    );
-}
-
-fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2) {
-    let mut toggle = None;
-    let mut edit = None;
-    let mut y = anchor.y + 4.0;
-    let x = (anchor.x - 160.0).max(0.0);
-    for (i, legend) in state.legends.iter().enumerate() {
-        let op = if legend.visible { 1.0 } else { 0.35 };
-        let tc = if legend.visible {
-            Color32::WHITE
-        } else {
-            Color32::from_gray(100)
-        };
-        let text = legend.curve_name.clone();
-        let g = ui
-            .painter()
-            .layout_no_wrap(text, egui::FontId::proportional(11.0), tc);
-        let w = g.rect.width() + 24.0;
-        let h = g.rect.height() + 6.0;
-        let r = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
-        let resp = ui.interact(r, egui::Id::new(("chart_legend", i)), egui::Sense::click());
-        let bg = if resp.hovered() {
-            Color32::from_rgba_premultiplied(40, 40, 50, 200)
-        } else {
-            Color32::from_rgba_premultiplied(20, 20, 30, 180)
-        };
-        ui.painter().rect_filled(r, egui::CornerRadius::same(3), bg);
-        let bar = egui::Rect::from_min_size(
-            egui::pos2(r.left() + 4.0, r.top() + 3.0),
-            egui::vec2(8.0, h - 6.0),
-        );
-        ui.painter().rect_filled(
-            bar,
-            egui::CornerRadius::same(2),
-            legend.color.linear_multiply(op),
-        );
-        ui.painter()
-            .galley(egui::pos2(r.left() + 14.0, r.top() + 3.0), g, tc);
-        if resp.clicked() {
-            toggle = Some(i);
-        }
-        if resp.secondary_clicked() {
-            edit = Some(i);
-        }
-        y += h + 3.0;
-    }
-    if let Some(i) = toggle {
-        state.legends[i].visible = !state.legends[i].visible;
-    }
-    if let Some(i) = edit {
-        state.editing_legend = Some(i);
-        state.show_line_dialog = true;
-        let legend = &state.legends[i];
-        state.edit_curve_name = legend.curve_name.clone();
-        state.edit_color = legend.color;
-        state.edit_buffer_size = legend.buffer_size;
-        state.edit_visible = legend.visible;
     }
 }
 
@@ -788,13 +728,27 @@ fn decode_value_f64(data: &[u8], ext_type: &crate::types::ExtendType) -> f64 {
     }
 }
 
-fn find_point_at(data: &std::collections::VecDeque<(f64, f64)>, t: f64) -> (f64, f64) {
-    if data.is_empty() { return (t, 0.0); }
-    let idx = data.partition_point(|&(x, _)| x < t);
-    if idx == 0 { return data[0]; }
-    if idx >= data.len() { return data[data.len() - 1]; }
-    let p0 = data[idx - 1]; let p1 = data[idx];
-    if (t - p0.0).abs() < (p1.0 - t).abs() { p0 } else { p1 }
+fn downsample_data(data: &std::collections::VecDeque<(f64, f64)>, max_points: usize) -> Vec<[f64; 2]> {
+    let len = data.len();
+    if max_points == 0 || len == 0 {
+        return Vec::new();
+    }
+    if len <= max_points {
+        return data.iter().map(|&(t, val)| [t, val]).collect();
+    }
+    if max_points == 1 {
+        let last = data[len - 1];
+        return vec![[last.0, last.1]];
+    }
+    let step = (len - 1) as f64 / (max_points - 1) as f64;
+    let mut sampled = Vec::with_capacity(max_points);
+    for i in 0..max_points {
+        let idx = ((i as f64) * step).round() as usize;
+        let idx = idx.min(len - 1);
+        let (t, val) = data[idx];
+        sampled.push([t, val]);
+    }
+    sampled
 }
 
 fn y_axis_fmt(v: f64) -> String {
