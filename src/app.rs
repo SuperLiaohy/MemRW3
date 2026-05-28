@@ -1,6 +1,6 @@
 use eframe::egui;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, Ui};
-use egui_dock::{DockArea, DockState, NodeIndex, TabViewer, tab_viewer};
+use egui_dock::{tab_viewer, DockArea, DockState, NodeIndex, TabViewer};
 use object::Object;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -87,7 +87,7 @@ fn acq_thread(
                 thread::sleep(Duration::from_millis(100));
                 continue;
             }
-            
+
             let d = delay_us.load(Ordering::Acquire);
             if d > 0 {
                 thread::sleep(Duration::from_micros(d));
@@ -128,7 +128,14 @@ impl MemRW3App {
         let acq_cycles = acq_cycle_count.clone();
         let acq_stop_th = acq_stop.clone();
         let _acq_handle = Some(thread::spawn(move || {
-            acq_thread(acq_probe, acq_running, acq_delay, acq_cycles, acq_sync, acq_stop_th);
+            acq_thread(
+                acq_probe,
+                acq_running,
+                acq_delay,
+                acq_cycles,
+                acq_sync,
+                acq_stop_th,
+            );
         }));
 
         Self {
@@ -143,8 +150,7 @@ impl MemRW3App {
             delay_us,
             acq_cycle_count,
             slot_count,
-            toasts: egui_notify::Toasts::default()
-                .with_anchor(egui_notify::Anchor::BottomRight),
+            toasts: egui_notify::Toasts::default().with_anchor(egui_notify::Anchor::BottomRight),
             hz_last_cycles: 0,
             hz_last_time: Instant::now(),
             acq_stop,
@@ -225,13 +231,18 @@ impl MemRW3App {
                         let new_size = match new_type {
                             crate::types::ExtendType::U8 | crate::types::ExtendType::I8 => 1,
                             crate::types::ExtendType::U16 | crate::types::ExtendType::I16 => 2,
-                            crate::types::ExtendType::U32 | crate::types::ExtendType::I32
+                            crate::types::ExtendType::U32
+                            | crate::types::ExtendType::I32
                             | crate::types::ExtendType::Float => 4,
-                            crate::types::ExtendType::U64 | crate::types::ExtendType::I64
+                            crate::types::ExtendType::U64
+                            | crate::types::ExtendType::I64
                             | crate::types::ExtendType::Double => 8,
                             _ => node.size,
                         };
-                        let new_addr = self.dwarf_app.compute_extend_address(node_id).unwrap_or(node.address);
+                        let new_addr = self
+                            .dwarf_app
+                            .compute_extend_address(node_id)
+                            .unwrap_or(node.address);
                         var.address = new_addr;
                         var.ext_type = new_type;
                         var.size = new_size;
@@ -253,7 +264,9 @@ impl MemRW3App {
                 .closable(true);
         }
         if errors.is_empty() {
-            self.toasts.success("追踪完成, 所有变量已更新").duration(Some(Duration::from_secs(3)));
+            self.toasts
+                .success("追踪完成, 所有变量已更新")
+                .duration(Some(Duration::from_secs(3)));
         }
 
         self.rebuild_slots();
@@ -274,7 +287,10 @@ impl MemRW3App {
             });
             self.session.connected = false;
             self.session.connect_error = None;
-            self.toasts.info("已断开连接").duration(Some(Duration::from_secs(5))).closable(true);
+            self.toasts
+                .info("已断开连接")
+                .duration(Some(Duration::from_secs(5)))
+                .closable(true);
         } else {
             for var in self.session.pool.iter() {
                 var.incoming.drain();
@@ -293,13 +309,28 @@ impl MemRW3App {
             });
             let p = self.probe.get();
             self.session.connected = p.connected;
-            self.toasts.info(format!("连接配置: chip:{},freq:{},protocol:{},id:{}", p.chip_name, p.speed_khz, p.protocol, p.selected_probe_id.as_ref().unwrap_or(&"auto".into()))).duration(Some(Duration::from_secs(5))).closable(true);
+            self.toasts
+                .info(format!(
+                    "连接配置: chip:{},freq:{},protocol:{},id:{}",
+                    p.chip_name,
+                    p.speed_khz,
+                    p.protocol,
+                    p.selected_probe_id.as_ref().unwrap_or(&"auto".into())
+                ))
+                .duration(Some(Duration::from_secs(5)))
+                .closable(true);
             if !self.session.connected {
                 let err = p.last_error.clone().unwrap_or_default();
-                self.toasts.error(err).duration(Some(Duration::from_secs(5))).closable(true);
+                self.toasts
+                    .error(err)
+                    .duration(Some(Duration::from_secs(5)))
+                    .closable(true);
                 self.session.set_running(false);
             } else {
-                self.toasts.success("连接成功").duration(Some(Duration::from_secs(5))).closable(true);
+                self.toasts
+                    .success("连接成功")
+                    .duration(Some(Duration::from_secs(5)))
+                    .closable(true);
                 self.session.connect_error = None;
             }
         }
@@ -434,13 +465,20 @@ impl<'a> TabViewer for TabViewerCtx<'a> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         match tab {
             TabKind::Chart => {
-                let a = ui::chart_plugin::chart_panel(ui, self.chart_state, self.pool, self.frame_data, self.running);
+                let a = ui::chart_plugin::chart_panel(
+                    ui,
+                    self.chart_state,
+                    self.pool,
+                    self.frame_data,
+                    self.running,
+                );
                 if a == ui::chart_plugin::PanelAction::OpenTree {
                     *self.open_tree = Some(DockTab::Chart);
                 }
             }
             TabKind::Table => {
-                let a = ui::table_plugin::table_panel(ui, self.table_state, self.pool, self.frame_data);
+                let a =
+                    ui::table_plugin::table_panel(ui, self.table_state, self.pool, self.frame_data);
                 if a == ui::table_plugin::PanelAction::OpenTree {
                     *self.open_tree = Some(DockTab::Table);
                 }
@@ -449,28 +487,32 @@ impl<'a> TabViewer for TabViewerCtx<'a> {
     }
 }
 
-fn bottom_sheet_handle(ui: &mut egui::Ui, drag_state: &mut Option<(f32, f32)>, current_h: f32) -> f32 {
+fn bottom_sheet_handle(
+    ui: &mut egui::Ui,
+    drag_state: &mut Option<(f32, f32)>,
+    current_h: f32,
+) -> f32 {
     let mut w = ui.available_width();
     if !w.is_finite() || w <= 0.0 {
         w = ui.ctx().screen_rect().width(); // 如果不正常，回退到屏幕宽度
     }
 
     let (rect, response) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::drag());
-    
+
     if response.hovered() || response.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
-    
+
     let handle_color = if response.dragged() {
         ui.visuals().widgets.active.bg_fill
     } else if response.hovered() {
         ui.visuals().widgets.hovered.bg_fill
     } else if ui.visuals().dark_mode {
-        egui::Color32::from_gray(120) 
+        egui::Color32::from_gray(120)
     } else {
         egui::Color32::from_gray(200)
     };
-    
+
     let capsule = egui::Rect::from_center_size(rect.center(), egui::vec2(40.0, 4.0));
     ui.painter()
         .rect_filled(capsule, egui::CornerRadius::same(2), handle_color);
@@ -481,7 +523,7 @@ fn bottom_sheet_handle(ui: &mut egui::Ui, drag_state: &mut Option<(f32, f32)>, c
                 *drag_state = Some((pointer.y, current_h));
             }
             let (origin_y, initial_h) = drag_state.unwrap();
-            let displacement = origin_y - pointer.y; 
+            let displacement = origin_y - pointer.y;
             return initial_h + displacement;
         }
         current_h
@@ -519,8 +561,7 @@ impl eframe::App for MemRW3App {
         let total_h = ui.available_height();
         let ctrl_h = (total_h * 0.06).clamp(40.0, 56.0);
         let bs_open = self.session.active_bottom_sheet.is_some();
-        let dialog_open = self.chart_state.show_line_dialog
-            || self.table_state.show_entry_dialog;
+        let dialog_open = self.table_state.show_entry_dialog;
         let running = self.session.is_running();
 
         ui.vertical(|ui| {
@@ -768,14 +809,23 @@ impl eframe::App for MemRW3App {
                                                     };
                                                     let color_id = ui.make_persistent_id(format!("chart_add_color_{}", node.id));
                                                     let name_id = ui.make_persistent_id(format!("chart_add_name_{}", node.id));
+                                                    let name_default_id = ui.make_persistent_id(format!("chart_add_name_default_{}", node.id));
                                                     let table_name_id = ui.make_persistent_id(format!("table_add_name_{}", node.id));
+                                                    let table_name_default_id = ui.make_persistent_id(format!("table_add_name_default_{}", node.id));
                                                     let mut chart_color = ui.data_mut(|d| *d.get_temp_mut_or(color_id, Color32::from_rgb(66,133,244)));
-                                                    let mut chart_curve_name = ui.data_mut(|d| {
-                                                        d.get_temp::<String>(name_id).unwrap_or_default()
-                                                    });
-                                                    let mut table_display_name = ui.data_mut(|d| {
-                                                        d.get_temp::<String>(table_name_id).unwrap_or_default()
-                                                    });
+                                                    let default_add_name = format!("{} @ 0x{:X}", config.name, config.address);
+                                                    let mut chart_curve_name = add_name_value(
+                                                        ui,
+                                                        name_id,
+                                                        name_default_id,
+                                                        &default_add_name,
+                                                    );
+                                                    let mut table_display_name = add_name_value(
+                                                        ui,
+                                                        table_name_id,
+                                                        table_name_default_id,
+                                                        &default_add_name,
+                                                    );
                                                     let added = match target_tab {
                                                         Some(DockTab::Chart) => {
                                                             let result = ui::vari_properties_ui(ui, node, config, |ui, node_name| {
@@ -852,6 +902,25 @@ impl eframe::App for MemRW3App {
         });
         self.toasts.show(ui.ctx());
     }
+}
+
+fn add_name_value(
+    ui: &mut Ui,
+    value_id: egui::Id,
+    default_id: egui::Id,
+    default_name: &str,
+) -> String {
+    ui.data_mut(|data| {
+        let previous_default = data.get_temp::<String>(default_id);
+        let mut value = data
+            .get_temp::<String>(value_id)
+            .unwrap_or_else(|| default_name.to_owned());
+        if value.is_empty() || previous_default.as_deref() != Some(default_name) {
+            value = default_name.to_owned();
+        }
+        data.insert_temp(default_id, default_name.to_owned());
+        value
+    })
 }
 
 #[derive(Serialize, Deserialize)]
