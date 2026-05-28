@@ -1,3 +1,4 @@
+use super::fft::{compute_fft, FftWindowType};
 use super::legend::ChartLegend;
 use crate::model::VariablePool;
 use crate::types::ExtendType;
@@ -35,6 +36,23 @@ impl XAxisMode {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum FftScrollMode {
+    Both,
+    X,
+    Y,
+}
+
+impl FftScrollMode {
+    fn label(&self) -> &'static str {
+        match self {
+            FftScrollMode::Both => "Both",
+            FftScrollMode::X => "X",
+            FftScrollMode::Y => "Y",
+        }
+    }
+}
+
 pub struct ChartPluginState {
     pub legends: Vec<ChartLegend>,
     pub editing_legend: Option<usize>,
@@ -55,6 +73,13 @@ pub struct ChartPluginState {
     pub log_started: bool,
     pub log_stopped: bool,
     pub cursor_txt: String,
+    pub show_fft: bool,
+    pub fft_sample_count: usize,
+    pub fft_window_type: FftWindowType,
+    pub fft_scroll_mode: FftScrollMode,
+    fft_plot_bounds: Option<(f64, f64, f64, f64)>,
+    pub td_scroll_mode: FftScrollMode,
+    td_plot_bounds: Option<(f64, f64, f64, f64)>,
     acq_frame_count: u64,
     acq_last_reset: Instant,
     was_running: bool,
@@ -82,6 +107,13 @@ impl Default for ChartPluginState {
             log_started: false,
             log_stopped: false,
             cursor_txt: String::new(),
+            show_fft: false,
+            fft_sample_count: 1024,
+            fft_window_type: FftWindowType::Hann,
+            fft_scroll_mode: FftScrollMode::Both,
+            fft_plot_bounds: None,
+            td_scroll_mode: FftScrollMode::Both,
+            td_plot_bounds: None,
             acq_frame_count: 0,
             acq_last_reset: Instant::now(),
             was_running: false,
@@ -279,12 +311,36 @@ pub fn chart_panel(
                         legend.data_history.clear();
                     }
                     state.auto_scroll = true;
+                    state.td_plot_bounds = None;
                     state.acq_hz = 0.0;
                     state.acq_frame_count = 0;
                     state.reset_timer = true;
                 }
                 if ui.button("回到最新").clicked() {
                     state.auto_scroll = true;
+                    state.td_plot_bounds = None;
+                }
+                ui.separator();
+                let fft_label = if state.show_fft { "📊 FFT 关" } else { "📊 FFT" };
+                if ui
+                    .selectable_label(state.show_fft, RichText::new(fft_label).size(12.0))
+                    .clicked()
+                {
+                    state.show_fft = !state.show_fft;
+                }
+                ui.separator();
+                ui.label("缩放:");
+                for &mode in &[FftScrollMode::X, FftScrollMode::Y, FftScrollMode::Both] {
+                    if ui
+                        .selectable_label(
+                            state.td_scroll_mode == mode,
+                            RichText::new(mode.label()).size(12.0),
+                        )
+                        .clicked()
+                    {
+                        state.td_scroll_mode = mode;
+                        state.td_plot_bounds = None;
+                    }
                 }
                 ui.separator();
                 egui::ComboBox::from_label("X轴")
@@ -419,12 +475,39 @@ pub fn chart_panel(
                         if ui.button("📋 打开变量树").clicked() { action = PanelAction::OpenTree; }
                     });
                 });
+            } else if state.show_fft {
+                let total_h = ui.available_height();
+                let td_h = (total_h * 0.55).max(120.0);
+                let fft_h = (total_h - td_h - 6.0).max(80.0);
+
+                let (td_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), td_h),
+                    egui::Sense::hover(),
+                );
+                let mut td_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(td_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                render_chart(&mut td_ui, state);
+
+                ui.add_space(4.0);
+
+                let (fft_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), fft_h),
+                    egui::Sense::hover(),
+                );
+                let mut fft_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(fft_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                render_fft_chart(&mut fft_ui, state);
             } else {
                 render_chart(ui, state);
             }
         });
 
-        // Dialog (rendered at top layer, always interactive)
         if state.show_line_dialog {
             if let Some(edit_idx) = state.editing_legend {
                 let (ext_info, win_title) = {
@@ -551,6 +634,29 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         egui::vec2(ui.available_width(), plot_height),
     );
 
+    let td_hovered = ui.ctx().input(|i| {
+        i.pointer
+            .hover_pos()
+            .map_or(false, |p| plot_rect.contains(p))
+    });
+    let td_scroll = ui.ctx().input(|i| i.smooth_scroll_delta);
+
+    if state.td_scroll_mode == FftScrollMode::Both {
+        state.td_plot_bounds = None;
+    } else if td_hovered && td_scroll.y != 0.0 {
+        state.auto_scroll = false;
+        let factor = if td_scroll.y > 0.0 { 1.0 / 1.15 } else { 1.15 };
+        let current = state.td_plot_bounds;
+        state.td_plot_bounds = Some(compute_td_scroll_zoom(current, factor, state.td_scroll_mode, state));
+    } else {
+        if let Some(bounds) = &state.td_plot_bounds {
+            let range = bounds.2 - bounds.3;
+            if range <= 0.0 || !range.is_finite() {
+                state.td_plot_bounds = None;
+            }
+        }
+    }
+
     let mut cursor_labels: Option<(f32, f32, Vec<(String, f64, f64, Color32)>)> = None;
 
     Plot::new("chart_plot")
@@ -559,7 +665,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         .show_grid([true, true])
         .allow_zoom([true, true])
         .allow_drag([true, true])
-        .allow_scroll(true)
+        .allow_scroll(state.td_scroll_mode == FftScrollMode::Both)
         .allow_boxed_zoom(true)
         .allow_double_click_reset(false)
         .x_axis_formatter(|t, _range| fmt_time(t.value))
@@ -609,15 +715,40 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             }
             if plot_ui.response().double_clicked() {
                 state.auto_scroll = true;
+                state.td_plot_bounds = None;
             }
 
-            if state.auto_scroll {
-                if let Some((x_min, x_max, y_min, y_max)) = auto_bounds {
+            if state.td_scroll_mode == FftScrollMode::Both {
+                if state.auto_scroll {
+                    if let Some((x_min, x_max, y_min, y_max)) = auto_bounds {
+                        plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                            [x_min, y_min],
+                            [x_max, y_max],
+                        ));
+                    }
+                }
+            } else {
+                if state.auto_scroll {
+                    if let Some((x_min, x_max, y_min, y_max)) = auto_bounds {
+                        plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                            [x_min, y_min],
+                            [x_max, y_max],
+                        ));
+                    }
+                } else if let Some((x_min, x_max, y_min, y_max)) = state.td_plot_bounds {
                     plot_ui.set_plot_bounds(PlotBounds::from_min_max(
                         [x_min, y_min],
                         [x_max, y_max],
                     ));
                 }
+
+                let pb = plot_ui.plot_bounds();
+                state.td_plot_bounds = Some((
+                    pb.min()[0],
+                    pb.max()[0],
+                    pb.min()[1],
+                    pb.max()[1],
+                ));
             }
         });
 
@@ -653,6 +784,342 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         state,
         egui::pos2(plot_rect.right() - 5.0, plot_rect.top() + 5.0),
     );
+}
+
+fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
+    let mut fft_series: Vec<(&str, Color32, Vec<f64>, Vec<f64>, f64)> = Vec::new();
+
+    for legend in &state.legends {
+        if !legend.visible || legend.data_history.len() < 4 {
+            continue;
+        }
+        let data: Vec<(f64, f64)> = legend.data_history.iter().copied().collect();
+        if let Some(fft) = compute_fft(&data, state.fft_sample_count, state.fft_window_type) {
+            fft_series.push((
+                legend.curve_name.as_str(),
+                legend.color,
+                fft.frequencies,
+                fft.magnitudes,
+                fft.sample_rate,
+            ));
+        }
+    }
+
+    if fft_series.is_empty() {
+        ui.vertical_centered(|ui| {
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new("FFT: 需要至少 4 个数据点")
+                    .size(12.0)
+                    .color(Color32::from_rgb(150, 150, 150)),
+            );
+        });
+        return;
+    }
+
+    let avg_sr = fft_series.iter().map(|s| s.4).sum::<f64>() / fft_series.len() as f64;
+
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("📊 FFT | 采样率 ≈ {:.1} Hz", avg_sr))
+                .size(11.0)
+                .color(Color32::from_rgb(180, 180, 180)),
+        );
+        ui.add_space(8.0);
+        egui::ComboBox::from_id_salt("fft_window_cfg")
+            .selected_text(state.fft_window_type.label())
+            .width(80.0)
+            .show_ui(ui, |ui| {
+                for &w in FftWindowType::ALL {
+                    if ui
+                        .selectable_label(state.fft_window_type == w, w.label())
+                        .clicked()
+                    {
+                        state.fft_window_type = w;
+                        state.fft_plot_bounds = None;
+                    }
+                }
+            });
+        ui.label("取样:");
+        let mut sc_str = state.fft_sample_count.to_string();
+        if ui
+            .add_sized(
+                [50.0, 18.0],
+                egui::TextEdit::singleline(&mut sc_str).hint_text("1024"),
+            )
+            .changed()
+        {
+            if let Ok(v) = sc_str.parse::<usize>() {
+                state.fft_sample_count = v.max(4).min(65536);
+                state.fft_plot_bounds = None;
+            }
+        }
+        ui.separator();
+        ui.label("缩放:");
+        for &mode in &[FftScrollMode::X, FftScrollMode::Y, FftScrollMode::Both] {
+            if ui
+                .selectable_label(
+                    state.fft_scroll_mode == mode,
+                    RichText::new(mode.label()).size(12.0),
+                )
+                .clicked()
+            {
+                state.fft_scroll_mode = mode;
+            }
+        }
+    });
+
+    let available_h = ui.available_height();
+    let plot_height = (available_h - 4.0).max(60.0);
+
+    let plot_pos = ui.next_widget_position();
+    let plot_rect =
+        egui::Rect::from_min_size(plot_pos, egui::vec2(ui.available_width(), plot_height));
+
+    let hovered = ui.ctx().input(|i| {
+        i.pointer
+            .hover_pos()
+            .map_or(false, |p| plot_rect.contains(p))
+    });
+    let scroll_delta = ui.ctx().input(|i| i.smooth_scroll_delta);
+
+    if state.fft_scroll_mode == FftScrollMode::Both {
+        state.fft_plot_bounds = None;
+    } else if hovered && scroll_delta.y != 0.0 {
+        let factor = if scroll_delta.y > 0.0 { 1.0 / 1.15 } else { 1.15 };
+        let current_bounds = state.fft_plot_bounds;
+        let new_bounds =
+            compute_scroll_zoom(current_bounds, factor, state.fft_scroll_mode, &fft_series);
+        state.fft_plot_bounds = Some(new_bounds);
+    } else {
+        if let Some(bounds) = &state.fft_plot_bounds {
+            let range = bounds.2 - bounds.3;
+            if range <= 0.0 || !range.is_finite() {
+                state.fft_plot_bounds = None;
+            }
+        }
+    }
+
+    let mut cursor_labels: Option<(f32, f32, Vec<(String, f64, f64, Color32)>)> = None;
+
+    Plot::new("fft_plot")
+        .height(plot_height)
+        .show_axes([true, true])
+        .show_grid([true, true])
+        .allow_zoom([true, true])
+        .allow_drag([true, true])
+        .allow_scroll(state.fft_scroll_mode == FftScrollMode::Both)
+        .allow_boxed_zoom(true)
+        .x_axis_formatter(|f, _range| format!("{:.0} Hz", f.value))
+        .y_axis_formatter(|v, _range| {
+            if v.value.abs() < 0.001 && v.value != 0.0 {
+                format!("{:.5}", v.value)
+            } else {
+                format!("{:.3}", v.value)
+            }
+        })
+        .set_margin_fraction(egui::vec2(0.02, 0.05))
+        .show(ui, |plot_ui| {
+            if let Some((x_min, x_max, y_min, y_max)) = state.fft_plot_bounds {
+                plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                    [x_min, y_min],
+                    [x_max, y_max],
+                ));
+            }
+
+            for (name, color, freqs, mags, _sr) in &fft_series {
+                let pts: Vec<[f64; 2]> = freqs
+                    .iter()
+                    .zip(mags.iter())
+                    .map(|(&f, &m)| [f, m])
+                    .collect();
+                plot_ui.line(
+                    Line::new(*name, PlotPoints::new(pts))
+                        .color(*color)
+                        .width(1.2),
+                );
+            }
+
+            if let Some(cursor) = plot_ui.pointer_coordinate() {
+                let freq = cursor.x;
+                let screen = plot_ui.screen_from_plot(cursor);
+                let mut data: Vec<(String, f64, f64, Color32)> = Vec::new();
+                for (name, color, freqs, mags, _sr) in &fft_series {
+                    let mag = nearest_mag(freqs, mags, freq);
+                    data.push((name.to_string(), freq, mag, *color));
+                }
+                if !data.is_empty() {
+                    cursor_labels = Some((screen.x, screen.y, data));
+                }
+                state.cursor_txt = format!("FFT: {:.1} Hz | {:.3}", freq, cursor.y);
+                plot_ui.vline(
+                    egui_plot::VLine::new("fft_cursor", freq)
+                        .color(Color32::from_rgba_premultiplied(128, 128, 128, 80))
+                        .width(1.0),
+                );
+            }
+
+            if state.fft_scroll_mode != FftScrollMode::Both {
+                let pb = plot_ui.plot_bounds();
+                state.fft_plot_bounds = Some((
+                    pb.min()[0],
+                    pb.max()[0],
+                    pb.min()[1],
+                    pb.max()[1],
+                ));
+            }
+        });
+
+    if let Some((sx, sy, cursor_data)) = &cursor_labels {
+        let font_id = egui::FontId::proportional(11.0);
+        let mut max_w = 0.0f32;
+        let mut total_h = 0.0f32;
+        for (name, freq, mag, _) in cursor_data {
+            let line = format!("{}: {:.1} Hz → {:.3}", name, freq, mag);
+            let g = ui.painter().layout_no_wrap(line, font_id.clone(), Color32::WHITE);
+            max_w = max_w.max(g.size().x);
+            total_h += g.size().y + 1.0;
+        }
+        let w = max_w + 8.0;
+        let h = total_h + 4.0;
+        let x = (*sx + 16.0).min(plot_rect.right() - w);
+        let mut y = *sy + 8.0;
+        if y + h > plot_rect.bottom() {
+            y = plot_rect.bottom() - h;
+        }
+        let r = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+        ui.painter().rect_filled(
+            r,
+            egui::CornerRadius::same(3),
+            Color32::from_rgba_premultiplied(0, 0, 0, 210),
+        );
+        let mut ty = r.top() + 2.0;
+        for (name, freq, mag, color) in cursor_data {
+            let line = format!("{}: {:.1} Hz → {:.3}", name, freq, mag);
+            let g = ui.painter().layout_no_wrap(line, font_id.clone(), *color);
+            let gh = g.size().y;
+            ui.painter().galley(egui::pos2(r.left() + 4.0, ty), g, *color);
+            ty += gh + 1.0;
+        }
+    }
+}
+
+fn compute_scroll_zoom(
+    current: Option<(f64, f64, f64, f64)>,
+    factor: f64,
+    mode: FftScrollMode,
+    fft_series: &[(&str, Color32, Vec<f64>, Vec<f64>, f64)],
+) -> (f64, f64, f64, f64) {
+    let (x_min, x_max, y_min, y_max) = current.unwrap_or_else(|| {
+        let x_min = fft_series
+            .iter()
+            .flat_map(|s| s.2.first().copied())
+            .fold(f64::MAX, f64::min);
+        let x_max = fft_series
+            .iter()
+            .flat_map(|s| s.2.last().copied())
+            .fold(0.0, f64::max);
+        let y_min = fft_series
+            .iter()
+            .flat_map(|s| s.3.iter().copied())
+            .fold(f64::MAX, f64::min);
+        let y_max = fft_series
+            .iter()
+            .flat_map(|s| s.3.iter().copied())
+            .fold(f64::NEG_INFINITY, f64::max);
+        let y_pad = ((y_max - y_min).max(0.001) * 0.1).max(0.001);
+        (x_min, x_max, y_min - y_pad, y_max + y_pad)
+    });
+
+    match mode {
+        FftScrollMode::Both => {
+            let cx = (x_min + x_max) / 2.0;
+            let hx = (x_max - x_min) / 2.0 * factor;
+            let cy = (y_min + y_max) / 2.0;
+            let hy = (y_max - y_min) / 2.0 * factor;
+            (cx - hx, cx + hx, cy - hy, cy + hy)
+        }
+        FftScrollMode::X => {
+            let cx = (x_min + x_max) / 2.0;
+            let hx = (x_max - x_min) / 2.0 * factor;
+            (cx - hx, cx + hx, y_min, y_max)
+        }
+        FftScrollMode::Y => {
+            let cy = (y_min + y_max) / 2.0;
+            let hy = (y_max - y_min) / 2.0 * factor;
+            (x_min, x_max, cy - hy, cy + hy)
+        }
+    }
+}
+
+fn compute_td_scroll_zoom(
+    current: Option<(f64, f64, f64, f64)>,
+    factor: f64,
+    mode: FftScrollMode,
+    state: &ChartPluginState,
+) -> (f64, f64, f64, f64) {
+    let (x_min, x_max, y_min, y_max) = current.unwrap_or_else(|| {
+        let x_max = state
+            .legends
+            .iter()
+            .filter_map(|l| l.data_history.back().map(|p| p.0))
+            .fold(0.0f64, f64::max);
+        let x_min = state
+            .legends
+            .iter()
+            .filter_map(|l| l.data_history.front().map(|p| p.0))
+            .fold(f64::MAX, f64::min);
+        let (y_min, y_max) = state
+            .legends
+            .iter()
+            .flat_map(|l| l.data_history.iter().map(|p| p.1))
+            .fold(
+                (f64::INFINITY, f64::NEG_INFINITY),
+                |(lo, hi), y| (lo.min(y), hi.max(y)),
+            );
+        let y_pad = ((y_max - y_min).max(10.0) * 0.1).max(0.001);
+        (x_min, x_max, y_min - y_pad, y_max + y_pad)
+    });
+
+    match mode {
+        FftScrollMode::Both => {
+            let cx = (x_min + x_max) / 2.0;
+            let hx = (x_max - x_min) / 2.0 * factor;
+            let cy = (y_min + y_max) / 2.0;
+            let hy = (y_max - y_min) / 2.0 * factor;
+            (cx - hx, cx + hx, cy - hy, cy + hy)
+        }
+        FftScrollMode::X => {
+            let cx = (x_min + x_max) / 2.0;
+            let hx = (x_max - x_min) / 2.0 * factor;
+            (cx - hx, cx + hx, y_min, y_max)
+        }
+        FftScrollMode::Y => {
+            let cy = (y_min + y_max) / 2.0;
+            let hy = (y_max - y_min) / 2.0 * factor;
+            (x_min, x_max, cy - hy, cy + hy)
+        }
+    }
+}
+
+fn nearest_mag(freqs: &[f64], mags: &[f64], target: f64) -> f64 {
+    if freqs.is_empty() {
+        return 0.0;
+    }
+    let idx = freqs.partition_point(|&f| f < target);
+    if idx == 0 {
+        return mags[0];
+    }
+    if idx >= freqs.len() {
+        return mags[freqs.len() - 1];
+    }
+    let left = freqs[idx - 1];
+    let right = freqs[idx];
+    if (target - left).abs() <= (right - target).abs() {
+        mags[idx - 1]
+    } else {
+        mags[idx]
+    }
 }
 
 fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2) {
