@@ -62,7 +62,8 @@ src/
     ├── chart_plugin/
     │   ├── mod.rs
     │   ├── legend.rs       # ChartLegend (曲线名/颜色/可见/缓冲/data_history)
-    │   ├── panel.rs        # 图表面板 (坐标轴/曲线/图例覆层/ExtendType 解码 + 自定义颜色选择)
+    │   ├── fft.rs           # FFT 频谱计算 (自包含: Complex/Radix-2/Hann/Hamming/Blackman/矩形窗, 最大65536点)
+    │   ├── panel.rs        # 图表面板 (时域+频域, 坐标轴/曲线/图例/光标/ExtendType解码/自定义颜色/Log CSV)
     │   └── line_dialog.rs  # 曲线属性 Dialog (编辑曲线属性 + 显示PooledVariable的Extend属性)
     ├── table_plugin/
     │   ├── mod.rs
@@ -466,13 +467,13 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 
 | 功能 | 实现 |
 |------|------|
-| 坐标轴 | Y 轴 7 格 + 数值标签, X 轴 6 格 + 时间标签(s) |
+| 坐标轴 | Y 轴数值标签, X 轴时间标签(s) |
 | 网格线 | 自适应深色/浅色 |
 | 曲线绘制 | 从 `data_history: VecDeque<(time, value)>` 读取, 折线连接 |
 | 值解码 | 按 `var.ext_type` 解析: u/i/float/double → f64, Other → 0.0 |
-| 图例 (Legend) | 图表右上角浮动: `[色条] 曲线名 = 当前值` |
+| 图例 (Legend) | 图表右上角浮动: `[色条] 曲线名` |
 | 单击图例 | 切换 visible (曲线消失/恢复, 图例变暗) |
-| 双击图例 | 弹出居中 line_dialog (模态: 全界面拦截对话窗外点击) |
+| 右键图例 | 弹出居中 line_dialog (模态: 全界面拦截对话窗外点击) |
 | 曲线属性 Dialog | 曲线名/颜色(`color_edit_button_srgba`+预设色块)/缓冲/可见 + 变量属性 + 删除/确定/取消 |
 | 编辑确认 | 对话框内编本地副本 (state.edit_*), "确定"生效 / "取消"丢弃, 非 running 时缓冲区长度可编辑 |
 | 缓冲区 | "确定"时若长度变化 → `data_history = VecDeque::with_capacity(new_size)` 清空重建 |
@@ -485,6 +486,14 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 | 空状态 | 居中提示"暂无监控变量" + 打开变量树按钮 |
 | Log CSV | 可选择 CSV 文件, 开始采集时覆盖写入 header+数据行, 暂停时关闭; toast 提醒开始/停止; logging 期间禁用添加/删除/改选项 |
 | 保存/加载 | JSON 格式保存 Probe/chart/table/pool/ELF 配置; 加载后自动 trace 更新地址 |
+| 游标 (Cursor) | 鼠标悬停时显示竖线 + 浮层: 逐曲线显示时间戳和当前值 |
+| FFT 频谱图 | 工具栏 `📊 FFT` 按钮切换; 开启后视图上下分屏: 时域(55%) + 频域(45%) |
+| FFT 配置 | 窗函数选择 (Rectangular/Hann/Hamming/Blackman) + 取样点数 (4~65536, 从数据末尾取) |
+| FFT 多曲线 | 所有可见曲线各自计算 FFT, 叠加在同一频谱图上, 颜色与图例一致 |
+| FFT 游标 | 鼠标悬停频谱图显示竖线 + 浮层: 逐曲线显示 "频率 Hz → 幅值" |
+| 滚轮缩放 | Both 模式原生双轴缩放; X/Y 模式手动单轴缩放 (锚定视图中心, 缩放因子 1/1.15) |
+| 时域缩放模式 | 工具栏 `缩放: X Y Both` 按钮, 独立于 FFT 缩放; 缩放时自动关闭 auto-scroll |
+| FFT 缩放模式 | FFT 图表头顶部独立 `缩放: X Y Both` 按钮 |
 
 ### 7. Table 读写面板特性
 
@@ -498,6 +507,52 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 | 写入校验 | 按 ExtendType 校验: u8(0-255), i8(-128~127), u16, i16, u32, i32, u64, i64, f32, f64; Other 类型禁止写入 |
 | 通知 | `egui-notify` toast: 成功=绿色2s, 失败=红色3s, 校验错误=红色3s |
 | 空状态 | 居中提示 + 打开变量树按钮 |
+
+### 7.1 FFT 频谱分析模块 (fft.rs)
+
+**自包含实现，零外部依赖**：
+
+| 组件 | 说明 |
+|------|------|
+| `Complex` | 自定义复数类型 + Add/Sub/Mul 运算 |
+| `fft()` | Radix-2 Cooley-Tukey FFT (原地, 前向), 支持任意 2^k 大小 |
+| `FftWindowType` | 枚举: Rectangular / Hann / Hamming / Blackman, 各含 `label()` 和 `ALL` 常量 |
+| `generate_window()` | 根据窗类型生成系数向量 (Rectangular=全1, Hann=cos², Hamming=0.54-0.46cos, Blackman=三阶) |
+| `compute_fft()` | 公开接口: `(data, sample_count, window_type) → Option<FftResult>` |
+| `FftResult` | 输出: `frequencies: Vec<f64>`, `magnitudes: Vec<f64>`, `sample_rate: f64` |
+
+**计算流程**：
+1. 从数据末尾取 `sample_count` 个点 (clamp: `[4, min(total, 65536)]`)
+2. 由时间戳估算采样率
+3. FFT 大小 = `next_power_of_two(take).min(65536)`，零填充
+4. 施加窗函数 → 复数数组 → FFT → 取正频率半谱 → 归一化幅度
+
+**状态字段** (`ChartPluginState`)：
+- `fft_sample_count: usize` — 默认 1024
+- `fft_window_type: FftWindowType` — 默认 Hann
+- `fft_scroll_mode: FftScrollMode` — FFT 图滚轮缩放模式 (默认 Both)
+- `fft_plot_bounds: Option<(x_min,x_max,y_min,y_max)>` — 手动缩放 bounds 缓存
+
+### 7.2 滚轮缩放模式 (时域 + 频域)
+
+**`FftScrollMode`** 枚举 (X / Y / Both) 同时用于时域图和 FFT 图：
+
+| 模式 | 时域图 | FFT 图 |
+|------|--------|--------|
+| **Both** | `allow_scroll(true)`, egui_plot 原生双轴缩放, bounds 自动清除 | 同左 |
+| **X** | `allow_scroll(false)`, 手动拦截滚轮仅缩放 X 轴, `plot_bounds()` 同步 | 同左 |
+| **Y** | `allow_scroll(false)`, 手动拦截滚轮仅缩放 Y 轴, `plot_bounds()` 同步 | 同左 |
+
+**缩放因子**: 滚轮上 = 1/1.15 (放大), 滚轮下 = 1.15 (缩小), 锚定视图中心。
+
+**时域特有**:
+- 缩放时自动关闭 `auto_scroll`
+- 双击 / "回到最新" / "清空" → 恢复 auto-scroll + 清除手动 bounds
+- Both 模式拖拽后 auto_scroll=false 依赖 egui_plot 原生管理
+
+**状态字段**:
+- `td_scroll_mode: FftScrollMode` — 时域图滚轮缩放模式 (默认 Both)
+- `td_plot_bounds: Option<(x_min,x_max,y_min,y_max)>` — 时域图手动 bounds 缓存
 
 ### 8. 配置保存/加载 + 追踪
 
@@ -534,7 +589,7 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 
 **Toast 通知** (`egui-notify 0.22`): 右下角 (Anchor::BottomRight), 写入成功=绿色2s可关闭, 失败=红色3s可关闭, 追踪失败=红色15s可关闭。`self.toasts.show(ctx)` 每帧在 ui() 末尾调用。
 
-### 9. 控制栏配置 Dialog
+### 10. 控制栏配置 Dialog
 
 ```
 "⚙ 设置" → egui::Window (居中, 可取消)
