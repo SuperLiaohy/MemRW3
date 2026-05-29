@@ -6,8 +6,8 @@ pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
     egui::Frame::NONE
         .fill(bar_background(ui))
         .stroke(egui::Stroke::new(1.0, Color32::from_rgb(180, 180, 200)))
-        .corner_radius(10)
-        .inner_margin(egui::Margin::symmetric(12, 0))
+        .corner_radius(3)
+        .inner_margin(egui::Margin::symmetric(12, 4))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
