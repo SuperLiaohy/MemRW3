@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui::{Color32, FontData, FontDefinitions, FontFamily, Ui};
+use egui::{Color32, Ui};
 use egui_dock::{tab_viewer, DockArea, DockState, NodeIndex, TabViewer};
 use object::Object;
 use serde::{Deserialize, Serialize};
@@ -20,8 +20,6 @@ use crate::types::DwarfApp;
 use crate::ui;
 use crate::ui::chart_plugin::ChartPluginState;
 use crate::ui::table_plugin::TablePluginState;
-
-const CHINESE_FONT_PATH: &str = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf";
 
 use std::collections::HashMap;
 

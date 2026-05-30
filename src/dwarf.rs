@@ -282,16 +282,16 @@ pub fn build_variable_node(
         TypeKind::Struct | TypeKind::Union | TypeKind::Class
     ) {
         let fields = struct_fields(dwarf, type_ref, &type_defs)?;
-        let mut visited = BTreeSet::new();
+        let mut root_visited = BTreeSet::new();
         let key = (type_ref.unit_header_offset, type_ref.unit_offset);
-        visited.insert(key);
+        root_visited.insert(key);
         for field in fields {
             children.push(build_field_node(
                 dwarf,
                 unit,
                 &field,
                 address,
-                &mut visited,
+                &root_visited,
                 &type_defs,
                 next_id,
             )?);
@@ -330,7 +330,7 @@ pub fn build_field_node(
     unit: &Unit<EndianSlice<RunTimeEndian>>,
     field: &FieldInfo,
     _parent_address: u64,
-    visited: &mut BTreeSet<VisitedKey>,
+    visited: &BTreeSet<VisitedKey>,
     type_defs: &HashMap<String, TypeDefInfo>,
     next_id: &mut usize,
 ) -> Result<TreeNode> {
@@ -365,7 +365,8 @@ pub fn build_field_node(
             field.type_ref.unit_offset,
         );
         if !visited.contains(&key) {
-            visited.insert(key);
+            let mut nested_visited = visited.clone();
+            nested_visited.insert(key);
             let nested_fields = struct_fields(dwarf, &field.type_ref, type_defs)?;
             for nested in nested_fields {
                 children.push(build_field_node(
@@ -373,7 +374,7 @@ pub fn build_field_node(
                     unit,
                     &nested,
                     0,
-                    visited,
+                    &nested_visited,
                     type_defs,
                     next_id,
                 )?);
