@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use eframe::egui::debug_text::print;
-use probe_rs::{MemoryInterface, Session};
+use probe_rs::{CoreInterface, MemoryInterface, Session};
 use probe_rs::probe::list::Lister;
 
 use crate::model::DoubleBuffer;
