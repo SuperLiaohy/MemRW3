@@ -557,22 +557,17 @@ impl eframe::App for MemRW3App {
         }
 
         let total_h = ui.available_height();
-        let ctrl_h = (total_h * 0.06).clamp(40.0, 56.0);
         let bs_open = self.session.active_bottom_sheet.is_some();
         let dialog_open = self.table_state.show_entry_dialog;
         let running = self.session.is_running();
 
+        egui::Frame::NONE
+            .fill(if ui.visuals().dark_mode { Color32::from_rgb(35, 35, 38) } else { Color32::from_rgb(230, 230, 230) })
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(180, 180, 200)))
+            .corner_radius(2)
+            .show(ui, |ui| {
         ui.vertical(|ui| {
-            let (ctrl_rect, _) = ui.allocate_at_least(
-                egui::vec2(ui.available_width(), ctrl_h),
-                egui::Sense::hover(),
-            );
-            let mut ctrl_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(ctrl_rect)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            );
-            ctrl_ui.add_enabled_ui(!bs_open && !dialog_open, |ui| {
+            ui.add_enabled_ui(!bs_open && !dialog_open, |ui| {
                 ui::control_bar(ui, self);
             });
 
@@ -581,18 +576,6 @@ impl eframe::App for MemRW3App {
 
             if bs_open {}
             if dock_h > 0.0 {
-                let (dock_rect, _) = ui.allocate_at_least(
-                    egui::vec2(ui.available_width(), dock_h),
-                    egui::Sense::click(),
-                );
-                let mut dock_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(dock_rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                );
-
-                if bs_open || dialog_open {
-                }
 
                 let mut open_tree = self.session.active_bottom_sheet;
                 let mut viewer = TabViewerCtx {
@@ -607,12 +590,9 @@ impl eframe::App for MemRW3App {
                     .style(egui_dock::Style::from_egui(ui.style()))
                     .show_close_buttons(false)
                     .show_leaf_collapse_buttons(false)
-                    .show_inside(&mut dock_ui, &mut viewer);
+                    .show_inside(ui, &mut viewer);
 
                 self.session.active_bottom_sheet = open_tree;
-
-                if bs_open || dialog_open {
-                }
 
                 let removed_chart: Vec<usize> = self.chart_state.removed_var_ids.drain(..).collect();
                 for var_id in removed_chart {
@@ -897,6 +877,7 @@ impl eframe::App for MemRW3App {
                         });
                     });
             }
+        });
         });
         self.toasts.show(ui.ctx());
     }
