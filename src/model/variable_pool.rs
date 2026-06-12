@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use crate::types::{ExtendConfig, ExtendType};
+use crate::dwarf::types::{ExtendConfig, ExtendType};
 use crate::model::DoubleBuffer;
 use std::collections::HashMap;
 

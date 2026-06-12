@@ -4,7 +4,6 @@ mod dwarf;
 mod model;
 mod probe;
 mod sync;
-mod types;
 mod ui;
 
 use anyhow::{anyhow, Result};
@@ -12,7 +11,7 @@ use anyhow::{anyhow, Result};
 use crate::app::MemRW3App;
 
 fn main() -> Result<()> {
-    let app = MemRW3App::new(types::DwarfApp::new(Vec::new()));
+    let app = MemRW3App::new(dwarf::types::DwarfState::new(Vec::new()));
 
     eframe::run_native(
         "MemRW3 - Memory Read/Write Monitor",

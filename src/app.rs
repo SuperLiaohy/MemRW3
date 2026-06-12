@@ -4,7 +4,6 @@ use egui_dock::{tab_viewer, DockArea, DockState, NodeIndex, TabViewer};
 use object::Object;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -12,15 +11,13 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-
+use crate::dwarf;
 use crate::model::{AppSession, DockTab, VariablePool};
 use crate::probe::{AcqSlot, ProbeCell, ProbeSession, VarSlotMapping};
 use crate::sync::Sync;
-use crate::types::DwarfApp;
 use crate::ui;
 use crate::ui::chart_plugin::ChartPluginState;
 use crate::ui::table_plugin::TablePluginState;
-
 use std::collections::HashMap;
 
 type FrameData = HashMap<usize, Vec<(f64, [u8; 8])>>;
@@ -33,20 +30,13 @@ pub enum TabKind {
 
 pub struct MemRW3App {
     tree: DockState<TabKind>,
-    pub dwarf_app: DwarfApp,
-    pub elf_path: String,
     pub session: AppSession,
+    pub dwarf_state: dwarf::types::DwarfState,
     pub chart_state: ChartPluginState,
     pub table_state: TablePluginState,
     probe: Arc<ProbeCell>,
     sync: Arc<Sync>,
-    pub delay_us: Arc<AtomicU64>,
-    acq_cycle_count: Arc<AtomicU64>,
-    pub slot_count: Arc<AtomicU64>,
     pub toasts: egui_notify::Toasts,
-    hz_last_cycles: u64,
-    hz_last_time: Instant,
-    acq_stop: Arc<AtomicBool>,
     _acq_handle: Option<JoinHandle<()>>,
 }
 
@@ -95,13 +85,16 @@ fn acq_thread(
 }
 
 impl MemRW3App {
-    pub fn new(dwarf_app: DwarfApp) -> Self {
+    pub fn new(dwarf_state: dwarf::types::DwarfState) -> Self {
         let mut tree = DockState::new(vec![TabKind::Chart]);
         tree.main_surface_mut()
             .split_right(NodeIndex::root(), 0.5, vec![TabKind::Table]);
 
         let mut session = AppSession {
-            bottom_sheet_height: 250.0,
+            config: crate::model::Config {
+                bottom_sheet_height: 250.0,
+                ..crate::model::Config::default()
+            },
             ..Default::default()
         };
         let mut chips: Vec<String> = probe_rs::config::Registry::from_builtin_families()
@@ -114,22 +107,19 @@ impl MemRW3App {
 
         let probe = Arc::new(ProbeCell::new(ProbeSession::default()));
         let sync = Arc::new(Sync::new());
-        let acq_stop = Arc::new(AtomicBool::new(false));
-        let delay_us = Arc::new(AtomicU64::new(0));
-        let acq_cycle_count = Arc::new(AtomicU64::new(0));
-        let slot_count = Arc::new(AtomicU64::new(0));
+
 
         let acq_probe = probe.clone();
         let acq_sync = sync.clone();
         let acq_running = session.running.clone();
-        let acq_delay = delay_us.clone();
-        let acq_cycles = acq_cycle_count.clone();
-        let acq_stop_th = acq_stop.clone();
+        let acq_cycles = session.acq_cycle_count.clone();
+        let acq_stop_th = session.acq_stop.clone();
+        let delay_us = session.config.delay_us.clone();
         let _acq_handle = Some(thread::spawn(move || {
             acq_thread(
                 acq_probe,
                 acq_running,
-                acq_delay,
+                delay_us,
                 acq_cycles,
                 acq_sync,
                 acq_stop_th,
@@ -138,69 +128,24 @@ impl MemRW3App {
 
         Self {
             tree,
-            dwarf_app,
-            elf_path: String::new(),
             session,
+            dwarf_state,
             chart_state: ChartPluginState::default(),
             table_state: TablePluginState::default(),
             probe,
             sync,
-            delay_us,
-            acq_cycle_count,
-            slot_count,
             toasts: egui_notify::Toasts::default().with_anchor(egui_notify::Anchor::BottomRight),
-            hz_last_cycles: 0,
-            hz_last_time: Instant::now(),
-            acq_stop,
             _acq_handle,
         }
     }
 
     fn load_elf(&mut self) {
         self.session.load_error = None;
-        let path = self.elf_path.trim().to_string();
-        if path.is_empty() {
-            self.session.load_error = Some("请输入 ELF 文件路径".into());
-            return;
-        }
-        let data = match fs::read(&path) {
-            Ok(d) => d,
-            Err(e) => {
-                self.session.load_error = Some(format!("读取文件失败: {e}"));
-                return;
-            }
+        let path = self.session.config.elf_path.trim().to_string();
+        match dwarf::extract::load_elf(&path) {
+            Ok(cus) => self.dwarf_state = dwarf::types::DwarfState::new(cus),
+            Err(e) => self.session.load_error = Some(e),
         };
-        let object = match object::read::File::parse(&*data) {
-            Ok(o) => o,
-            Err(e) => {
-                self.session.load_error = Some(format!("解析 ELF 失败: {e}"));
-                return;
-            }
-        };
-        if object.format() != object::BinaryFormat::Elf {
-            self.session.load_error = Some("不是有效的 ELF 文件".into());
-            return;
-        }
-        let endian = match object.endianness() {
-            object::Endianness::Little => gimli::RunTimeEndian::Little,
-            object::Endianness::Big => gimli::RunTimeEndian::Big,
-        };
-        let dwarf = match crate::dwarf::load_dwarf(&object, endian) {
-            Ok(d) => d,
-            Err(e) => {
-                self.session.load_error = Some(format!("加载 DWARF 失败: {e}"));
-                return;
-            }
-        };
-        let cus = match crate::dwarf::collect_cus(&dwarf) {
-            Ok(c) => c,
-            Err(e) => {
-                self.session.load_error = Some(format!("解析 DWARF 数据失败: {e}"));
-                return;
-            }
-        };
-        self.dwarf_app = DwarfApp::new(cus);
-        self.session.load_error = None;
     }
 
     fn trace_variables(&mut self) {
@@ -210,35 +155,35 @@ impl MemRW3App {
         }
 
         let mut errors: Vec<String> = Vec::new();
-        let pool = &mut self.session.pool;
+        let pool = &mut self.session.config.pool;
 
         for var in pool.iter_mut() {
             let name = var.name.clone();
-            let path = crate::types::expand_bracket_path(&name);
-            let node_ids = self.dwarf_app.trace_exact(&path);
+            let path = dwarf::types::expand_bracket_path(&name);
+            let node_ids = self.dwarf_state.trace_exact(&path);
             for &node_id in &node_ids {
-                self.dwarf_app.apply_array_path(node_id, &path);
+                self.dwarf_state.apply_array_path(node_id, &path);
             }
 
             match node_ids.len() {
                 1 => {
                     let node_id = node_ids[0];
-                    let node = self.dwarf_app.find_node_by_id(node_id);
+                    let node = self.dwarf_state.find_node_by_id(node_id);
                     if let Some(node) = node {
-                        let new_type = crate::types::basic_type_to_extend(&node.basic_type);
+                        let new_type = dwarf::types::basic_type_to_extend(&node.basic_type);
                         let new_size = match new_type {
-                            crate::types::ExtendType::U8 | crate::types::ExtendType::I8 => 1,
-                            crate::types::ExtendType::U16 | crate::types::ExtendType::I16 => 2,
-                            crate::types::ExtendType::U32
-                            | crate::types::ExtendType::I32
-                            | crate::types::ExtendType::Float => 4,
-                            crate::types::ExtendType::U64
-                            | crate::types::ExtendType::I64
-                            | crate::types::ExtendType::Double => 8,
+                            dwarf::types::ExtendType::U8 | dwarf::types::ExtendType::I8 => 1,
+                            dwarf::types::ExtendType::U16 | dwarf::types::ExtendType::I16 => 2,
+                            dwarf::types::ExtendType::U32
+                            | dwarf::types::ExtendType::I32
+                            | dwarf::types::ExtendType::Float => 4,
+                            dwarf::types::ExtendType::U64
+                            | dwarf::types::ExtendType::I64
+                            | dwarf::types::ExtendType::Double => 8,
                             _ => node.size,
                         };
                         let new_addr = self
-                            .dwarf_app
+                            .dwarf_state
                             .compute_extend_address(node_id)
                             .unwrap_or(node.address);
                         var.address = new_addr;
@@ -271,9 +216,9 @@ impl MemRW3App {
     }
 
     pub fn sync_connect(&mut self) {
-        let chip = self.session.probe_chip.clone();
-        let protocol = self.session.probe_protocol.clone();
-        let speed = self.session.probe_speed_khz;
+        let chip = self.session.config.probe_chip.clone();
+        let protocol = self.session.config.probe_protocol.clone();
+        let speed = self.session.config.probe_speed_khz;
         let probe_id = self.session.probe_id.clone();
         let probe = self.probe.clone();
         let connected = self.session.connected;
@@ -290,7 +235,7 @@ impl MemRW3App {
                 .duration(Some(Duration::from_secs(5)))
                 .closable(true);
         } else {
-            for var in self.session.pool.iter() {
+            for var in self.session.config.pool.iter() {
                 var.incoming.drain();
             }
             let sync = self.sync.clone();
@@ -350,7 +295,7 @@ impl MemRW3App {
 
     pub fn clear_all_buffers(&mut self) {
         self.session.timer_was_started = false;
-        let pool = &self.session.pool;
+        let pool = &self.session.config.pool;
         let probe = self.probe.clone();
         self.sync.send_request(move || {
             unsafe { probe.get_mut() }.timer = Instant::now();
@@ -361,7 +306,7 @@ impl MemRW3App {
     }
 
     pub fn write_variable(&self, var_id: usize, value: u64) -> bool {
-        let var = match self.session.pool.get(var_id) {
+        let var = match self.session.config.pool.get(var_id) {
             Some(v) => v,
             None => return false,
         };
@@ -377,7 +322,7 @@ impl MemRW3App {
 
     pub fn rebuild_slots(&self) {
         let probe = self.probe.clone();
-        let pool = &self.session.pool;
+        let pool = &self.session.config.pool;
         let mut slot_map: std::collections::HashMap<u64, Arc<AcqSlot>> =
             std::collections::HashMap::new();
         let mut mappings: Vec<VarSlotMapping> = Vec::new();
@@ -404,7 +349,7 @@ impl MemRW3App {
 
         let slots: Vec<Arc<AcqSlot>> = slot_map.into_values().collect();
         let slot_n = slots.len() as u64;
-        let sc = self.slot_count.clone();
+        let sc = self.session.slot_count.clone();
         self.sync.send_request(move || {
             let p = unsafe { probe.get_mut() };
             p.slots = slots;
@@ -419,7 +364,7 @@ impl MemRW3App {
 
     pub fn unbind_variable(&mut self, var_id: usize) {
         let should_remove = {
-            if let Some(var) = self.session.pool.get_mut(var_id) {
+            if let Some(var) = self.session.config.pool.get_mut(var_id) {
                 var.plugins_cnt = var.plugins_cnt.saturating_sub(1);
                 var.plugins_cnt == 0
             } else {
@@ -427,7 +372,7 @@ impl MemRW3App {
             }
         };
         if should_remove {
-            self.session.pool.remove(var_id);
+            self.session.config.pool.remove(var_id);
             self.session.selected_variables.remove(&var_id);
             self.rebuild_slots();
         }
@@ -436,7 +381,7 @@ impl MemRW3App {
 
 impl Drop for MemRW3App {
     fn drop(&mut self) {
-        self.acq_stop.store(true, Ordering::Relaxed);
+        self.session.acq_stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -538,17 +483,17 @@ impl eframe::App for MemRW3App {
             ui.ctx().request_repaint();
         }
 
-        let cycles = self.acq_cycle_count.load(Ordering::Relaxed);
-        let elapsed = self.hz_last_time.elapsed().as_secs_f64();
+        let cycles = self.session.acq_cycle_count.load(Ordering::Relaxed);
+        let elapsed = self.session.hz_last_time.elapsed().as_secs_f64();
         if elapsed >= 1.0 {
-            self.session.sampling_hz = (cycles - self.hz_last_cycles) as f64 / elapsed;
-            self.hz_last_cycles = cycles;
-            self.hz_last_time = Instant::now();
+            self.session.sampling_hz = (cycles - self.session.hz_last_cycles) as f64 / elapsed;
+            self.session.hz_last_cycles = cycles;
+            self.session.hz_last_time = Instant::now();
         }
 
         let mut frame_data: FrameData = HashMap::new();
         if running {
-            for var in self.session.pool.iter() {
+            for var in self.session.config.pool.iter() {
                 let drained = var.incoming.drain();
                 if !drained.is_empty() {
                     frame_data.insert(var.id, drained);
@@ -581,7 +526,7 @@ impl eframe::App for MemRW3App {
                 let mut viewer = TabViewerCtx {
                     chart_state: &mut self.chart_state,
                     table_state: &mut self.table_state,
-                    pool: &self.session.pool,
+                    pool: &self.session.config.pool,
                     frame_data: &frame_data,
                     running,
                     open_tree: &mut open_tree,
@@ -669,10 +614,10 @@ impl eframe::App for MemRW3App {
                             let target = bottom_sheet_handle(
                                 ui,
                                 &mut self.session.bottom_sheet_drag,
-                                self.session.bottom_sheet_height,
+                                self.session.config.bottom_sheet_height,
                             );
-                            self.session.bottom_sheet_height = target.clamp(window_h * 0.3, window_h * 0.8);
-                            ui.set_height(self.session.bottom_sheet_height);
+                            self.session.config.bottom_sheet_height = target.clamp(window_h * 0.3, window_h * 0.8);
+                            ui.set_height(self.session.config.bottom_sheet_height);
                             egui::Frame::NONE
                                 .inner_margin(egui::Margin {
                                     left: 14,   // 左右给大一点边距，更美观
@@ -685,7 +630,7 @@ impl eframe::App for MemRW3App {
                                         ui.label("ELF 文件:");
                                         ui.add_sized(
                                             [ui.available_width() - 200.0, 20.0],
-                                            egui::TextEdit::singleline(&mut self.elf_path)
+                                            egui::TextEdit::singleline(&mut self.session.config.elf_path)
                                                 .hint_text("输入 firmware.elf 路径..."),
                                         );
                                         if ui.button("浏览").clicked() {
@@ -694,7 +639,7 @@ impl eframe::App for MemRW3App {
                                                 .add_filter("全部", &["*"])
                                                 .pick_file()
                                             {
-                                                self.elf_path = path.display().to_string();
+                                                self.session.config.elf_path = path.display().to_string();
                                             }
                                         }
                                         if ui.button("加载").clicked() { self.load_elf(); }
@@ -729,7 +674,7 @@ impl eframe::App for MemRW3App {
                                             .id_salt("left_tree_scroll")
                                             .auto_shrink([false, false]) 
                                             .show(&mut left_ui, |ui| {
-                                                ui::vari_tree_ui(ui, &mut self.dwarf_app);
+                                                ui::vari_tree_ui(ui, &mut self.dwarf_state);
                                             });
                                         ui.separator();
                                         let (right_rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), rem_h), egui::Sense::hover());
@@ -739,16 +684,16 @@ impl eframe::App for MemRW3App {
                                             .auto_shrink([false, false])
                                             .show(&mut right_ui, |ui| {
                                                 
-                                                let selected = self.dwarf_app.selected_node.clone();
+                                                let selected = self.dwarf_state.selected_node.clone();
                                                 if let Some(ref node) = selected {
                                                     let node_id = node.id;
                                                     let node_size = node.size;
                                                     let node_basic_type = node.basic_type.clone();
-                                                    let default_type = crate::types::basic_type_to_extend(&node_basic_type);
-                                                    let config = self.session.extend_configs.entry(node_id).or_insert_with(|| crate::types::ExtendConfig {
+                                                    let default_type = dwarf::types::basic_type_to_extend(&node_basic_type);
+                                                    let config = self.session.extend_configs.entry(node_id).or_insert_with(|| dwarf::types::ExtendConfig {
                                                         name: String::new(), address: 0, ext_type: default_type, size: node_size, array_index: None, array_count: None,
                                                     });
-                                                    if let Some((count, elem_size)) = self.dwarf_app.parent_array_info(node_id) {
+                                                    if let Some((count, elem_size)) = self.dwarf_state.parent_array_info(node_id) {
                                                         config.array_count = Some(count);
                                                         if node.name.starts_with('[') {
                                                             if let Ok(parsed) = node.name[1..node.name.len()-1].parse::<u64>() {
@@ -761,27 +706,27 @@ impl eframe::App for MemRW3App {
                                                         let idx = config.array_index.unwrap_or(0);
                                                         let new_name = format!("[{}]", idx);
                                                         let new_addr = elem_size * idx;
-                                                        if let Some(tree_node) = self.dwarf_app.find_node_mut(node_id) {
+                                                        if let Some(tree_node) = self.dwarf_state.find_node_mut(node_id) {
                                                             tree_node.name = new_name.clone();
                                                             tree_node.address = new_addr;
                                                         }
-                                                        self.dwarf_app.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
-                                                        config.name = self.dwarf_app.compute_extend_name(node_id);
-                                                        config.address = self.dwarf_app.compute_extend_address(node_id).unwrap_or(0);
+                                                        self.dwarf_state.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
+                                                        config.name = self.dwarf_state.compute_extend_name(node_id);
+                                                        config.address = self.dwarf_state.compute_extend_address(node_id).unwrap_or(0);
                                                     } else {
                                                         if config.name.is_empty() {
-                                                            config.name = self.dwarf_app.compute_extend_name(node_id);
-                                                            config.address = self.dwarf_app.compute_extend_address(node_id).unwrap_or(0);
+                                                            config.name = self.dwarf_state.compute_extend_name(node_id);
+                                                            config.address = self.dwarf_state.compute_extend_address(node_id).unwrap_or(0);
                                                         }
                                                     }
                                                     let already_exists = self
-                                                        .session
+                                                        .session.config
                                                         .pool
                                                         .find_by_name_addr(&config.name, config.address);
                                                     let (var_id, is_new_var) = if let Some(var) = already_exists {
                                                         (var.id, false)
                                                     } else {
-                                                        let id = self.session.pool.add(config);
+                                                        let id = self.session.config.pool.add(config);
                                                         self.session.selected_variables.insert(id);
                                                         (id, true)
                                                     };
@@ -817,7 +762,7 @@ impl eframe::App for MemRW3App {
                                                             if result {
                                                                 self.chart_state.add_legend(
                                                                     var_id,
-                                                                    &self.session.pool,
+                                                                    &self.session.config.pool,
                                                                     std::mem::take(&mut chart_curve_name),
                                                                     chart_color,
                                                                 );
@@ -833,7 +778,7 @@ impl eframe::App for MemRW3App {
                                                             if result {
                                                                 self.table_state.add_entry(
                                                                     var_id,
-                                                                    &self.session.pool,
+                                                                    &self.session.config.pool,
                                                                     std::mem::take(&mut table_display_name),
                                                                 );
                                                             }
@@ -842,11 +787,11 @@ impl eframe::App for MemRW3App {
                                                         None => false,
                                                     };
                                                     if added {
-                                                        if let Some(var) = self.session.pool.get_mut(var_id) {
+                                                        if let Some(var) = self.session.config.pool.get_mut(var_id) {
                                                             var.plugins_cnt += 1;
                                                         }
                                                     } else if is_new_var {
-                                                        self.session.pool.remove(var_id);
+                                                        self.session.config.pool.remove(var_id);
                                                         self.session.selected_variables.remove(&var_id);
                                                     }
                                                     if added && is_new_var {
@@ -855,18 +800,18 @@ impl eframe::App for MemRW3App {
                                                     // Re-sync tree/selected_node after vari_properties_ui
                                                     // (DragValue may have changed array_index)
                                                     {
-                                                        let par = self.dwarf_app.parent_array_info(node_id);
+                                                        let par = self.dwarf_state.parent_array_info(node_id);
                                                         if let Some((_count, elem_size)) = par {
                                                             let cfg = self.session.extend_configs.get(&node_id);
                                                             if let Some(cfg) = cfg {
                                                                 let idx = cfg.array_index.unwrap_or(0);
                                                                 let new_name = format!("[{}]", idx);
                                                                 let new_addr = elem_size * idx;
-                                                                if let Some(tree_node) = self.dwarf_app.find_node_mut(node_id) {
+                                                                if let Some(tree_node) = self.dwarf_state.find_node_mut(node_id) {
                                                                     tree_node.name = new_name.clone();
                                                                     tree_node.address = new_addr;
                                                                 }
-                                                                self.dwarf_app.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
+                                                                self.dwarf_state.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
                                                             }
                                                         }
                                                     }
@@ -947,12 +892,12 @@ impl MemRW3App {
         let Some(path) = path else { return };
 
         let config = SaveConfig {
-            elf_path: self.elf_path.clone(),
-            probe_chip: self.session.probe_chip.clone(),
-            probe_protocol: self.session.probe_protocol.clone(),
-            probe_speed_khz: self.session.probe_speed_khz,
+            elf_path: self.session.config.elf_path.clone(),
+            probe_chip: self.session.config.probe_chip.clone(),
+            probe_protocol: self.session.config.probe_protocol.clone(),
+            probe_speed_khz: self.session.config.probe_speed_khz,
             variables: self
-                .session
+                .session.config
                 .pool
                 .iter()
                 .map(|v| SavedVariable {
@@ -967,7 +912,7 @@ impl MemRW3App {
                 .legends
                 .iter()
                 .map(|l| {
-                    let v = self.session.pool.get(l.variable_id);
+                    let v = self.session.config.pool.get(l.variable_id);
                     SavedChartLegend {
                         variable_name: v.map(|v| v.name.clone()).unwrap_or_default(),
                         variable_address: v.map(|v| v.address).unwrap_or(0),
@@ -983,7 +928,7 @@ impl MemRW3App {
                 .entries
                 .iter()
                 .map(|e| {
-                    let v = self.session.pool.get(e.variable_id);
+                    let v = self.session.config.pool.get(e.variable_id);
                     SavedTableEntry {
                         variable_name: v.map(|v| v.name.clone()).unwrap_or_default(),
                         variable_address: v.map(|v| v.address).unwrap_or(0),
@@ -1017,30 +962,30 @@ impl MemRW3App {
             }
         };
 
-        self.session.probe_chip = config.probe_chip;
-        self.session.probe_protocol = config.probe_protocol;
-        self.session.probe_speed_khz = config.probe_speed_khz;
-        self.elf_path = config.elf_path;
+        self.session.config.probe_chip = config.probe_chip;
+        self.session.config.probe_protocol = config.probe_protocol;
+        self.session.config.probe_speed_khz = config.probe_speed_khz;
+        self.session.config.elf_path = config.elf_path;
 
-        self.session.pool = VariablePool::default();
+        self.session.config.pool = VariablePool::default();
         self.chart_state.legends.clear();
         self.table_state.entries.clear();
 
         for sv in &config.variables {
             let ext_type = match sv.ext_type.as_str() {
-                "U8" => crate::types::ExtendType::U8,
-                "U16" => crate::types::ExtendType::U16,
-                "U32" => crate::types::ExtendType::U32,
-                "U64" => crate::types::ExtendType::U64,
-                "I8" => crate::types::ExtendType::I8,
-                "I16" => crate::types::ExtendType::I16,
-                "I32" => crate::types::ExtendType::I32,
-                "I64" => crate::types::ExtendType::I64,
-                "Float" => crate::types::ExtendType::Float,
-                "Double" => crate::types::ExtendType::Double,
-                _ => crate::types::ExtendType::Other,
+                "U8" => dwarf::types::ExtendType::U8,
+                "U16" => dwarf::types::ExtendType::U16,
+                "U32" => dwarf::types::ExtendType::U32,
+                "U64" => dwarf::types::ExtendType::U64,
+                "I8" => dwarf::types::ExtendType::I8,
+                "I16" => dwarf::types::ExtendType::I16,
+                "I32" => dwarf::types::ExtendType::I32,
+                "I64" => dwarf::types::ExtendType::I64,
+                "Float" => dwarf::types::ExtendType::Float,
+                "Double" => dwarf::types::ExtendType::Double,
+                _ => dwarf::types::ExtendType::Other,
             };
-            let c = crate::types::ExtendConfig {
+            let c = dwarf::types::ExtendConfig {
                 name: sv.name.clone(),
                 address: sv.address,
                 ext_type,
@@ -1048,12 +993,12 @@ impl MemRW3App {
                 array_index: None,
                 array_count: None,
             };
-            self.session.pool.add(&c);
+            self.session.config.pool.add(&c);
         }
 
         for sl in &config.chart_legends {
             let var_id = self
-                .session
+                .session.config
                 .pool
                 .find_by_name_addr(&sl.variable_name, sl.variable_address)
                 .map(|v| v.id);
@@ -1064,12 +1009,12 @@ impl MemRW3App {
                     legend.visible = sl.visible;
                     legend.buffer_size = sl.buffer_size;
                     self.chart_state.legends.push(legend);
-                    if let Some(var) = self.session.pool.get_mut(id) {
+                    if let Some(var) = self.session.config.pool.get_mut(id) {
                         var.plugins_cnt += 1;
                     }
                 }
                 None => {
-                    self.session.pool = VariablePool::default();
+                    self.session.config.pool = VariablePool::default();
                     self.chart_state.legends.clear();
                     self.table_state.entries.clear();
                     self.toasts
@@ -1083,7 +1028,7 @@ impl MemRW3App {
 
         for se in &config.table_entries {
             let var_id = self
-                .session
+                .session.config
                 .pool
                 .find_by_name_addr(&se.variable_name, se.variable_address)
                 .map(|v| v.id);
@@ -1092,12 +1037,12 @@ impl MemRW3App {
                     let mut entry = crate::ui::table_plugin::TableEntry::new(id, se.display_name.clone());
                     entry.display_name = se.display_name.clone();
                     self.table_state.entries.push(entry);
-                    if let Some(var) = self.session.pool.get_mut(id) {
+                    if let Some(var) = self.session.config.pool.get_mut(id) {
                         var.plugins_cnt += 1;
                     }
                 }
                 None => {
-                    self.session.pool = VariablePool::default();
+                    self.session.config.pool = VariablePool::default();
                     self.chart_state.legends.clear();
                     self.table_state.entries.clear();
                     self.toasts

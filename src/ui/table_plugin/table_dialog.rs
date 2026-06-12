@@ -1,5 +1,5 @@
 use eframe::egui::{self, RichText, Ui};
-use crate::types::ExtendType;
+use crate::dwarf::types::ExtendType;
 
 pub struct TableEntry {
     pub variable_id: usize,

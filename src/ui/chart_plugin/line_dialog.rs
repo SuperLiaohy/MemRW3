@@ -1,5 +1,5 @@
 use eframe::egui::{self, Color32, RichText, Ui};
-use crate::types::ExtendType;
+use crate::dwarf::types::ExtendType;
 use super::legend::preset_colors;
 
 pub enum DialogAction {

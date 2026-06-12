@@ -4,9 +4,9 @@ use eframe::egui::{self, Ui};
 use egui_ltreeview::{Action, RowLayout, TreeView, TreeViewState, NodeBuilder};
 
 use egui_ltreeview::TreeViewBuilder;
-use crate::types::{DwarfApp, TreeNode};
+use crate::dwarf::types::{DwarfState, TreeNode};
 
-pub fn vari_tree_ui(ui: &mut Ui, app: &mut DwarfApp) {
+pub fn vari_tree_ui(ui: &mut Ui, app: &mut DwarfState) {
     ui.horizontal(|ui| {
         let text_response = ui.text_edit_singleline(&mut app.search_text);
         if ui.button("Search").clicked()
@@ -48,7 +48,7 @@ pub fn vari_tree_ui(ui: &mut Ui, app: &mut DwarfApp) {
     });
 }
 
-fn show_tree(ui: &mut Ui, app: &mut DwarfApp) {
+fn show_tree(ui: &mut Ui, app: &mut DwarfState) {
     if app.needs_all_reset {
         *app.tree_state.borrow_mut() = TreeViewState::default();
         app.needs_all_reset = false;

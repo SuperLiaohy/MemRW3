@@ -1,6 +1,6 @@
 use eframe::egui::{self, Color32, RichText, Ui};
 use crate::model::VariablePool;
-use crate::types::ExtendType;
+use crate::dwarf::types::ExtendType;
 use super::table_dialog::{TableEntry, table_entry_dialog_ui};
 use std::collections::HashMap;
 
