@@ -47,7 +47,6 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 |-------|------|------|
 | eframe | 0.34 | GUI 框架 (egui + 平台后端) |
 | egui_plot | 0.35 | 时域/频域图表绘制 |
-| egui_dock | 0.19 | Dock 面板 (Chart/Table 分栏) |
 | egui_ltreeview | 0.7 | DWARF 变量树视图 |
 | egui-notify | 0.22 | Toast 通知 |
 | probe-rs | 0.31 | MCU 调试探针连接与采集 |

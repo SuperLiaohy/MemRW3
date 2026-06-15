@@ -1,8 +1,14 @@
+use crate::dwarf;
+use crate::model::{AppSession, DockTab, VariablePool};
+use crate::probe::{AcqSlot, ProbeCell, ProbeSession, VarSlotMapping};
+use crate::sync::Sync;
+use crate::ui;
+use crate::ui::chart_plugin::ChartPluginState;
+use crate::ui::table_plugin::TablePluginState;
 use eframe::egui;
 use egui::{Color32, Ui};
-use egui_dock::{tab_viewer, DockArea, DockState, NodeIndex, TabViewer};
-use object::Object;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -11,25 +17,11 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use crate::dwarf;
-use crate::model::{AppSession, DockTab, VariablePool};
-use crate::probe::{AcqSlot, ProbeCell, ProbeSession, VarSlotMapping};
-use crate::sync::Sync;
-use crate::ui;
-use crate::ui::chart_plugin::ChartPluginState;
-use crate::ui::table_plugin::TablePluginState;
-use std::collections::HashMap;
 
 type FrameData = HashMap<usize, Vec<(f64, [u8; 8])>>;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TabKind {
-    Chart,
-    Table,
-}
-
 pub struct MemRW3App {
-    tree: DockState<TabKind>,
+    dock: DockLayoutState,
     pub session: AppSession,
     pub dwarf_state: dwarf::types::DwarfState,
     pub chart_state: ChartPluginState,
@@ -38,6 +30,25 @@ pub struct MemRW3App {
     sync: Arc<Sync>,
     pub toasts: egui_notify::Toasts,
     _acq_handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone)]
+struct DockLayoutState {
+    chart_popped: bool,
+    table_popped: bool,
+    split_ratio: f32,
+    split_drag_start: Option<(f32, f32)>,
+}
+
+impl Default for DockLayoutState {
+    fn default() -> Self {
+        Self {
+            chart_popped: false,
+            table_popped: false,
+            split_ratio: 0.5,
+            split_drag_start: None,
+        }
+    }
 }
 
 fn acq_thread(
@@ -86,10 +97,6 @@ fn acq_thread(
 
 impl MemRW3App {
     pub fn new(dwarf_state: dwarf::types::DwarfState) -> Self {
-        let mut tree = DockState::new(vec![TabKind::Chart]);
-        tree.main_surface_mut()
-            .split_right(NodeIndex::root(), 0.5, vec![TabKind::Table]);
-
         let mut session = AppSession {
             config: crate::model::Config {
                 bottom_sheet_height: 250.0,
@@ -107,7 +114,6 @@ impl MemRW3App {
 
         let probe = Arc::new(ProbeCell::new(ProbeSession::default()));
         let sync = Arc::new(Sync::new());
-
 
         let acq_probe = probe.clone();
         let acq_sync = sync.clone();
@@ -127,7 +133,7 @@ impl MemRW3App {
         }));
 
         Self {
-            tree,
+            dock: DockLayoutState::default(),
             session,
             dwarf_state,
             chart_state: ChartPluginState::default(),
@@ -385,49 +391,42 @@ impl Drop for MemRW3App {
     }
 }
 
-struct TabViewerCtx<'a> {
-    chart_state: &'a mut ChartPluginState,
-    table_state: &'a mut TablePluginState,
-    pool: &'a VariablePool,
-    frame_data: &'a FrameData,
+fn render_chart_content(
+    ui: &mut Ui,
+    chart_state: &mut ChartPluginState,
+    pool: &VariablePool,
+    frame_data: &FrameData,
     running: bool,
-    open_tree: &'a mut Option<DockTab>,
+    open_tree: &mut Option<DockTab>,
+) {
+    let action = ui::chart_plugin::chart_panel(ui, chart_state, pool, frame_data, running);
+    if action == ui::chart_plugin::PanelAction::OpenTree {
+        *open_tree = Some(DockTab::Chart);
+    }
 }
 
-impl<'a> TabViewer for TabViewerCtx<'a> {
-    type Tab = TabKind;
-    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
-        match tab {
-            TabKind::Chart => "Chart 实时数据".into(),
-            TabKind::Table => "Table 读写数据".into(),
-        }
+fn render_table_content(
+    ui: &mut Ui,
+    table_state: &mut TablePluginState,
+    pool: &VariablePool,
+    frame_data: &FrameData,
+    open_tree: &mut Option<DockTab>,
+) {
+    let action = ui::table_plugin::table_panel(ui, table_state, pool, frame_data);
+    if action == ui::table_plugin::PanelAction::OpenTree {
+        *open_tree = Some(DockTab::Table);
     }
-    fn on_close(&mut self, _tab: &mut Self::Tab) -> tab_viewer::OnCloseResponse {
-        tab_viewer::OnCloseResponse::Ignore
-    }
-    fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
-        match tab {
-            TabKind::Chart => {
-                let a = ui::chart_plugin::chart_panel(
-                    ui,
-                    self.chart_state,
-                    self.pool,
-                    self.frame_data,
-                    self.running,
-                );
-                if a == ui::chart_plugin::PanelAction::OpenTree {
-                    *self.open_tree = Some(DockTab::Chart);
-                }
-            }
-            TabKind::Table => {
-                let a =
-                    ui::table_plugin::table_panel(ui, self.table_state, self.pool, self.frame_data);
-                if a == ui::table_plugin::PanelAction::OpenTree {
-                    *self.open_tree = Some(DockTab::Table);
-                }
-            }
-        }
-    }
+}
+
+fn dock_control_bar(ui: &mut Ui, button: &str) -> bool {
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            clicked = ui.button(button).clicked();
+        });
+    });
+    ui.separator();
+    clicked
 }
 
 fn bottom_sheet_handle(
@@ -501,7 +500,6 @@ impl eframe::App for MemRW3App {
             }
         }
 
-        let total_h = ui.available_height();
         let bs_open = self.session.active_bottom_sheet.is_some();
         let dialog_open = self.table_state.show_entry_dialog;
         let running = self.session.is_running();
@@ -521,21 +519,211 @@ impl eframe::App for MemRW3App {
 
             if bs_open {}
             if dock_h > 0.0 {
-
                 let mut open_tree = self.session.active_bottom_sheet;
-                let mut viewer = TabViewerCtx {
-                    chart_state: &mut self.chart_state,
-                    table_state: &mut self.table_state,
-                    pool: &self.session.config.pool,
-                    frame_data: &frame_data,
-                    running,
-                    open_tree: &mut open_tree,
-                };
-                DockArea::new(&mut self.tree)
-                    .style(egui_dock::Style::from_egui(ui.style()))
-                    .show_close_buttons(false)
-                    .show_leaf_collapse_buttons(false)
-                    .show_inside(ui, &mut viewer);
+                let pool = &self.session.config.pool;
+                let chart_docked = !self.dock.chart_popped;
+                let table_docked = !self.dock.table_popped;
+
+                match (chart_docked, table_docked) {
+                    (true, true) => {
+                        let available = ui.available_size();
+                        let splitter_w = 6.0;
+                        let content_w = (available.x - splitter_w).max(0.0);
+                        let left_w = if content_w >= 320.0 {
+                            (content_w * self.dock.split_ratio).clamp(160.0, content_w - 160.0)
+                        } else {
+                            content_w * self.dock.split_ratio
+                        };
+                        let right_w = if content_w >= 320.0 {
+                            (content_w - left_w).max(160.0)
+                        } else {
+                            content_w - left_w
+                        };
+
+                        let (dock_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+                        let left_rect = egui::Rect::from_min_size(
+                            dock_rect.min,
+                            egui::vec2(left_w, dock_rect.height()),
+                        );
+                        let splitter_rect = egui::Rect::from_min_size(
+                            egui::pos2(left_rect.max.x, dock_rect.min.y),
+                            egui::vec2(splitter_w, dock_rect.height()),
+                        );
+                        let right_rect = egui::Rect::from_min_size(
+                            egui::pos2(splitter_rect.max.x, dock_rect.min.y),
+                            egui::vec2(right_w, dock_rect.height()),
+                        );
+
+                        let mut left_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(left_rect)
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                        );
+                        left_ui.set_clip_rect(left_rect);
+                        egui::Frame::group(ui.style()).show(&mut left_ui, |ui| {
+                            ui.set_height(left_rect.height());
+                            if dock_control_bar(ui, "Pop out") {
+                                self.dock.chart_popped = true;
+                            }
+                            render_chart_content(
+                                ui,
+                                &mut self.chart_state,
+                                pool,
+                                &frame_data,
+                                running,
+                                &mut open_tree,
+                            );
+                        });
+
+                        let splitter_id = ui.make_persistent_id("chart_table_splitter");
+                        let response = ui.interact(splitter_rect, splitter_id, egui::Sense::drag());
+                        if response.hovered() || response.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        }
+                        if response.dragged() && content_w > 0.0 {
+                            if let Some(pointer) = response.interact_pointer_pos() {
+                                let (origin_x, initial_ratio) = self
+                                    .dock
+                                    .split_drag_start
+                                    .unwrap_or((pointer.x, self.dock.split_ratio));
+                                self.dock.split_drag_start = Some((origin_x, initial_ratio));
+                                self.dock.split_ratio =
+                                    (initial_ratio + (pointer.x - origin_x) / content_w)
+                                        .clamp(0.2, 0.8);
+                            }
+                        } else {
+                            self.dock.split_drag_start = None;
+                        }
+                        ui.painter().rect_filled(
+                            splitter_rect.shrink2(egui::vec2(2.0, 0.0)),
+                            egui::CornerRadius::same(2),
+                            ui.visuals().widgets.noninteractive.bg_stroke.color,
+                        );
+
+                        let mut right_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(right_rect)
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                        );
+                        right_ui.set_clip_rect(right_rect);
+                        egui::Frame::group(ui.style()).show(&mut right_ui, |ui| {
+                            ui.set_height(right_rect.height());
+                            if dock_control_bar(ui, "Pop out") {
+                                self.dock.table_popped = true;
+                            }
+                            render_table_content(
+                                ui,
+                                &mut self.table_state,
+                                pool,
+                                &frame_data,
+                                &mut open_tree,
+                            );
+                        });
+                    }
+                    (true, false) => {
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_height(ui.available_height());
+                            if dock_control_bar(ui, "Pop out") {
+                                self.dock.chart_popped = true;
+                            }
+                            render_chart_content(
+                                ui,
+                                &mut self.chart_state,
+                                pool,
+                                &frame_data,
+                                running,
+                                &mut open_tree,
+                            );
+                        });
+                    }
+                    (false, true) => {
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_height(ui.available_height());
+                            if dock_control_bar(ui, "Pop out") {
+                                self.dock.table_popped = true;
+                            }
+                            render_table_content(
+                                ui,
+                                &mut self.table_state,
+                                pool,
+                                &frame_data,
+                                &mut open_tree,
+                            );
+                        });
+                    }
+                    (false, false) => {
+                        ui.centered_and_justified(|ui| {
+                            ui.label("Chart 和 Table 已弹出为独立窗口，可在窗口内点击 Pop in 返回主区域。");
+                        });
+                    }
+                }
+
+                if self.dock.chart_popped {
+                    let keep_popped = ui.ctx().show_viewport_immediate(
+                        egui::ViewportId::from_hash_of("chart_popout_viewport"),
+                        egui::ViewportBuilder::default()
+                            .with_title("Chart 实时数据")
+                            .with_inner_size(egui::vec2(720.0, 420.0))
+                            .with_min_inner_size(egui::vec2(360.0, 240.0))
+                            .with_resizable(true),
+                        |viewport_ui, _class| {
+                            if viewport_ui.ctx().input(|i| i.viewport().close_requested()) {
+                                return false;
+                            }
+                            let mut pop_in = false;
+                            egui::CentralPanel::default().show_inside(viewport_ui, |ui| {
+                                if dock_control_bar(ui, "Pop in") {
+                                    pop_in = true;
+                                }
+                                render_chart_content(
+                                    ui,
+                                    &mut self.chart_state,
+                                    pool,
+                                    &frame_data,
+                                    running,
+                                    &mut open_tree,
+                                );
+                            });
+                            !pop_in
+                        },
+                    );
+                    if !keep_popped {
+                        self.dock.chart_popped = false;
+                    }
+                }
+
+                if self.dock.table_popped {
+                    let keep_popped = ui.ctx().show_viewport_immediate(
+                        egui::ViewportId::from_hash_of("table_popout_viewport"),
+                        egui::ViewportBuilder::default()
+                            .with_title("Table 读写数据")
+                            .with_inner_size(egui::vec2(520.0, 360.0))
+                            .with_min_inner_size(egui::vec2(320.0, 220.0))
+                            .with_resizable(true),
+                        |viewport_ui, _class| {
+                            if viewport_ui.ctx().input(|i| i.viewport().close_requested()) {
+                                return false;
+                            }
+                            let mut pop_in = false;
+                            egui::CentralPanel::default().show_inside(viewport_ui, |ui| {
+                                if dock_control_bar(ui, "Pop in") {
+                                    pop_in = true;
+                                }
+                                render_table_content(
+                                    ui,
+                                    &mut self.table_state,
+                                    pool,
+                                    &frame_data,
+                                    &mut open_tree,
+                                );
+                            });
+                            !pop_in
+                        },
+                    );
+                    if !keep_popped {
+                        self.dock.table_popped = false;
+                    }
+                }
 
                 self.session.active_bottom_sheet = open_tree;
 
@@ -593,7 +781,7 @@ impl eframe::App for MemRW3App {
                             self.session.active_bottom_sheet = None;
                         }
                     });
-             
+
                 egui::Area::new(bs_id)
                     .anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::ZERO)
                     .fixed_pos(egui::pos2(0.0, ui.viewport_rect().bottom()))
@@ -672,7 +860,7 @@ impl eframe::App for MemRW3App {
                                         let mut left_ui = ui.new_child(egui::UiBuilder::new().max_rect(left_rect).layout(egui::Layout::top_down(egui::Align::Min)));
                                         egui::ScrollArea::both()
                                             .id_salt("left_tree_scroll")
-                                            .auto_shrink([false, false]) 
+                                            .auto_shrink([false, false])
                                             .show(&mut left_ui, |ui| {
                                                 ui::vari_tree_ui(ui, &mut self.dwarf_state);
                                             });
@@ -683,7 +871,6 @@ impl eframe::App for MemRW3App {
                                             .id_salt("right_props_scroll")
                                             .auto_shrink([false, false])
                                             .show(&mut right_ui, |ui| {
-                                                
                                                 let selected = self.dwarf_state.selected_node.clone();
                                                 if let Some(ref node) = selected {
                                                     let node_id = node.id;
@@ -897,7 +1084,8 @@ impl MemRW3App {
             probe_protocol: self.session.config.probe_protocol.clone(),
             probe_speed_khz: self.session.config.probe_speed_khz,
             variables: self
-                .session.config
+                .session
+                .config
                 .pool
                 .iter()
                 .map(|v| SavedVariable {
@@ -940,7 +1128,9 @@ impl MemRW3App {
 
         if let Ok(json) = serde_json::to_string_pretty(&config) {
             std::fs::write(&path, json).ok();
-            self.toasts.success("配置已保存").duration(Some(Duration::from_secs(2)));
+            self.toasts
+                .success("配置已保存")
+                .duration(Some(Duration::from_secs(2)));
         }
     }
 
@@ -951,13 +1141,17 @@ impl MemRW3App {
         let Some(path) = path else { return };
 
         let Ok(json) = std::fs::read_to_string(&path) else {
-            self.toasts.error("读取配置文件失败").duration(Some(Duration::from_secs(3)));
+            self.toasts
+                .error("读取配置文件失败")
+                .duration(Some(Duration::from_secs(3)));
             return;
         };
         let config: SaveConfig = match serde_json::from_str(&json) {
             Ok(c) => c,
             Err(e) => {
-                self.toasts.error(format!("解析 JSON 失败: {e}")).duration(Some(Duration::from_secs(5)));
+                self.toasts
+                    .error(format!("解析 JSON 失败: {e}"))
+                    .duration(Some(Duration::from_secs(5)));
                 return;
             }
         };
@@ -998,14 +1192,21 @@ impl MemRW3App {
 
         for sl in &config.chart_legends {
             let var_id = self
-                .session.config
+                .session
+                .config
                 .pool
                 .find_by_name_addr(&sl.variable_name, sl.variable_address)
                 .map(|v| v.id);
             match var_id {
                 Some(id) => {
-                    let mut legend = crate::ui::chart_plugin::ChartLegend::new(id, sl.curve_name.clone());
-                    legend.color = Color32::from_rgba_premultiplied(sl.color[0], sl.color[1], sl.color[2], sl.color[3]);
+                    let mut legend =
+                        crate::ui::chart_plugin::ChartLegend::new(id, sl.curve_name.clone());
+                    legend.color = Color32::from_rgba_premultiplied(
+                        sl.color[0],
+                        sl.color[1],
+                        sl.color[2],
+                        sl.color[3],
+                    );
                     legend.visible = sl.visible;
                     legend.buffer_size = sl.buffer_size;
                     self.chart_state.legends.push(legend);
@@ -1028,13 +1229,15 @@ impl MemRW3App {
 
         for se in &config.table_entries {
             let var_id = self
-                .session.config
+                .session
+                .config
                 .pool
                 .find_by_name_addr(&se.variable_name, se.variable_address)
                 .map(|v| v.id);
             match var_id {
                 Some(id) => {
-                    let mut entry = crate::ui::table_plugin::TableEntry::new(id, se.display_name.clone());
+                    let mut entry =
+                        crate::ui::table_plugin::TableEntry::new(id, se.display_name.clone());
                     entry.display_name = se.display_name.clone();
                     self.table_state.entries.push(entry);
                     if let Some(var) = self.session.config.pool.get_mut(id) {
@@ -1054,25 +1257,35 @@ impl MemRW3App {
             }
         }
 
-        self.toasts.success("配置已加载").duration(Some(Duration::from_secs(2)));
+        self.toasts
+            .success("配置已加载")
+            .duration(Some(Duration::from_secs(2)));
         self.trace_variables();
     }
 }
 
 pub fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    
+
     if let Some((name, data, path)) = load_chinese_font() {
         println!("✅ 使用字体: {}", path);
         fonts.font_data.insert(name.clone(), data);
-        
+
         // 添加为备选字体，不覆盖默认英文字体
-        fonts.families.entry(egui::FontFamily::Proportional).or_default().push(name.clone());
-        fonts.families.entry(egui::FontFamily::Monospace).or_default().push(name);
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .push(name.clone());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .push(name);
     } else {
         println!("⚠️ 未找到中文字体，中文可能无法显示\n💡 Linux: sudo apt install fonts-noto-cjk");
     }
-    
+
     ctx.set_fonts(fonts);
 }
 
@@ -1081,57 +1294,74 @@ fn load_chinese_font() -> Option<(String, Arc<egui::FontData>, String)> {
         .into_iter()
         .find_map(|path| {
             let path = std::path::PathBuf::from(path);
-            path.exists().then(|| {
-                std::fs::read(&path).ok().map(|bytes| {
-                    ("chinese_font".to_owned(), Arc::new(egui::FontData::from_owned(bytes)), path.display().to_string())
+            path.exists()
+                .then(|| {
+                    std::fs::read(&path).ok().map(|bytes| {
+                        (
+                            "chinese_font".to_owned(),
+                            Arc::new(egui::FontData::from_owned(bytes)),
+                            path.display().to_string(),
+                        )
+                    })
                 })
-            }).flatten()
+                .flatten()
         })
         .or_else(scan_font_directories)
 }
 
 fn get_font_paths() -> Vec<String> {
     let mut paths = Vec::new();
-    
+
     #[cfg(target_os = "windows")]
-    paths.extend([
-        r"C:\Windows\Fonts\msyh.ttc",
-        r"C:\Windows\Fonts\msyh.ttf",
-        r"C:\Windows\Fonts\simsun.ttc",
-        r"C:\Windows\Fonts\simhei.ttf",
-    ].map(String::from));
-    
+    paths.extend(
+        [
+            r"C:\Windows\Fonts\msyh.ttc",
+            r"C:\Windows\Fonts\msyh.ttf",
+            r"C:\Windows\Fonts\simsun.ttc",
+            r"C:\Windows\Fonts\simhei.ttf",
+        ]
+        .map(String::from),
+    );
+
     #[cfg(target_os = "macos")]
-    paths.extend([
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/STHeiti Light.ttc",
-        "/Library/Fonts/NotoSansCJK.ttc",
-    ].map(String::from));
-    
+    paths.extend(
+        [
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/Library/Fonts/NotoSansCJK.ttc",
+        ]
+        .map(String::from),
+    );
+
     #[cfg(target_os = "linux")]
     {
-        paths.extend([
-            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-            "/usr/share/fonts/truetype/arphic/uming.ttc",
-        ].map(String::from));
-        
+        paths.extend(
+            [
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+                "/usr/share/fonts/truetype/arphic/uming.ttc",
+            ]
+            .map(String::from),
+        );
+
         if let Ok(home) = std::env::var("HOME") {
             paths.push(format!("{home}/.local/share/fonts/NotoSansCJK-Regular.ttc"));
             paths.push(format!("{home}/.fonts/NotoSansCJK-Regular.ttc"));
         }
     }
-    
+
     paths
 }
 
 #[cfg(target_os = "linux")]
 fn scan_font_directories() -> Option<(String, Arc<egui::FontData>, String)> {
-    const KEYWORDS: &[&str] = &["noto", "cjk", "wqy", "droid", "arphic", "uming", "microhei", "song", "hei"];
+    const KEYWORDS: &[&str] = &[
+        "noto", "cjk", "wqy", "droid", "arphic", "uming", "microhei", "song", "hei",
+    ];
     const VALID_EXTS: &[&str] = &["ttf", "ttc", "otf"];
-    
+
     for dir in ["/usr/share/fonts", "/usr/local/share/fonts"] {
         if let Some(font) = find_font(dir, KEYWORDS, VALID_EXTS) {
             return Some(font);
@@ -1141,12 +1371,18 @@ fn scan_font_directories() -> Option<(String, Arc<egui::FontData>, String)> {
 }
 
 #[cfg(target_os = "linux")]
-fn find_font(dir: &str, keywords: &[&str], valid_exts: &[&str]) -> Option<(String, Arc<egui::FontData>, String)> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return None };
-    
+fn find_font(
+    dir: &str,
+    keywords: &[&str],
+    valid_exts: &[&str],
+) -> Option<(String, Arc<egui::FontData>, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return None;
+    };
+
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        
+
         if path.is_dir() {
             if let Some(found) = find_font(path.to_str()?, keywords, valid_exts) {
                 return Some(found);

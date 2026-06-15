@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量监控工具，是对原 Qt/QML MemRW2 的重构。使用 gimli/object 替代 libdwarf 解析 DWARF 调试信息（支持 DWARF 2/3/4/5），使用 probe-rs 替代 libusb 手动协议解析进行 MCU 数据采集，使用 eframe + egui_dock 替代 Qt QML 实现 UI。
+MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量监控工具，是对原 Qt/QML MemRW2 的重构。使用 gimli/object 替代 libdwarf 解析 DWARF 调试信息（支持 DWARF 2/3/4/5），使用 probe-rs 替代 libusb 手动协议解析进行 MCU 数据采集，使用 eframe + 手写 dock/pop-out 布局替代 Qt QML 实现 UI；Chart/Table 默认停靠在主界面，Pop out 后使用 egui multi-viewport 创建原生操作系统窗口。
 
 ## 整体布局
 
@@ -11,7 +11,7 @@ MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量�
 │ 控制栏 (Control Bar)                                         │
 │ [连接/断开] [开始/暂停] [⚙设置] [延迟] [Reset] [保存] [加载]     Hz: xxx  ● 采集中 │
 ├──────────────────────────────────────────────────────────────┤ ← 模态阻塞: 不可交互
-│ DockArea: [Chart 实时数据 | Table 读写数据]                   │
+│ Dock: [Chart 实时数据 | Table 读写数据] (默认 Pop in, 可弹出 OS 窗口) │
 │ ┌──────────────────────────┬───────────────────────────────┐ │
 │ │                          │                               │ │
 │ │   Chart 图表区            │   Table 表格区                 │ │
@@ -46,7 +46,7 @@ src/
 ├── main.rs                 # 入口: 启动空DwarfApp → eframe
 ├── types.rs                # 数据类型: TreeNode, BasicType, ExtendType, ExtendConfig, CuInfo, DwarfApp, TypeRef
 ├── dwarf.rs                # DWARF 解析 (gimli, 支持 DWARF 2/3/4/5), 跨编译单元类型引用, basic_type 映射
-├── app.rs                  # 主 App + 布局编排 + MemRW3App (控制栏 + DockArea + BottomSheet 模态 + 对话窗锁)
+├── app.rs                  # 主 App + 布局编排 + MemRW3App (控制栏 + 手写 Dock/Pop-out + BottomSheet 模态 + 对话窗锁)
 ├── sync.rs                 # 同步原语: Sync (两阶段握手) - 匹配 MemRW2 的 3-semaphore 模式
 ├── model/
 │   ├── mod.rs
@@ -611,7 +611,6 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 
 ```toml
 eframe = "0.34"           # GUI 框架
-egui_dock = "0.19"        # Dock 面板 (tabbed/horizontal/vertical)
 egui_ltreeview = "0.7.0"  # 树形视图 (DWARF 变量树)
 probe-rs = "0.31"         # MCU 调试 (CMSIS-DAP/ST-Link/J-Link)
 gimli = "0.31"            # DWARF 解析
