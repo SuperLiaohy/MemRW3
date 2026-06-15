@@ -1,6 +1,7 @@
 pub mod chart_plugin;
-pub mod table_plugin;
 mod control_bar;
+pub mod dock;
+pub mod table_plugin;
 mod vari_properties;
 mod vari_tree;
 
