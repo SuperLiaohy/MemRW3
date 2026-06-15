@@ -47,9 +47,9 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
     let mut confirm = false;
 
     if app.session.edit_chip.is_empty() {
-        app.session.edit_chip = app.session.probe_chip.clone();
-        app.session.edit_protocol = app.session.probe_protocol.clone();
-        app.session.edit_speed = app.session.probe_speed_khz;
+        app.session.edit_chip = app.session.config.probe_chip.clone();
+        app.session.edit_protocol = app.session.config.probe_protocol.clone();
+        app.session.edit_speed = app.session.config.probe_speed_khz;
     }
     if app.session.cached_probe_list.is_none() {
          app.session.cached_probe_list = Some(probe_rs::probe::list::Lister::new()
@@ -218,9 +218,9 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
         });
 
     if confirm {
-        app.session.probe_chip = std::mem::take(&mut app.session.edit_chip);
-        app.session.probe_protocol = std::mem::take(&mut app.session.edit_protocol);
-        app.session.probe_speed_khz = app.session.edit_speed;
+        app.session.config.probe_chip = std::mem::take(&mut app.session.edit_chip);
+        app.session.config.probe_protocol = std::mem::take(&mut app.session.edit_protocol);
+        app.session.config.probe_speed_khz = app.session.edit_speed;
         app.session.probe_id = app.session.edit_id.clone();
         app.session.cached_probe_list = None;
     }
@@ -271,9 +271,9 @@ fn run_control(ui: &mut Ui, app: &mut MemRW3App) {
 fn delay_slider(ui: &mut Ui, app: &mut MemRW3App) {
     ui.add_enabled_ui(!app.session.is_running(), |ui| {
         ui.label(RichText::new("延迟:").size(12.0));
-        let mut val = app.delay_us.load(Ordering::Acquire) as f64;
+        let mut val = app.session.config.delay_us.load(Ordering::Acquire) as f64;
         if ui.add(egui::Slider::new(&mut val, 0.0..=10000.0).step_by(50.0).text("μs")).changed() {
-            app.delay_us.store(val as u64, Ordering::Release);
+            app.session.config.delay_us.store(val as u64, Ordering::Release);
         }
     });
 }
@@ -288,8 +288,8 @@ fn reset_button(ui: &mut Ui, app: &mut MemRW3App) {
 
 fn sampling_status(ui: &mut Ui, app: &MemRW3App) {
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
-    let pool_n = app.session.pool.iter().count();
-    let slot_n = app.slot_count.load(Ordering::Relaxed);
+    let pool_n = app.session.config.pool.iter().count();
+    let slot_n = app.session.slot_count.load(Ordering::Relaxed);
     ui.label(
         RichText::new(format!("Vari:{} Slot:{}", pool_n, slot_n))
             .size(12.0)

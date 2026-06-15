@@ -1,7 +1,7 @@
 use super::fft::{compute_fft, FftWindowType};
 use super::legend::ChartLegend;
 use crate::model::VariablePool;
-use crate::types::ExtendType;
+use crate::dwarf::types::ExtendType;
 use eframe::egui::{self, Color32, RichText, Ui};
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints};
 use std::collections::HashMap;
@@ -1181,8 +1181,8 @@ fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2)
     }
 }
 
-fn decode_value_f64(data: &[u8], ext_type: &crate::types::ExtendType) -> f64 {
-    use crate::types::ExtendType::*;
+fn decode_value_f64(data: &[u8], ext_type: &crate::dwarf::types::ExtendType) -> f64 {
+    use crate::dwarf::types::ExtendType::*;
     if data.is_empty() {
         return 0.0;
     }

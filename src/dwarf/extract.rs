@@ -1,4 +1,4 @@
-use crate::types::*;
+use super::types::*;
 use anyhow::{bail, Context, Result};
 use gimli::{
     AttributeValue, DebugInfoOffset, DebuggingInformationEntry, Dwarf, EndianSlice,
@@ -6,24 +6,60 @@ use gimli::{
 };
 use object::{Object, ObjectSection};
 use std::collections::{BTreeSet, HashMap};
+use std::fs;
 
-pub fn load_dwarf<'a>(
+pub fn load_elf(path: &String) -> Result<Vec<CuInfo>,String> {
+    if path.is_empty() {
+        return Err("请输入 ELF 文件路径".into());
+    }
+    let data = match fs::read(path) {
+        Ok(d) => d,
+        Err(e) => {
+            return Err(format!("读取文件失败: {e}"));
+        }
+    };
+    let object = match object::read::File::parse(data.as_slice()) {
+        Ok(o) => o,
+        Err(e) => {
+            return Err(format!("解析 ELF 失败: {e}"));
+        }
+    };
+    if object.format() != object::BinaryFormat::Elf {
+        return Err("不是有效的 ELF 文件".into());
+    }
+    let endian = match object.endianness() {
+        object::Endianness::Little => gimli::RunTimeEndian::Little,
+        object::Endianness::Big => gimli::RunTimeEndian::Big,
+    };
+    let dwarf = match load_dwarf(&object, endian) {
+        Ok(d) => d,
+        Err(e) => {
+            return Err(format!("加载 DWARF 失败: {e}"));
+        }
+    };
+    match collect_cus(&dwarf) {
+        Ok(c) => Ok(c),
+        Err(e) => {
+            return Err(format!("解析 DWARF 数据失败: {e}"));
+        }
+    }
+}
+
+fn load_dwarf<'a>(
     object: &'a object::read::File<'a>,
     endian: RunTimeEndian,
 ) -> Result<Dwarf<EndianSlice<'a, RunTimeEndian>>> {
-    let load_section = |id: SectionId| -> Result<EndianSlice<'a, RunTimeEndian>> {
+    let dwarf = Dwarf::load(|id: SectionId| -> Result<EndianSlice<'a, RunTimeEndian>> {
         let section = object.section_by_name(id.name());
-        let data = if let Some(section) = section {
-            section
+        let data = if let Some(s) = section {
+            s
                 .data()
                 .with_context(|| format!("Failed to read section {}", id.name()))?
         } else {
             &[][..]
         };
         Ok(EndianSlice::new(data, endian))
-    };
-
-    let dwarf = Dwarf::load(&load_section)?;
+    })?;
     let has_sections = [
         SectionId::DebugInfo,
         SectionId::DebugAbbrev,
@@ -46,7 +82,7 @@ pub fn load_dwarf<'a>(
     Ok(dwarf)
 }
 
-pub fn collect_cus(dwarf: &Dwarf<EndianSlice<RunTimeEndian>>) -> Result<Vec<CuInfo>> {
+fn collect_cus(dwarf: &Dwarf<EndianSlice<RunTimeEndian>>) -> Result<Vec<CuInfo>> {
     let mut type_defs: HashMap<String, TypeDefInfo> = HashMap::new();
     let mut units2 = dwarf.units();
     while let Some(header2) = units2.next()? {
@@ -190,17 +226,6 @@ pub fn collect_cus(dwarf: &Dwarf<EndianSlice<RunTimeEndian>>) -> Result<Vec<CuIn
     Ok(cus)
 }
 
-pub fn type_offset_to_unit_offset(
-    _unit: &Unit<EndianSlice<RunTimeEndian>>,
-    value: AttributeValue<EndianSlice<RunTimeEndian>>,
-) -> Result<Option<UnitOffset>> {
-    match value {
-        AttributeValue::UnitRef(offset) => Ok(Some(offset)),
-        AttributeValue::DebugInfoRef(_) => Ok(None),
-        _ => Ok(None),
-    }
-}
-
 fn find_unit_for_debug_info_ref<'a>(
     dwarf: &'a Dwarf<EndianSlice<'a, RunTimeEndian>>,
     di_offset: DebugInfoOffset<usize>,
@@ -253,7 +278,7 @@ fn follow_type_attr_or_resolve(
     }
 }
 
-pub fn build_variable_node(
+fn build_variable_node(
     dwarf: &Dwarf<EndianSlice<RunTimeEndian>>,
     unit: &Unit<EndianSlice<RunTimeEndian>>,
     variable_name: &str,
@@ -269,11 +294,6 @@ pub fn build_variable_node(
         .clone()
         .unwrap_or_else(|| "<unnamed-type>".to_string());
     let size = type_ref.size.unwrap_or(0) as u32;
-    let struct_name = matches!(
-        type_ref.kind,
-        TypeKind::Struct | TypeKind::Union | TypeKind::Class
-    )
-    .then(|| type_name.clone());
     let mut basic_type = type_name_to_basic_type(&type_name, type_ref.size.unwrap_or(0), type_ref.kind);
 
     let mut children = Vec::new();
@@ -316,7 +336,6 @@ pub fn build_variable_node(
         id: my_id,
         parent_id: None,
         name: variable_name.to_string(),
-        struct_name,
         type_name,
         basic_type,
         address,
@@ -325,7 +344,7 @@ pub fn build_variable_node(
     })
 }
 
-pub fn build_field_node(
+fn build_field_node(
     dwarf: &Dwarf<EndianSlice<RunTimeEndian>>,
     unit: &Unit<EndianSlice<RunTimeEndian>>,
     field: &FieldInfo,
@@ -347,11 +366,6 @@ pub fn build_field_node(
         .unwrap_or_else(|| "<unnamed-type>".to_string());
     let address = field.offset;
     let size = field.type_ref.size.unwrap_or(0) as u32;
-    let struct_name = matches!(
-        field.type_ref.kind,
-        TypeKind::Struct | TypeKind::Union | TypeKind::Class
-    )
-    .then(|| type_name.clone());
     let mut basic_type =
         type_name_to_basic_type(&type_name, field.type_ref.size.unwrap_or(0), field.type_ref.kind);
 
@@ -400,7 +414,6 @@ pub fn build_field_node(
         id: my_id,
         parent_id: None,
         name,
-        struct_name,
         type_name,
         basic_type,
         address,
@@ -409,7 +422,7 @@ pub fn build_field_node(
     })
 }
 
-pub fn resolve_type(
+fn resolve_type(
     dwarf: &Dwarf<EndianSlice<RunTimeEndian>>,
     unit: &Unit<EndianSlice<RunTimeEndian>>,
     offset: UnitOffset,
@@ -419,7 +432,7 @@ pub fn resolve_type(
     resolve_type_impl(dwarf, unit, offset, unit_header_offset, None, type_defs)
 }
 
-pub fn resolve_type_impl(
+fn resolve_type_impl(
     dwarf: &Dwarf<EndianSlice<RunTimeEndian>>,
     unit: &Unit<EndianSlice<RunTimeEndian>>,
     offset: UnitOffset,
@@ -770,7 +783,7 @@ pub fn resolve_type_impl(
     }
 }
 
-pub fn attr_value_to_u64(attr: AttributeValue<EndianSlice<RunTimeEndian>>) -> Option<u64> {
+fn attr_value_to_u64(attr: AttributeValue<EndianSlice<RunTimeEndian>>) -> Option<u64> {
     match attr {
         AttributeValue::Udata(v) => Some(v),
         AttributeValue::Data1(v) => Some(v as u64),
@@ -781,7 +794,7 @@ pub fn attr_value_to_u64(attr: AttributeValue<EndianSlice<RunTimeEndian>>) -> Op
     }
 }
 
-pub fn location_address(
+fn location_address(
     dwarf: &Dwarf<EndianSlice<RunTimeEndian>>,
     unit: &Unit<EndianSlice<RunTimeEndian>>,
     entry: &DebuggingInformationEntry<EndianSlice<RunTimeEndian>>,
@@ -824,14 +837,14 @@ pub fn location_address(
     Ok(address)
 }
 
-pub fn is_declaration(entry: &DebuggingInformationEntry<EndianSlice<RunTimeEndian>>) -> Result<bool> {
+fn is_declaration(entry: &DebuggingInformationEntry<EndianSlice<RunTimeEndian>>) -> Result<bool> {
     match entry.attr_value(gimli::DW_AT_declaration)? {
         Some(AttributeValue::Flag(true)) => Ok(true),
         _ => Ok(false),
     }
 }
 
-pub fn struct_fields(
+fn struct_fields(
     dwarf: &Dwarf<EndianSlice<RunTimeEndian>>,
     type_ref: &TypeRef,
     type_defs: &HashMap<String, TypeDefInfo>,
@@ -849,7 +862,7 @@ pub fn struct_fields(
     Ok(Vec::new())
 }
 
-pub fn collect_fields(
+fn collect_fields(
     dwarf: &Dwarf<EndianSlice<RunTimeEndian>>,
     unit: &Unit<EndianSlice<RunTimeEndian>>,
     node: EntriesTreeNode<EndianSlice<RunTimeEndian>>,
@@ -922,7 +935,7 @@ pub fn collect_fields(
     Ok(fields)
 }
 
-pub fn member_offset(
+fn member_offset(
     unit: &Unit<EndianSlice<RunTimeEndian>>,
     entry: &DebuggingInformationEntry<EndianSlice<RunTimeEndian>>,
 ) -> Result<u64> {
@@ -957,7 +970,7 @@ fn parse_data_member_expr<R: gimli::Reader>(
     }
 }
 
-pub fn type_name_to_basic_type(name: &str, size: u64, kind: TypeKind) -> BasicType {
+fn type_name_to_basic_type(name: &str, size: u64, kind: TypeKind) -> BasicType {
     // Pointer types have '*' in their name
     if name.contains('*') || name.contains(" *") {
         return BasicType::Pointer(size as u8);
@@ -1013,12 +1026,12 @@ pub fn type_name_to_basic_type(name: &str, size: u64, kind: TypeKind) -> BasicTy
     }
 }
 
-pub fn attr_to_string(
+fn attr_to_string(
     dwarf: &Dwarf<EndianSlice<RunTimeEndian>>,
     unit: &Unit<EndianSlice<RunTimeEndian>>,
     attr: AttributeValue<EndianSlice<RunTimeEndian>>,
 ) -> Result<Option<String>> {
-    // dwarf.attr_string() handles all DWARF versions: DW_FORM_strp, DW_FORM_strx*, DW_FORM_string
+    // extract.attr_string() handles all DWARF versions: DW_FORM_strp, DW_FORM_strx*, DW_FORM_string
     match dwarf.attr_string(unit, attr) {
         Ok(s) => {
             let cow = s.to_string_lossy();

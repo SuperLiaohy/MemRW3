@@ -72,7 +72,6 @@ pub struct TreeNode {
     pub id: usize,
     pub parent_id: Option<usize>,
     pub name: String,
-    pub struct_name: Option<String>,
     pub type_name: String,
     pub basic_type: BasicType,
     pub address: u64,
@@ -132,7 +131,7 @@ pub struct CuInfo {
 
 pub type VisitedKey = (UnitSectionOffset, UnitOffset);
 
-pub struct DwarfApp {
+pub struct DwarfState {
     pub cus: Vec<CuInfo>,
     pub selected_node: Option<TreeNode>,
     pub tree_state: RefCell<TreeViewState<usize>>,
@@ -154,9 +153,9 @@ pub struct ExtendConfig {
     pub array_count: Option<u64>,
 }
 
-impl DwarfApp {
+impl DwarfState {
     pub fn new(cus: Vec<CuInfo>) -> Self {
-        DwarfApp {
+        DwarfState {
             cus,
             selected_node: None,
             tree_state: RefCell::new(TreeViewState::default()),

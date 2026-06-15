@@ -9,7 +9,6 @@ gimli = "0.31"
 object = { version = "0.36", features = ["read", "elf"] }
 eframe = "0.34"
 egui_ltreeview = "0.7.0"
-egui_dock = "0.19"
 probe-rs = "0.31"
 egui_plot = "0.35.0"
 egui-notify = "0.22"

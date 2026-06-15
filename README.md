@@ -47,7 +47,6 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 |-------|------|------|
 | eframe | 0.34 | GUI 框架 (egui + 平台后端) |
 | egui_plot | 0.35 | 时域/频域图表绘制 |
-| egui_dock | 0.19 | Dock 面板 (Chart/Table 分栏) |
 | egui_ltreeview | 0.7 | DWARF 变量树视图 |
 | egui-notify | 0.22 | Toast 通知 |
 | probe-rs | 0.31 | MCU 调试探针连接与采集 |
@@ -84,7 +83,7 @@ Release 模式下生成的二进制在 `target/release/MemRW3`。
 cargo run --release
 ```
 
-启动后窗口 1280×720，界面分为控制栏（顶部）、Dock 面板（Chart + Table 分栏）。
+启动后窗口 1280×720，界面分为控制栏（顶部）和手写 Dock 区域。Chart 与 Table 默认 Pop in 并左右分栏显示，可通过各自右上角 **Pop out** 弹出为原生操作系统窗口，再通过 **Pop in** 回到主界面。
 
 ### 2. 加载 ELF 文件
 
@@ -143,24 +142,19 @@ cargo run --release
 - 每帧数据追加写入
 - 暂停采集时自动关闭文件
 
-## 快捷键
-
-| 操作 | 快捷键 |
-|------|--------|
-| 打开文件 | `Ctrl+O` |
-| 保存配置 | `Ctrl+S` |
-| 加载配置 | `Ctrl+L` |
-
 ## 项目结构
 
 ```
 src/
 ├── main.rs              # 入口
-├── app.rs               # 主 App + 布局编排
-├── types.rs             # 数据类型 (TreeNode, BasicType, ExtendType, DwarfApp)
-├── dwarf.rs             # DWARF 解析
+├── app.rs               # 主 App + 采集/连接/配置编排
 ├── sync.rs              # 同步原语 (双 Condvar 握手)
+├── dwarf/
+│   ├── mod.rs           # DWARF 模块入口
+│   ├── types.rs         # TreeNode / DwarfState / ExtendConfig / ExtendType
+│   └── extract.rs       # ELF + DWARF 解析
 ├── model/
+│   ├── mod.rs           # Model 模块入口
 │   ├── state.rs         # AppSession
 │   ├── variable_pool.rs # VariablePool (Vec + HashMap)
 │   └── double_buffer.rs # 无锁双缓冲 (SPSC)
@@ -168,7 +162,9 @@ src/
 │   ├── mod.rs           # ProbeCell (UnsafeCell wrapper)
 │   └── session.rs       # ProbeSession (probe-rs 连接/采集)
 └── ui/
+    ├── mod.rs           # UI 模块入口
     ├── control_bar.rs   # 控制栏
+    ├── dock.rs          # 手写 Chart/Table dock + 原生 OS 窗口 pop-out/pop-in
     ├── vari_tree.rs     # DWARF 变量树
     ├── vari_properties.rs # 属性面板
     ├── chart_plugin/

@@ -1,25 +1,28 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use super::VariablePool;
-use crate::types::ExtendConfig;
+use crate::dwarf::types::ExtendConfig;
+
+
 
 pub struct AppSession {
     pub connected: bool,
     pub running: Arc<AtomicBool>,
     pub sampling_hz: f64,
+    pub acq_cycle_count: Arc<AtomicU64>,
+    pub slot_count: Arc<AtomicU64>,
+    pub hz_last_cycles: u64,
+    pub hz_last_time: Instant,
+    pub acq_stop: Arc<AtomicBool>,
     pub active_bottom_sheet: Option<DockTab>,
-    pub bottom_sheet_height: f32,
     pub bottom_sheet_drag: Option<(f32, f32)>,
-    pub pool: VariablePool,
     pub selected_variables: HashSet<usize>,
     pub load_error: Option<String>,
     pub connect_error: Option<String>,
     pub extend_configs: HashMap<usize, ExtendConfig>,
-    pub probe_chip: String,
     pub all_chips: Vec<String>,
-    pub probe_protocol: String,
-    pub probe_speed_khz: u32,
     pub probe_id: Option<String>,
     pub cached_probe_list: Option<Vec<String>>,
     pub show_probe_settings: bool,
@@ -28,6 +31,7 @@ pub struct AppSession {
     pub edit_speed: u32,
     pub edit_id: Option<String>,
     pub timer_was_started: bool,
+    pub config: Config,
 }
 
 impl AppSession {
@@ -46,18 +50,18 @@ impl Default for AppSession {
             connected: false,
             running: Arc::new(AtomicBool::new(false)),
             sampling_hz: 0.0,
+            acq_cycle_count: Arc::new(AtomicU64::new(0)),
+            slot_count: Arc::new(AtomicU64::new(0)),
+            hz_last_cycles: 0,
+            hz_last_time: Instant::now(),
+            acq_stop: Arc::new(AtomicBool::new(false)),
             active_bottom_sheet: None,
-            bottom_sheet_height: 250.0,
             bottom_sheet_drag: None,
-            pool: VariablePool::default(),
             selected_variables: HashSet::new(),
             load_error: None,
             connect_error: None,
             extend_configs: HashMap::new(),
-            probe_chip: "STM32F407VG".into(),
             all_chips: Vec::new(),
-            probe_protocol: "SWD".into(),
-            probe_speed_khz: 10000,
             probe_id: None,
             cached_probe_list: None,
             show_probe_settings: false,
@@ -66,6 +70,30 @@ impl Default for AppSession {
             edit_speed: 10000,
             edit_id: None,
             timer_was_started: false,
+            config: Config::default(),
+        }
+    }
+}
+
+pub struct Config {
+    pub elf_path: String,
+    pub delay_us: Arc<AtomicU64>,
+    pub bottom_sheet_height: f32,
+    pub pool: VariablePool,
+    pub probe_chip: String,
+    pub probe_protocol: String,
+    pub probe_speed_khz: u32
+}
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            delay_us: Arc::new(AtomicU64::new(0)),
+            elf_path: String::new(),
+            bottom_sheet_height: 250.0,
+            pool: VariablePool::default(),
+            probe_chip: "STM32F407VG".into(),
+            probe_protocol: "SWD".into(),
+            probe_speed_khz: 10000,
         }
     }
 }

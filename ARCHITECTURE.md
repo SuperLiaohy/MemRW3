@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量监控工具，是对原 Qt/QML MemRW2 的重构。使用 gimli/object 替代 libdwarf 解析 DWARF 调试信息（支持 DWARF 2/3/4/5），使用 probe-rs 替代 libusb 手动协议解析进行 MCU 数据采集，使用 eframe + egui_dock 替代 Qt QML 实现 UI。
+MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量监控工具，是对原 Qt/QML MemRW2 的重构。使用 gimli/object 替代 libdwarf 解析 DWARF 调试信息（支持 DWARF 2/3/4/5），使用 probe-rs 替代 libusb 手动协议解析进行 MCU 数据采集，使用 eframe + 手写 dock/pop-out 布局替代 Qt QML 实现 UI；Chart/Table 默认停靠在主界面，Pop out 后使用 egui multi-viewport 创建原生操作系统窗口。
 
 ## 整体布局
 
@@ -11,7 +11,7 @@ MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量�
 │ 控制栏 (Control Bar)                                         │
 │ [连接/断开] [开始/暂停] [⚙设置] [延迟] [Reset] [保存] [加载]     Hz: xxx  ● 采集中 │
 ├──────────────────────────────────────────────────────────────┤ ← 模态阻塞: 不可交互
-│ DockArea: [Chart 实时数据 | Table 读写数据]                   │
+│ Dock: [Chart 实时数据 | Table 读写数据] (默认 Pop in, 可弹出 OS 窗口) │
 │ ┌──────────────────────────┬───────────────────────────────┐ │
 │ │                          │                               │ │
 │ │   Chart 图表区            │   Table 表格区                 │ │
@@ -43,11 +43,13 @@ MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量�
 
 ```
 src/
-├── main.rs                 # 入口: 启动空DwarfApp → eframe
-├── types.rs                # 数据类型: TreeNode, BasicType, ExtendType, ExtendConfig, CuInfo, DwarfApp, TypeRef
-├── dwarf.rs                # DWARF 解析 (gimli, 支持 DWARF 2/3/4/5), 跨编译单元类型引用, basic_type 映射
-├── app.rs                  # 主 App + 布局编排 + MemRW3App (控制栏 + DockArea + BottomSheet 模态 + 对话窗锁)
+├── main.rs                 # 入口: 启动空 DwarfState → eframe
+├── app.rs                  # 主 App + MemRW3App (控制栏/采集/连接/配置/BottomSheet 编排)
 ├── sync.rs                 # 同步原语: Sync (两阶段握手) - 匹配 MemRW2 的 3-semaphore 模式
+├── dwarf/
+│   ├── mod.rs              # DWARF 模块入口
+│   ├── types.rs            # TreeNode/BasicType/ExtendType/ExtendConfig/CuInfo/DwarfState/TypeRef
+│   └── extract.rs          # DWARF 解析 (gimli, 支持 DWARF 2/3/4/5), 跨编译单元类型引用, basic_type 映射
 ├── model/
 │   ├── mod.rs
 │   ├── state.rs            # AppSession (连接/采样/BottomSheet/load_error/extend_configs)
@@ -59,6 +61,7 @@ src/
 └── ui/
     ├── mod.rs
     ├── control_bar.rs      # 控制栏 (连接/采集/Probe配置Dialog)
+    ├── dock.rs             # 手写 Chart/Table 分栏 dock + egui multi-viewport 原生窗口 Pop out/in
     ├── chart_plugin/
     │   ├── mod.rs
     │   ├── legend.rs       # ChartLegend (曲线名/颜色/可见/缓冲/data_history)
@@ -94,7 +97,7 @@ TreeNode {
   - 结构体成员/嵌套字段：存储 DWARF `data_member_location` 的**原始 offset**
   - 数组元素 `[]`：初始存储 `0`，通过搜索或属性面板 DragValue 修改为 `elem_size * index`，表示数组内偏移
 - 数组元素采用**惰性求值**：默认只创建 `[0]` 占位节点，用户通过搜索（如 `A[2]`）或在属性面板修改 Index 后，`perform_search` 和 `app.rs` 中的后处理逻辑将节点名和地址更新为正确的 `[idx]` 和偏移量
-- extend 不存储在 TreeNode 中，改为通过 `DwarfApp` 的遍历方法动态计算
+- extend 不存储在 TreeNode 中，改为通过 `DwarfState` 的遍历方法动态计算
 - `compute_extend_name()`: 从根开始逐级拼接变量名得到完整路径，如 `my_struct.arr[2]`
 - `compute_extend_address()`: 从根开始逐级累加 offset 得到实际绝对地址
 - `find_path_to_node()`: 子节点名以 `[` 开头时不加 `.` 号，直接拼接为 `arr[2]` 格式
@@ -169,7 +172,7 @@ pub struct PooledVariable {
 
 ```
 main.rs
-  ├─ MemRW3App::new(DwarfApp::new(Vec::new())) → 启动空 DwarfApp
+  ├─ MemRW3App::new(DwarfState::new(Vec::new())) → 启动空 DwarfState
   └─ eframe::run_native() → 启动 UI (无预加载数据)
 
 用户操作:
@@ -192,7 +195,7 @@ main.rs
                   └─ 数组类型 → 创建 [0] 占位节点，元素类型写入 ArrayElem
 ```
 
-不再通过命令行参数传入 ELF 路径。App 启动时 DwarfApp 为空，用户通过 BottomSheet 顶部文件选择器加载。
+不再通过命令行参数传入 ELF 路径。App 启动时 DwarfState 为空，用户通过 BottomSheet 顶部文件选择器加载。
 
 ### 2. 连接 MCU
 
@@ -211,7 +214,7 @@ ProbeSession.connect()
 ### 3. 浏览变量树
 
 ```
-Dock Tab 中点击 "📋 打开变量树" → BottomSheet 覆盖显示
+Chart/Table dock 面板中点击 "📋 打开变量树" → BottomSheet 覆盖显示
 
 BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭] 按钮退出)
    ├─ 顶部: ELF 文件路径输入框 + [浏览] (rfd 文件选择器, *.elf;*.axf) + [加载] + [追踪] 按钮 + 错误提示
@@ -238,7 +241,7 @@ BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭]
            └─ type = other → 红色提示 "type 为 other，不可添加到 Chart 或 Table"
 
       添加流程:
-        ├─ extend_name 和 extend_address 由 DwarfApp 从 DWARF 树计算得到
+        ├─ extend_name 和 extend_address 由 DwarfState 从 DWARF 树计算得到
         ├─ 用户可在 Extend 段编辑 address/type (size 自动绑定)
         ├─ 编辑结果存入 ExtendConfig (AppSession.extend_configs HashMap)
         ├─ 点 "添加到 Chart/Table" → VariablePool.add(&ExtendConfig)
@@ -501,7 +504,7 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 |------|------|
 | 表格列 | Name / Read / Write (三列) |
 | Name | `entry.display_name`, 双击打开属性 Dialog (含删除) |
-| Read | `frame_data` 最新值 或 `DoubleBuffer.latest()`, 按 `var.ext_type` 格式化: u/i → hex+十进制, float/double → 小数 |
+| Read | 只读本帧统一预 drain 的 `frame_data` 最新值, 按 `var.ext_type` 格式化: u/i → hex+十进制, float/double → 小数 |
 | Write | TextEdit 输入 → `validate_write()` 校验类型范围 → 点"写" → `pending_writes.push((var_id, value))` |
 | 写入流程 | 主循环 drain `pending_writes` → `write_variable(var_id, value)` → `sync.send_request` 暂停采集线程 → `core.write_word_8/16/32/64` → 恢复 |
 | 写入校验 | 按 ExtendType 校验: u8(0-255), i8(-128~127), u16, i16, u32, i32, u64, i64, f32, f64; Other 类型禁止写入 |
@@ -579,10 +582,11 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 
 ### 9. 模态 (Modal) 行为 + Toast 通知
 
-全部模态使用 `egui::Modal` 实现穿透防护。
+属性/设置对话框使用 `egui::Modal` 实现穿透防护；变量树 BottomSheet 使用手写 `egui::Area` 遮罩 + 底部锚定面板实现模态覆盖。
 
 | 覆盖层 | 实现 | 退出方式 |
 |--------|------|----------|
+| 变量树 BottomSheet | `Area("modal_overlay")` 遮罩 + 底部锚定 `Area("bottom_sheet")` | 点击遮罩 / [关闭] |
 | 曲线属性 line_dialog | `Modal::new("line_dialog_modal").show(ctx)` | [确定]/[取消]/[删除] |
 | 变量属性 table_dialog | `Modal::new("table_entry_modal").show(ctx)` | [确定]/[取消]/[删除] |
 | 设置 Dialog | `Modal::new("probe_settings_modal").show(ctx)` | [确定]/[取消] |
@@ -611,7 +615,6 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 
 ```toml
 eframe = "0.34"           # GUI 框架
-egui_dock = "0.19"        # Dock 面板 (tabbed/horizontal/vertical)
 egui_ltreeview = "0.7.0"  # 树形视图 (DWARF 变量树)
 probe-rs = "0.31"         # MCU 调试 (CMSIS-DAP/ST-Link/J-Link)
 gimli = "0.31"            # DWARF 解析
@@ -713,4 +716,4 @@ serde_json = "1"          # JSON
     - `[idx]` 记号自动展开为独立层级，匹配时校验 index 是否在 `[0, count)` 范围内
     - 搜索成功后更新树节点 name/address 并同步 `config.array_index`
 
-17. **BottomSheet**: 使用 `egui::Modal` + 底部锚定 `Area`，固定窗口 70% 高度全宽
+17. **BottomSheet**: 使用手写 `egui::Area` 遮罩 + 底部锚定 `Area`，支持拖拽调整高度、点击遮罩或 [关闭] 退出

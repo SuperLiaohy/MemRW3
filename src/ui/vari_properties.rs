@@ -1,4 +1,4 @@
-use crate::types::{ExtendConfig, ExtendType, TreeNode, extend_type_label};
+use crate::dwarf::types::{ExtendConfig, ExtendType, TreeNode, extend_type_label};
 use eframe::egui::{self, ComboBox, RichText, TextEdit, Ui};
 
 pub fn vari_properties_ui(

@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// # Safety
 /// - `push()` must be called only from the producer (acq_thread)
 /// - `drain()` must be called only from the consumer (main thread)
-/// - `latest()` may be called from the consumer
 /// - Buffers are pre-allocated to avoid frequent reallocation
 pub struct DoubleBuffer<T> {
     bufs: [UnsafeCell<Vec<T>>; 2],
@@ -56,19 +55,5 @@ impl<T> DoubleBuffer<T> {
         let buf = unsafe { &mut *self.bufs[old_idx].get() };
         let cap = buf.capacity().max(64);
         std::mem::replace(buf, Vec::with_capacity(cap))
-    }
-
-    /// Get the most recently pushed item from the active write buffer.
-    /// Called from the consumer for snapshot reads (e.g., Table view).
-    pub fn latest(&self) -> Option<T>
-    where
-        T: Clone,
-    {
-        let idx = self.write_idx.load(Ordering::Acquire);
-        // SAFETY: Only reading the last element of the active write buffer.
-        // This is a snapshot — the producer may concurrently push more items,
-        // but we only read what's already there.
-        let buf = unsafe { &*self.bufs[idx].get() };
-        buf.last().cloned()
     }
 }
