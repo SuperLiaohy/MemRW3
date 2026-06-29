@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use eframe::egui::{self, Ui};
+use eframe::egui::{self, RichText, Ui};
 
 use crate::model::VariablePool;
 use crate::ui::plugin::{FrameData, MemRWPlugin, PluginAction, PluginRenderContext};
@@ -8,16 +8,14 @@ use crate::ui::plugin::{FrameData, MemRWPlugin, PluginAction, PluginRenderContex
 #[derive(Debug, Clone)]
 pub struct DockLayoutState {
     popped: HashMap<String, bool>,
-    split_ratio: f32,
-    split_drag_start: Option<(f32, f32)>,
+    active_plugin: Option<String>,
 }
 
 impl Default for DockLayoutState {
     fn default() -> Self {
         Self {
             popped: HashMap::new(),
-            split_ratio: 0.5,
-            split_drag_start: None,
+            active_plugin: None,
         }
     }
 }
@@ -30,9 +28,29 @@ impl DockLayoutState {
     fn set_popped(&mut self, plugin_id: &str, popped: bool) {
         self.popped.insert(plugin_id.to_owned(), popped);
     }
+
+    fn active_plugin_id(&self) -> Option<&str> {
+        self.active_plugin.as_deref()
+    }
+
+    fn set_active_plugin(&mut self, plugin_id: impl Into<String>) {
+        self.active_plugin = Some(plugin_id.into());
+    }
 }
 
-pub fn show_plugins_dock(
+pub fn show_plugin_activity_bar(
+    ui: &mut Ui,
+    dock: &mut DockLayoutState,
+    plugins: &mut [Box<dyn MemRWPlugin>],
+) {
+    if plugins.is_empty() {
+        return;
+    }
+    ensure_active_plugin(dock, plugins);
+    show_activity_bar(ui, dock, plugins);
+}
+
+pub fn show_active_plugin_content(
     ui: &mut Ui,
     dock: &mut DockLayoutState,
     plugins: &mut [Box<dyn MemRWPlugin>],
@@ -42,51 +60,38 @@ pub fn show_plugins_dock(
 ) -> Vec<PluginAction> {
     let mut actions = Vec::new();
 
-    match plugins.len() {
-        0 => {
-            ui.centered_and_justified(|ui| {
-                ui.label("没有已加载的插件。");
-            });
-        }
-        1 => {
-            let plugin = plugins[0].as_mut();
-            if dock.is_popped(plugin.id()) {
-                show_empty_dock(ui);
-            } else {
-                show_plugin_docked(ui, dock, plugin, pool, frame_data, running, &mut actions);
-            }
-        }
-        _ => {
-            let (left_slice, right_slice) = plugins.split_at_mut(1);
-            let left = left_slice[0].as_mut();
-            let right = right_slice[0].as_mut();
-            let left_docked = !dock.is_popped(left.id());
-            let right_docked = !dock.is_popped(right.id());
-
-            match (left_docked, right_docked) {
-                (true, true) => show_split_dock(
-                    ui,
-                    dock,
-                    left,
-                    right,
-                    pool,
-                    frame_data,
-                    running,
-                    &mut actions,
-                ),
-                (true, false) => {
-                    show_plugin_docked(ui, dock, left, pool, frame_data, running, &mut actions)
-                }
-                (false, true) => {
-                    show_plugin_docked(ui, dock, right, pool, frame_data, running, &mut actions)
-                }
-                (false, false) => show_empty_dock(ui),
-            }
-        }
+    if plugins.is_empty() {
+        ui.centered_and_justified(|ui| {
+            ui.label("没有已加载的插件。");
+        });
+        return actions;
     }
 
-    show_popout_viewports(ui, dock, plugins, pool, frame_data, running, &mut actions);
+    ensure_active_plugin(dock, plugins);
+    let active_id = dock.active_plugin.clone();
+    let Some(active_idx) = active_id
+        .as_deref()
+        .and_then(|id| plugins.iter().position(|plugin| plugin.id() == id))
+    else {
+        show_empty_dock(ui);
+        return actions;
+    };
 
+    let plugin = plugins[active_idx].as_mut();
+    show_plugin_docked(ui, dock, plugin, pool, frame_data, running, &mut actions);
+    actions
+}
+
+pub fn show_plugin_popouts(
+    ui: &mut Ui,
+    dock: &mut DockLayoutState,
+    plugins: &mut [Box<dyn MemRWPlugin>],
+    pool: &VariablePool,
+    frame_data: &FrameData,
+    running: bool,
+) -> Vec<PluginAction> {
+    let mut actions = Vec::new();
+    show_popout_viewports(ui, dock, plugins, pool, frame_data, running, &mut actions);
     actions
 }
 
@@ -96,71 +101,121 @@ fn show_empty_dock(ui: &mut Ui) {
     });
 }
 
-fn show_split_dock(
+fn ensure_active_plugin(dock: &mut DockLayoutState, plugins: &[Box<dyn MemRWPlugin>]) {
+    let active_is_available = dock.active_plugin_id().is_some_and(|active_id| {
+        plugins
+            .iter()
+            .any(|plugin| plugin.id() == active_id && !dock.is_popped(plugin.id()))
+    });
+
+    if active_is_available {
+        return;
+    }
+
+    dock.active_plugin = plugins
+        .iter()
+        .find(|plugin| !dock.is_popped(plugin.id()))
+        .map(|plugin| plugin.id().to_owned());
+}
+
+fn show_activity_bar(ui: &mut Ui, dock: &mut DockLayoutState, plugins: &[Box<dyn MemRWPlugin>]) {
+    egui::Frame::NONE
+        .fill(ui.visuals().extreme_bg_color)
+        .stroke(ui.visuals().window_stroke())
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_height(ui.available_height());
+            ui.add_space(6.0);
+
+            for plugin in plugins {
+                let plugin_id = plugin.id();
+                let is_active = dock.active_plugin_id() == Some(plugin_id);
+                let is_popped = dock.is_popped(plugin_id);
+                let response = activity_button(ui, plugin.as_ref(), is_active, is_popped);
+                let button_rect = response.rect;
+
+                if response.clicked() {
+                    dock.set_popped(plugin_id, false);
+                    dock.set_active_plugin(plugin_id);
+                }
+
+                if is_active {
+                    let indicator = egui::Rect::from_min_size(
+                        button_rect.left_center() - egui::vec2(0.0, 14.0),
+                        egui::vec2(3.0, 28.0),
+                    );
+                    ui.painter().rect_filled(
+                        indicator,
+                        egui::CornerRadius::same(2),
+                        ui.visuals().selection.bg_fill,
+                    );
+                }
+            }
+
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                ui.add_space(6.0);
+            });
+        });
+}
+
+fn activity_button(
     ui: &mut Ui,
-    dock: &mut DockLayoutState,
-    left_plugin: &mut dyn MemRWPlugin,
-    right_plugin: &mut dyn MemRWPlugin,
-    pool: &VariablePool,
-    frame_data: &FrameData,
-    running: bool,
-    actions: &mut Vec<PluginAction>,
-) {
-    let available = ui.available_size();
-    let splitter_w = 6.0;
-    let content_w = (available.x - splitter_w).max(0.0);
-    let left_w = if content_w >= 320.0 {
-        (content_w * dock.split_ratio).clamp(160.0, content_w - 160.0)
+    plugin: &dyn MemRWPlugin,
+    is_active: bool,
+    is_popped: bool,
+) -> egui::Response {
+    let fill = if is_active {
+        ui.visuals().selection.bg_fill
     } else {
-        content_w * dock.split_ratio
+        egui::Color32::TRANSPARENT
     };
-    let right_w = if content_w >= 320.0 {
-        (content_w - left_w).max(160.0)
+    let text_color = if is_popped {
+        ui.visuals().weak_text_color()
     } else {
-        content_w - left_w
+        ui.visuals().text_color()
     };
 
-    let (dock_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
-    let left_rect =
-        egui::Rect::from_min_size(dock_rect.min, egui::vec2(left_w, dock_rect.height()));
-    let splitter_rect = egui::Rect::from_min_size(
-        egui::pos2(left_rect.max.x, dock_rect.min.y),
-        egui::vec2(splitter_w, dock_rect.height()),
-    );
-    let right_rect = egui::Rect::from_min_size(
-        egui::pos2(splitter_rect.max.x, dock_rect.min.y),
-        egui::vec2(right_w, dock_rect.height()),
-    );
+    ui.add_sized(
+        [44.0, 42.0],
+        egui::Button::new(
+            RichText::new(plugin_icon(plugin.id(), plugin.title()))
+                .size(20.0)
+                .color(text_color),
+        )
+        .fill(fill)
+        .frame(is_active),
+    )
+    .on_hover_text(if is_popped {
+        format!("{} 已弹出，点击返回主区域", plugin.title())
+    } else {
+        plugin.title().to_owned()
+    })
+}
 
-    let mut left_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(left_rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    left_ui.set_clip_rect(left_rect);
-    egui::Frame::group(ui.style()).show(&mut left_ui, |ui| {
-        ui.set_height(left_rect.height());
-        if dock_control_bar(ui, "Pop out") {
-            dock.set_popped(left_plugin.id(), true);
+fn plugin_icon(plugin_id: &str, title: &str) -> String {
+    match plugin_id {
+        "chart" => "📈".to_owned(),
+        "table" => "📋".to_owned(),
+        _ => title.chars().next().unwrap_or('□').to_string(),
+    }
+}
+
+fn native_window_title(plugin_id: &str, title: &str) -> String {
+    match plugin_id {
+        "chart" => "Chart".to_owned(),
+        "table" => "Table".to_owned(),
+        _ => {
+            let title = title
+                .chars()
+                .filter(|ch| ch.is_ascii_graphic() || ch.is_ascii_whitespace())
+                .collect::<String>();
+            if title.trim().is_empty() {
+                plugin_id.to_owned()
+            } else {
+                title.trim().to_owned()
+            }
         }
-        render_plugin_content(ui, left_plugin, pool, frame_data, running, actions);
-    });
-
-    show_splitter(ui, dock, splitter_rect, content_w);
-
-    let mut right_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(right_rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    right_ui.set_clip_rect(right_rect);
-    egui::Frame::group(ui.style()).show(&mut right_ui, |ui| {
-        ui.set_height(right_rect.height());
-        if dock_control_bar(ui, "Pop out") {
-            dock.set_popped(right_plugin.id(), true);
-        }
-        render_plugin_content(ui, right_plugin, pool, frame_data, running, actions);
-    });
+    }
 }
 
 fn show_plugin_docked(
@@ -174,40 +229,12 @@ fn show_plugin_docked(
 ) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_height(ui.available_height());
-        if dock_control_bar(ui, "Pop out") {
+        if dock_control_bar(ui, Some(plugin.title()), "Pop out") {
             dock.set_popped(plugin.id(), true);
+            return;
         }
         render_plugin_content(ui, plugin, pool, frame_data, running, actions);
     });
-}
-
-fn show_splitter(
-    ui: &mut Ui,
-    dock: &mut DockLayoutState,
-    splitter_rect: egui::Rect,
-    content_w: f32,
-) {
-    let splitter_id = ui.make_persistent_id("plugin_splitter");
-    let response = ui.interact(splitter_rect, splitter_id, egui::Sense::drag());
-    if response.hovered() || response.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-    }
-    if response.dragged() && content_w > 0.0 {
-        if let Some(pointer) = response.interact_pointer_pos() {
-            let (origin_x, initial_ratio) = dock
-                .split_drag_start
-                .unwrap_or((pointer.x, dock.split_ratio));
-            dock.split_drag_start = Some((origin_x, initial_ratio));
-            dock.split_ratio = (initial_ratio + (pointer.x - origin_x) / content_w).clamp(0.2, 0.8);
-        }
-    } else {
-        dock.split_drag_start = None;
-    }
-    ui.painter().rect_filled(
-        splitter_rect.shrink2(egui::vec2(2.0, 0.0)),
-        egui::CornerRadius::same(2),
-        ui.visuals().widgets.noninteractive.bg_stroke.color,
-    );
 }
 
 fn show_popout_viewports(
@@ -225,7 +252,7 @@ fn show_popout_viewports(
         }
 
         let plugin_id = plugin.id().to_owned();
-        let title = plugin.title().to_owned();
+        let title = native_window_title(plugin.id(), plugin.title());
         let keep_popped = ui.ctx().show_viewport_immediate(
             egui::ViewportId::from_hash_of(format!("{plugin_id}_popout_viewport")),
             egui::ViewportBuilder::default()
@@ -239,7 +266,7 @@ fn show_popout_viewports(
                 }
                 let mut pop_in = false;
                 egui::CentralPanel::default().show_inside(viewport_ui, |ui| {
-                    if dock_control_bar(ui, "Pop in") {
+                    if dock_control_bar(ui, Some(plugin.title()), "Pop in") {
                         pop_in = true;
                     }
                     render_plugin_content(ui, plugin.as_mut(), pool, frame_data, running, actions);
@@ -271,9 +298,12 @@ fn render_plugin_content(
     ));
 }
 
-fn dock_control_bar(ui: &mut Ui, button: &str) -> bool {
+fn dock_control_bar(ui: &mut Ui, title: Option<&str>, button: &str) -> bool {
     let mut clicked = false;
     ui.horizontal(|ui| {
+        if let Some(title) = title {
+            ui.strong(title);
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             clicked = ui.button(button).clicked();
         });

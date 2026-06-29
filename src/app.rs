@@ -502,18 +502,58 @@ impl eframe::App for MemRW3App {
             .stroke(ui.visuals().window_stroke())
             .corner_radius(2)
             .show(ui, |ui| {
-        ui.vertical(|ui| {
-            ui.add_enabled_ui(!bs_open && !dialog_open, |ui| {
-                ui::control_bar(ui, self);
-            });
+                let shell_size = ui.available_size();
+                let activity_w = 52.0;
+                let (shell_rect, _) = ui.allocate_exact_size(shell_size, egui::Sense::hover());
+                let activity_rect = egui::Rect::from_min_size(
+                    shell_rect.min,
+                    egui::vec2(activity_w, shell_rect.height()),
+                );
+                let right_rect = egui::Rect::from_min_size(
+                    egui::pos2(activity_rect.max.x, shell_rect.min.y),
+                    egui::vec2((shell_rect.width() - activity_w).max(0.0), shell_rect.height()),
+                );
 
-            let remaining = ui.available_height();
-            let dock_h = remaining;
+                let mut activity_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(activity_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                activity_ui.set_clip_rect(activity_rect);
+                ui::dock::show_plugin_activity_bar(
+                    &mut activity_ui,
+                    &mut self.dock,
+                    &mut self.plugins,
+                );
 
-            if bs_open {}
-            if dock_h > 0.0 {
+                let mut right_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(right_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                right_ui.set_clip_rect(right_rect);
+                right_ui.vertical(|ui| {
+                    ui.add_enabled_ui(!bs_open && !dialog_open, |ui| {
+                        ui::control_bar(ui, self);
+                    });
+
+                    let dock_h = ui.available_height();
+                    if dock_h > 0.0 {
+                        let pool = &self.session.config.pool;
+                        let actions = ui::dock::show_active_plugin_content(
+                            ui,
+                            &mut self.dock,
+                            &mut self.plugins,
+                            pool,
+                            &frame_data,
+                            running,
+                        );
+                        self.handle_plugin_actions(actions);
+                    }
+                });
+
                 let pool = &self.session.config.pool;
-                let actions = ui::dock::show_plugins_dock(
+                let popout_actions = ui::dock::show_plugin_popouts(
                     ui,
                     &mut self.dock,
                     &mut self.plugins,
@@ -521,8 +561,7 @@ impl eframe::App for MemRW3App {
                     &frame_data,
                     running,
                 );
-                self.handle_plugin_actions(actions);
-            }
+                self.handle_plugin_actions(popout_actions);
 
             if bs_open {
                 let bs_id = egui::Id::new("bottom_sheet");
@@ -735,7 +774,6 @@ impl eframe::App for MemRW3App {
                         });
                     });
             }
-        });
         });
         self.toasts.show(ui.ctx());
     }

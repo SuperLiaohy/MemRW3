@@ -84,7 +84,7 @@ Release 模式下生成的二进制在 `target/release/MemRW3`。
 cargo run --release
 ```
 
-启动后窗口 1280×720，界面分为控制栏（顶部）和手写 Dock 区域。Chart 与 Table 作为内置 `MemRWPlugin` 默认 Pop in 并左右分栏显示，可通过各自右上角 **Pop out** 弹出为原生操作系统窗口，再通过 **Pop in** 回到主界面。
+启动后窗口 1280×720，左侧是从窗口顶部贯穿到底部的 VS Code 风格 Activity Bar，Chart 与 Table 作为内置 `MemRWPlugin` 通过图标切换。控制栏和当前插件内容都位于右侧区域；插件可通过右上角 **Pop out** 弹出为原生操作系统窗口，再通过 **Pop in** 回到主界面。
 
 ### 2. 加载 ELF 文件
 
@@ -165,7 +165,7 @@ src/
 └── ui/
     ├── mod.rs           # UI 模块入口
     ├── control_bar.rs   # 控制栏
-    ├── dock.rs          # 手写插件 dock + 原生 OS 窗口 pop-out/pop-in
+    ├── dock.rs          # VS Code 风格左侧插件栏 + 原生 OS 窗口 pop-out/pop-in
     ├── plugin.rs        # MemRWPlugin trait + 统一 PluginAction/FrameData/配置 payload
     ├── vari_tree.rs     # DWARF 变量树
     ├── vari_properties.rs # 属性面板

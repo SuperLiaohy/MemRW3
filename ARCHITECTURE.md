@@ -2,41 +2,34 @@
 
 ## 项目概述
 
-MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量监控工具，是对原 Qt/QML MemRW2 的重构。使用 gimli/object 替代 libdwarf 解析 DWARF 调试信息（支持 DWARF 2/3/4/5），使用 probe-rs 替代 libusb 手动协议解析进行 MCU 数据采集，使用 eframe + 手写插件 dock/pop-out 布局替代 Qt QML 实现 UI；Chart/Table 作为内置 `MemRWPlugin` 默认停靠在主界面，Pop out 后使用 egui multi-viewport 创建原生操作系统窗口。
+MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量监控工具，是对原 Qt/QML MemRW2 的重构。使用 gimli/object 替代 libdwarf 解析 DWARF 调试信息（支持 DWARF 2/3/4/5），使用 probe-rs 替代 libusb 手动协议解析进行 MCU 数据采集，使用 eframe + VS Code 风格左侧插件栏 + pop-out 布局替代 Qt QML 实现 UI；Chart/Table 作为内置 `MemRWPlugin` 默认停靠在主界面，Pop out 后使用 egui multi-viewport 创建原生操作系统窗口。
 
 ## 整体布局
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ 控制栏 (Control Bar)                                         │
-│ [连接/断开] [开始/暂停] [⚙设置] [延迟] [Reset] [保存] [加载]     Hz: xxx  ● 采集中 │
-├──────────────────────────────────────────────────────────────┤ ← 模态阻塞: 不可交互
-│ Dock: [Chart 实时数据 | Table 读写数据] (默认 Pop in, 可弹出 OS 窗口) │
-│ ┌──────────────────────────┬───────────────────────────────┐ │
-│ │                          │                               │ │
-│ │   Chart 图表区            │   Table 表格区                 │ │
-│ │   [坐标轴+曲线+图例]       │   [Name | Value | Write | ✕]  │ │
-│ │                          │                               │ │
-│ └──────────────────────────┴───────────────────────────────┘ │
-├──────────────────────────────────────────────────────────────┤ ← BottomSheet 覆盖层 (可交互)
-│ [ELF 文件: ________] [浏览] [加载] [追踪]                    │
-│ ──────────────────────────────────────────────────────────    │
-│ 变量列表 (DWARF Tree)                              [关闭]    │
-│ ┌─────────────────────────┬────────────────────────────────┐ │
-│ │ Search: [________]       │ 属性                            │ │
-│ │ [All] [Search]           │ ── Basic (只读, DWARF原始) ──   │ │
-│ │                          │ Name: xxx  Address(offset): xx  │ │
-│ │  Tree View (默认折叠)     │ Size: xx    Type: xxx           │ │
-│ │   ├─ cu_name             │ ── Extend (可编辑) ──           │ │
-│ │   │  ├─ var1             │ Name: [edit]   Address: [hex]   │ │
-│ │   │  └─ struct           │ Size: auto    Type: [u32 ▼]     │ │
-│ │   │     ├─ member1       │ ── Add ──                       │ │
-│ │   │     └─ member2       │ [曲线名/颜色] → [添加到 Chart]  │ │
-│ │   └─ cu_name2            │ 或                             │ │
-│ │                          │ [显示名] → [添加到 Table]       │ │
-│ │                          │ (type=other 时禁止添加)          │ │
-│ └─────────────────────────┴────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────┘
+┌────┬─────────────────────────────────────────────────────────┐
+│ 📈 │ 控制栏 (Control Bar)                                    │
+│ 📋 │ [连接/断开] [开始/暂停] [⚙设置] [延迟] [Reset] [保存] [加载] Hz: xxx │
+│    ├─────────────────────────────────────────────────────────┤ ← 模态阻塞: 右侧不可交互
+│    │ 当前插件内容区 (默认 Pop in, 可弹出 OS 窗口)             │
+│    │ Chart: 坐标轴+曲线+图例 / Table: Name|Value|Write       │
+│    │                                                         │
+│    ├─────────────────────────────────────────────────────────┤ ← BottomSheet 覆盖层 (可交互)
+│    │ [ELF 文件: ________] [浏览] [加载] [追踪]               │
+│    │ ─────────────────────────────────────────────────────   │
+│    │ 变量列表 (DWARF Tree)                         [关闭]    │
+│    │ ┌────────────────────────┬────────────────────────────┐ │
+│    │ │ Search: [________]      │ 属性                       │ │
+│    │ │ [All] [Search]          │ ── Basic (只读, DWARF原始) ─ │ │
+│    │ │                         │ Name: xxx  Address: xx     │ │
+│    │ │ Tree View (默认折叠)     │ Size: xx    Type: xxx      │ │
+│    │ │  ├─ cu_name             │ ── Extend (可编辑) ──      │ │
+│    │ │  │  ├─ var1             │ Name: [edit] Address: [hex]│ │
+│    │ │  │  └─ struct           │ Size: auto Type: [u32 ▼]   │ │
+│    │ │  │     └─ member        │ [添加到 Chart/Table]       │ │
+│    │ │  └─ cu_name2            │ (type=other 时禁止添加)     │ │
+│    │ └────────────────────────┴────────────────────────────┘ │
+└────┴─────────────────────────────────────────────────────────┘
 ```
 
 ## 模块架构
@@ -61,7 +54,7 @@ src/
 └── ui/
     ├── mod.rs
     ├── control_bar.rs      # 控制栏 (连接/采集/Probe配置Dialog)
-    ├── dock.rs             # 手写插件分栏 dock + egui multi-viewport 原生窗口 Pop out/in
+    ├── dock.rs             # VS Code 风格左侧插件栏 + egui multi-viewport 原生窗口 Pop out/in
     ├── plugin.rs           # MemRWPlugin trait + PluginAction/FrameData/插件配置 payload
     ├── chart_plugin/
     │   ├── mod.rs
@@ -149,7 +142,7 @@ pub struct PooledVariable {
 plugins: Vec<Box<dyn MemRWPlugin>>
 ```
 
-内置插件按顺序创建为 Chart、Table。Dock、BottomSheet、变量添加、删除、写入、Toast、配置保存/加载都通过 trait object 统一分发，不再通过 `DockTab` enum 或 Chart/Table 专用分支判断。
+内置插件按顺序创建为 Chart、Table。App shell 左侧 Activity Bar 从窗口顶部贯穿到底部，负责按插件 id 切换当前插件；右侧区域承载控制栏和当前插件内容。Dock、BottomSheet、变量添加、删除、写入、Toast、配置保存/加载都通过 trait object 统一分发，不再通过 `DockTab` enum 或 Chart/Table 专用分支判断。
 
 ```rust
 pub trait MemRWPlugin {
