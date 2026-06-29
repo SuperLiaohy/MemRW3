@@ -8,7 +8,7 @@ use crate::ui::dock::DockLayoutState;
 use crate::ui::plugin::{FrameData, MemRWPlugin, PluginAction, SavedPluginConfig, ToastLevel};
 use crate::ui::table_plugin::TablePluginState;
 use eframe::egui;
-use egui::{Color32, Ui};
+use egui::Ui;
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{
