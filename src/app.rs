@@ -438,14 +438,13 @@ fn bottom_sheet_handle(
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
 
+    let colors = crate::ui::theme::palette(ui);
     let handle_color = if response.dragged() {
         ui.visuals().widgets.active.bg_fill
     } else if response.hovered() {
         ui.visuals().widgets.hovered.bg_fill
-    } else if ui.visuals().dark_mode {
-        egui::Color32::from_gray(120)
     } else {
-        egui::Color32::from_gray(200)
+        colors.border_strong
     };
 
     let capsule = egui::Rect::from_center_size(rect.center(), egui::vec2(40.0, 4.0));
@@ -497,11 +496,8 @@ impl eframe::App for MemRW3App {
         let dialog_open = self.plugins.iter().any(|plugin| plugin.is_dialog_open());
         let running = self.session.is_running();
 
-        egui::Frame::NONE
-            .fill(ui.visuals().panel_fill)
-            .stroke(ui.visuals().window_stroke())
-            .corner_radius(2)
-            .show(ui, |ui| {
+        let colors = ui::theme::palette(ui);
+        egui::Frame::NONE.fill(colors.app_bg).show(ui, |ui| {
                 let shell_size = ui.available_size();
                 let activity_w = 52.0;
                 let (shell_rect, _) = ui.allocate_exact_size(shell_size, egui::Sense::hover());
@@ -574,7 +570,7 @@ impl eframe::App for MemRW3App {
                         ui.painter().rect_filled(
                             ui.ctx().viewport_rect(),
                             0.0,
-                            egui::Color32::from_black_alpha(100),
+                            colors.modal_overlay,
                         );
                         if ui.interact(ui.ctx().viewport_rect(), ui.next_auto_id(), egui::Sense::click()).clicked() {
                             self.session.active_bottom_sheet = None;
@@ -589,8 +585,8 @@ impl eframe::App for MemRW3App {
                     .show(ui.ctx(), |ui| {
                         ui.set_width(window_w);
 
-                        let card_bg = ui.visuals().window_fill();
-                        let card_stroke = ui.visuals().window_stroke();
+                        let card_bg = colors.elevated_bg;
+                        let card_stroke = ui::theme::panel_stroke(ui);
 
                         let target_plugin_id = self.session.active_bottom_sheet.clone();
                         egui::Frame::NONE
@@ -929,6 +925,8 @@ impl MemRW3App {
 }
 
 pub fn setup_fonts(ctx: &egui::Context) {
+    crate::ui::theme::install(ctx);
+
     let mut fonts = egui::FontDefinitions::default();
 
     if let Some((name, data, path)) = load_chinese_font() {

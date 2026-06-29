@@ -56,6 +56,7 @@ src/
     ├── control_bar.rs      # 控制栏 (连接/采集/Probe配置Dialog)
     ├── dock.rs             # VS Code 风格左侧插件栏 + egui multi-viewport 原生窗口 Pop out/in
     ├── plugin.rs           # MemRWPlugin trait + PluginAction/FrameData/插件配置 payload
+    ├── theme.rs            # 统一 palette + egui Visuals/WidgetVisuals 配置
     ├── chart_plugin/
     │   ├── mod.rs
     │   ├── legend.rs       # ChartLegend (曲线名/颜色/可见/缓冲/data_history)

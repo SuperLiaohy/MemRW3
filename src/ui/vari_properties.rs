@@ -1,4 +1,5 @@
 use crate::dwarf::types::{ExtendConfig, ExtendType, TreeNode, extend_type_label};
+use crate::ui::theme;
 use eframe::egui::{self, ComboBox, RichText, TextEdit, Ui};
 
 pub fn vari_properties_ui(
@@ -133,7 +134,7 @@ pub fn vari_properties_ui(
             if config.ext_type == ExtendType::Other {
                 ui.label(
                     RichText::new("type 为 \"other\"，不可添加到 Chart 或 Table")
-                        .color(egui::Color32::from_rgb(200, 80, 80))
+                        .color(theme::danger_text(ui))
                         .size(12.0),
                 );
             } else {

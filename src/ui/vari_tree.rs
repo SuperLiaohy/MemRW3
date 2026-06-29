@@ -5,6 +5,7 @@ use egui_ltreeview::{Action, RowLayout, TreeView, TreeViewState, NodeBuilder};
 
 use egui_ltreeview::TreeViewBuilder;
 use crate::dwarf::types::{DwarfState, TreeNode};
+use crate::ui::theme;
 
 pub fn vari_tree_ui(ui: &mut Ui, app: &mut DwarfState) {
     ui.horizontal(|ui| {
@@ -60,6 +61,7 @@ fn show_tree(ui: &mut Ui, app: &mut DwarfState) {
         None
     };
 
+    let highlight_bg = theme::palette(ui).accent_weak;
     let (_response, actions) = TreeView::new(ui.make_persistent_id("dwarf_tree"))
         .row_layout(RowLayout::Compact)
         .show_state(ui, &mut *app.tree_state.borrow_mut(), |builder| {
@@ -70,7 +72,7 @@ fn show_tree(ui: &mut Ui, app: &mut DwarfState) {
                 builder.node(NodeBuilder::dir(cu.dir_id)
                     .label_ui(move |ui| { ui.add(egui::Label::new(cu_name.clone()).selectable(false)); })
                     .default_open(false));
-                for var in &cu.variables { build_node_recursive(builder, var, highlight); }
+                for var in &cu.variables { build_node_recursive(builder, var, highlight, highlight_bg); }
                 builder.close_dir();
             }
         });
@@ -86,10 +88,11 @@ fn build_node_recursive(
     builder: &mut TreeViewBuilder<usize>,
     node: &TreeNode,
     highlight_ids: Option<&HashSet<usize>>,
+    highlight_bg: egui::Color32,
 ) {
     let label: egui::WidgetText = if highlight_ids.map_or(false, |h| h.contains(&node.id)) {
         egui::RichText::new(&node.name)
-            .background_color(egui::Color32::from_rgb(80, 80, 160))
+            .background_color(highlight_bg)
             .into()
     } else {
         egui::RichText::new(&node.name).into()
@@ -102,7 +105,7 @@ fn build_node_recursive(
             .label_ui(move |ui| { ui.add(egui::Label::new(label.clone()).selectable(false)); })
             .default_open(false));
         for child in &node.children {
-            build_node_recursive(builder, child, highlight_ids);
+            build_node_recursive(builder, child, highlight_ids, highlight_bg);
         }
         builder.close_dir();
     }

@@ -1,11 +1,13 @@
-use eframe::egui::{self, Color32, RichText, Ui};
-use std::{fmt::format, sync::atomic::Ordering};
 use crate::app::MemRW3App;
+use crate::ui::theme;
+use eframe::egui::{self, RichText, Ui};
+use std::sync::atomic::Ordering;
 
 pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
+    let colors = theme::palette(ui);
     egui::Frame::NONE
-        .fill(bar_background(ui))
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(180, 180, 200)))
+        .fill(colors.surface_bg)
+        .stroke(theme::panel_stroke(ui))
         .corner_radius(3)
         .inner_margin(egui::Margin::symmetric(12, 4))
         .show(ui, |ui| {
@@ -117,9 +119,10 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
                 ui.add_space(4.0);
 
                 // 2. 简化 ScrollArea 布局，不需要手动 allocate rect
-                egui::Frame::none()
-                    .fill(ui.visuals().faint_bg_color) // 给列表加一个浅色背景区分
-                    .rounding(4.0)
+                egui::Frame::NONE
+                    .fill(theme::palette(ui).field_bg)
+                    .stroke(theme::panel_stroke(ui))
+                    .corner_radius(4.0)
                     .inner_margin(4.0)
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical()
@@ -166,9 +169,7 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
                         ui.end_row();
 
                         ui.label("Probe 设备:");
-                        egui::Frame::none()
-                            // .fill(ui.visuals().extreme_bg_color) // 给下拉框加个背景
-                            // .rounding(4.0)
+                        egui::Frame::NONE
                             .inner_margin(2.0)
                             .show(ui, |ui| {
                                 if ui.button("🔄 刷新").clicked() {
@@ -287,25 +288,26 @@ fn reset_button(ui: &mut Ui, app: &mut MemRW3App) {
 }
 
 fn sampling_status(ui: &mut Ui, app: &MemRW3App) {
+    let colors = theme::palette(ui);
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
     let pool_n = app.session.config.pool.iter().count();
     let slot_n = app.session.slot_count.load(Ordering::Relaxed);
     ui.label(
         RichText::new(format!("Vari:{} Slot:{}", pool_n, slot_n))
             .size(12.0)
-            .color(Color32::from_rgb(150, 200, 255)),
+            .color(colors.text_muted),
     );
     ui.separator();
-    ui.label(RichText::new(format!("Hz: {:.1}", app.session.sampling_hz)).size(13.0).color(Color32::from_rgb(80, 160, 255)));
+    ui.label(
+        RichText::new(format!("Hz: {:.1}", app.session.sampling_hz))
+            .size(13.0)
+            .color(colors.accent_hover),
+    );
     ui.separator();
     let (text, color) = if app.session.is_running() {
-        ("● 采集中", Color32::from_rgb(80, 220, 80))
+        ("● 采集中", colors.success)
     } else {
-        ("○ 已暂停", Color32::from_rgb(255, 180, 60))
+        ("○ 已暂停", colors.warning)
     };
     ui.label(RichText::new(text).size(13.0).color(color));
-}
-
-fn bar_background(ui: &Ui) -> Color32 {
-    if ui.visuals().dark_mode { Color32::from_rgb(28, 28, 38) } else { Color32::from_rgb(245, 245, 250) }
 }

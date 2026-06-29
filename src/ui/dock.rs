@@ -4,6 +4,7 @@ use eframe::egui::{self, RichText, Ui};
 
 use crate::model::VariablePool;
 use crate::ui::plugin::{FrameData, MemRWPlugin, PluginAction, PluginRenderContext};
+use crate::ui::theme;
 
 #[derive(Debug, Clone)]
 pub struct DockLayoutState {
@@ -119,9 +120,10 @@ fn ensure_active_plugin(dock: &mut DockLayoutState, plugins: &[Box<dyn MemRWPlug
 }
 
 fn show_activity_bar(ui: &mut Ui, dock: &mut DockLayoutState, plugins: &[Box<dyn MemRWPlugin>]) {
+    let colors = theme::palette(ui);
     egui::Frame::NONE
-        .fill(ui.visuals().extreme_bg_color)
-        .stroke(ui.visuals().window_stroke())
+        .fill(colors.sidebar_bg)
+        .stroke(theme::panel_stroke(ui))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.set_height(ui.available_height());
@@ -147,7 +149,7 @@ fn show_activity_bar(ui: &mut Ui, dock: &mut DockLayoutState, plugins: &[Box<dyn
                     ui.painter().rect_filled(
                         indicator,
                         egui::CornerRadius::same(2),
-                        ui.visuals().selection.bg_fill,
+                        colors.accent,
                     );
                 }
             }
@@ -164,15 +166,18 @@ fn activity_button(
     is_active: bool,
     is_popped: bool,
 ) -> egui::Response {
+    let colors = theme::palette(ui);
     let fill = if is_active {
-        ui.visuals().selection.bg_fill
+        colors.accent_weak
     } else {
         egui::Color32::TRANSPARENT
     };
-    let text_color = if is_popped {
-        ui.visuals().weak_text_color()
+    let text_color = if is_active {
+        colors.accent_hover
+    } else if is_popped {
+        colors.text_muted
     } else {
-        ui.visuals().text_color()
+        colors.text
     };
 
     ui.add_sized(
@@ -227,14 +232,19 @@ fn show_plugin_docked(
     running: bool,
     actions: &mut Vec<PluginAction>,
 ) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
+    let colors = theme::palette(ui);
+    egui::Frame::NONE
+        .fill(colors.panel_bg)
+        .stroke(theme::panel_stroke(ui))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
         ui.set_height(ui.available_height());
         if dock_control_bar(ui, Some(plugin.title()), "Pop out") {
             dock.set_popped(plugin.id(), true);
             return;
         }
         render_plugin_content(ui, plugin, pool, frame_data, running, actions);
-    });
+        });
 }
 
 fn show_popout_viewports(
@@ -299,10 +309,11 @@ fn render_plugin_content(
 }
 
 fn dock_control_bar(ui: &mut Ui, title: Option<&str>, button: &str) -> bool {
+    let colors = theme::palette(ui);
     let mut clicked = false;
     ui.horizontal(|ui| {
         if let Some(title) = title {
-            ui.strong(title);
+            ui.label(RichText::new(title).strong().color(colors.text));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             clicked = ui.button(button).clicked();

@@ -12,6 +12,7 @@
 - **变量读写**: Table 面板支持按 ExtendType 写入（u8~u64, i8~i64, f32, f64），带范围校验
 - **CSV 日志**: 可选择 CSV 文件，开始采集时覆盖写入时间戳 + 所有曲线数据行
 - **插件化界面**: Chart 与 Table 均实现 `MemRWPlugin` trait，Dock、变量树添加、写入、删除、Toast、配置保存/加载统一通过动态插件池分发
+- **统一主题**: App 背景、Activity Bar、控制栏、Dock、BottomSheet、状态提示和 Dialog 语义色来自同一套 `theme` palette
 - **配置保存/加载**: JSON 格式保存 Probe 配置、变量池、插件 payload、ELF 路径；Chart/Table 各自保存图例和表格条目
 - **多探针支持**: CMSIS-DAP / ST-Link / J-Link，SWD / JTAG 协议，可调速度 100-20000 kHz
 - **跨平台**: Linux / macOS / Windows
@@ -167,6 +168,7 @@ src/
     ├── control_bar.rs   # 控制栏
     ├── dock.rs          # VS Code 风格左侧插件栏 + 原生 OS 窗口 pop-out/pop-in
     ├── plugin.rs        # MemRWPlugin trait + 统一 PluginAction/FrameData/配置 payload
+    ├── theme.rs         # 统一 palette + egui Visuals/WidgetVisuals 配置
     ├── vari_tree.rs     # DWARF 变量树
     ├── vari_properties.rs # 属性面板
     ├── chart_plugin/

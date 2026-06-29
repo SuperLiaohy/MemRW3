@@ -5,6 +5,7 @@ use crate::model::VariablePool;
 use crate::ui::plugin::{
     MemRWPlugin, PluginAction, PluginRenderContext, ToastLevel, temp_text_value,
 };
+use crate::ui::theme;
 use eframe::egui::{self, Color32, RichText, Ui};
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints};
 use serde::{Deserialize, Serialize};
@@ -460,7 +461,7 @@ pub fn chart_panel(
                         ui.label(
                             RichText::new(&state.cursor_txt)
                                 .size(11.0)
-                                .color(Color32::from_rgb(180, 180, 180)),
+                                .color(theme::muted_text(ui)),
                         );
                     }
                 });
@@ -608,7 +609,7 @@ pub fn chart_panel(
                     }
                 }
                 if !state.auto_scroll {
-                    ui.colored_label(Color32::LIGHT_BLUE, "手动查看中");
+                    ui.colored_label(theme::palette(ui).accent_hover, "手动查看中");
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -649,7 +650,7 @@ pub fn chart_panel(
                     ui.label(
                         RichText::new("暂无监控变量")
                             .size(13.0)
-                            .color(Color32::from_rgb(150, 150, 150)),
+                            .color(theme::muted_text(ui)),
                     );
                     ui.add_enabled_ui(!state.logging_active, |ui| {
                         if ui.button("📋 打开变量树").clicked() {
@@ -848,6 +849,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
     }
 
     let mut cursor_labels: Option<(f32, f32, Vec<(String, f64, f64, Color32)>)> = None;
+    let cursor_line = theme::palette(ui).border_strong.linear_multiply(0.8);
 
     Plot::new("chart_plot")
         .height(plot_height)
@@ -895,7 +897,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 state.cursor_txt = format!("t:{} v:{:.3}", fmt_time(t), cursor.y);
                 plot_ui.vline(
                     egui_plot::VLine::new("cursor", t)
-                        .color(Color32::from_rgba_premultiplied(128, 128, 128, 80))
+                        .color(cursor_line)
                         .width(1.0),
                 );
             } else {
@@ -945,7 +947,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             let line = format!("{}: {:.3} @ {}", name, dv, fmt_time(*dt));
             let g = ui
                 .painter()
-                .layout_no_wrap(line, font_id.clone(), Color32::WHITE);
+                .layout_no_wrap(line, font_id.clone(), theme::palette(ui).text);
             max_w = max_w.max(g.size().x);
             total_h += g.size().y + 1.0;
         }
@@ -960,7 +962,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         ui.painter().rect_filled(
             r,
             egui::CornerRadius::same(3),
-            Color32::from_rgba_premultiplied(0, 0, 0, 210),
+            theme::palette(ui).tooltip_bg,
         );
         let mut ty = r.top() + 2.0;
         for (name, dt, dv, color) in cursor_data {
@@ -1005,7 +1007,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             ui.label(
                 RichText::new("FFT: 需要至少 4 个数据点")
                     .size(12.0)
-                    .color(Color32::from_rgb(150, 150, 150)),
+                    .color(theme::muted_text(ui)),
             );
         });
         return;
@@ -1017,7 +1019,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         ui.label(
             RichText::new(format!("📊 FFT | 采样率 ≈ {:.1} Hz", avg_sr))
                 .size(11.0)
-                .color(Color32::from_rgb(180, 180, 180)),
+                .color(theme::muted_text(ui)),
         );
         ui.add_space(8.0);
         egui::ComboBox::from_id_salt("fft_window_cfg")
@@ -1099,6 +1101,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
     }
 
     let mut cursor_labels: Option<(f32, f32, Vec<(String, f64, f64, Color32)>)> = None;
+    let cursor_line = theme::palette(ui).border_strong.linear_multiply(0.8);
 
     Plot::new("fft_plot")
         .height(plot_height)
@@ -1149,7 +1152,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 state.cursor_txt = format!("FFT: {:.1} Hz | {:.3}", freq, cursor.y);
                 plot_ui.vline(
                     egui_plot::VLine::new("fft_cursor", freq)
-                        .color(Color32::from_rgba_premultiplied(128, 128, 128, 80))
+                        .color(cursor_line)
                         .width(1.0),
                 );
             }
@@ -1168,7 +1171,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             let line = format!("{}: {:.1} Hz → {:.3}", name, freq, mag);
             let g = ui
                 .painter()
-                .layout_no_wrap(line, font_id.clone(), Color32::WHITE);
+                .layout_no_wrap(line, font_id.clone(), theme::palette(ui).text);
             max_w = max_w.max(g.size().x);
             total_h += g.size().y + 1.0;
         }
@@ -1183,7 +1186,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         ui.painter().rect_filled(
             r,
             egui::CornerRadius::same(3),
-            Color32::from_rgba_premultiplied(0, 0, 0, 210),
+            theme::palette(ui).tooltip_bg,
         );
         let mut ty = r.top() + 2.0;
         for (name, freq, mag, color) in cursor_data {
@@ -1315,6 +1318,7 @@ fn nearest_mag(freqs: &[f64], mags: &[f64], target: f64) -> f64 {
 }
 
 fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2) {
+    let colors = theme::palette(ui);
     let mut toggle = None;
     let mut edit = None;
     let mut y = anchor.y + 4.0;
@@ -1322,9 +1326,9 @@ fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2)
     for (i, legend) in state.legends.iter().enumerate() {
         let op = if legend.visible { 1.0 } else { 0.35 };
         let tc = if legend.visible {
-            Color32::WHITE
+            colors.text
         } else {
-            Color32::from_gray(100)
+            colors.text_muted
         };
         let text = legend.curve_name.clone();
         let g = ui
@@ -1335,9 +1339,9 @@ fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2)
         let r = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
         let resp = ui.interact(r, egui::Id::new(("chart_legend", i)), egui::Sense::click());
         let bg = if resp.hovered() {
-            Color32::from_rgba_premultiplied(40, 40, 50, 200)
+            colors.elevated_bg
         } else {
-            Color32::from_rgba_premultiplied(20, 20, 30, 180)
+            colors.tooltip_bg
         };
         ui.painter().rect_filled(r, egui::CornerRadius::same(3), bg);
         let bar = egui::Rect::from_min_size(

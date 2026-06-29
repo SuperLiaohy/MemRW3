@@ -4,7 +4,8 @@ use crate::model::VariablePool;
 use crate::ui::plugin::{
     MemRWPlugin, PluginAction, PluginRenderContext, ToastLevel, temp_text_value,
 };
-use eframe::egui::{self, Color32, RichText, Ui};
+use crate::ui::theme;
+use eframe::egui::{self, RichText, Ui};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -208,7 +209,7 @@ pub fn table_panel(
                         ui.label(
                             RichText::new("暂无监控变量")
                                 .size(13.0)
-                                .color(Color32::from_rgb(150, 150, 150)),
+                                .color(theme::muted_text(ui)),
                         );
                         if ui.button("📋 打开变量树").clicked() {
                             open_tree = true;
