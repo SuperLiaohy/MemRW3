@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use egui_ltreeview::TreeViewState;
 use gimli::{UnitOffset, UnitSectionOffset};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct TypeRef {
@@ -52,7 +53,7 @@ pub enum BasicType {
     ArrayElem(Box<BasicType>, u64),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExtendType {
     U8,
     U16,

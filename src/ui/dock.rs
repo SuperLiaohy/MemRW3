@@ -2,16 +2,12 @@ use std::collections::HashMap;
 
 use eframe::egui::{self, Ui};
 
-use crate::model::{DockTab, VariablePool};
-use crate::ui::chart_plugin::{self, ChartPluginState};
-use crate::ui::table_plugin::{self, TablePluginState};
-
-pub type FrameData = HashMap<usize, Vec<(f64, [u8; 8])>>;
+use crate::model::VariablePool;
+use crate::ui::plugin::{FrameData, MemRWPlugin, PluginAction, PluginRenderContext};
 
 #[derive(Debug, Clone)]
 pub struct DockLayoutState {
-    chart_popped: bool,
-    table_popped: bool,
+    popped: HashMap<String, bool>,
     split_ratio: f32,
     split_drag_start: Option<(f32, f32)>,
 }
@@ -19,70 +15,96 @@ pub struct DockLayoutState {
 impl Default for DockLayoutState {
     fn default() -> Self {
         Self {
-            chart_popped: false,
-            table_popped: false,
+            popped: HashMap::new(),
             split_ratio: 0.5,
             split_drag_start: None,
         }
     }
 }
 
-pub fn show_chart_table_dock(
+impl DockLayoutState {
+    fn is_popped(&self, plugin_id: &str) -> bool {
+        self.popped.get(plugin_id).copied().unwrap_or(false)
+    }
+
+    fn set_popped(&mut self, plugin_id: &str, popped: bool) {
+        self.popped.insert(plugin_id.to_owned(), popped);
+    }
+}
+
+pub fn show_plugins_dock(
     ui: &mut Ui,
     dock: &mut DockLayoutState,
-    chart_state: &mut ChartPluginState,
-    table_state: &mut TablePluginState,
+    plugins: &mut [Box<dyn MemRWPlugin>],
     pool: &VariablePool,
     frame_data: &FrameData,
     running: bool,
-    open_tree: &mut Option<DockTab>,
-) {
-    let chart_docked = !dock.chart_popped;
-    let table_docked = !dock.table_popped;
+) -> Vec<PluginAction> {
+    let mut actions = Vec::new();
 
-    match (chart_docked, table_docked) {
-        (true, true) => show_split_dock(
-            ui,
-            dock,
-            chart_state,
-            table_state,
-            pool,
-            frame_data,
-            running,
-            open_tree,
-        ),
-        (true, false) => {
-            show_chart_docked(ui, dock, chart_state, pool, frame_data, running, open_tree)
-        }
-        (false, true) => show_table_docked(ui, dock, table_state, pool, frame_data, open_tree),
-        (false, false) => {
+    match plugins.len() {
+        0 => {
             ui.centered_and_justified(|ui| {
-                ui.label("Chart 和 Table 已弹出为独立窗口，可在窗口内点击 Pop in 返回主区域。");
+                ui.label("没有已加载的插件。");
             });
+        }
+        1 => {
+            let plugin = plugins[0].as_mut();
+            if dock.is_popped(plugin.id()) {
+                show_empty_dock(ui);
+            } else {
+                show_plugin_docked(ui, dock, plugin, pool, frame_data, running, &mut actions);
+            }
+        }
+        _ => {
+            let (left_slice, right_slice) = plugins.split_at_mut(1);
+            let left = left_slice[0].as_mut();
+            let right = right_slice[0].as_mut();
+            let left_docked = !dock.is_popped(left.id());
+            let right_docked = !dock.is_popped(right.id());
+
+            match (left_docked, right_docked) {
+                (true, true) => show_split_dock(
+                    ui,
+                    dock,
+                    left,
+                    right,
+                    pool,
+                    frame_data,
+                    running,
+                    &mut actions,
+                ),
+                (true, false) => {
+                    show_plugin_docked(ui, dock, left, pool, frame_data, running, &mut actions)
+                }
+                (false, true) => {
+                    show_plugin_docked(ui, dock, right, pool, frame_data, running, &mut actions)
+                }
+                (false, false) => show_empty_dock(ui),
+            }
         }
     }
 
-    show_popout_viewports(
-        ui,
-        dock,
-        chart_state,
-        table_state,
-        pool,
-        frame_data,
-        running,
-        open_tree,
-    );
+    show_popout_viewports(ui, dock, plugins, pool, frame_data, running, &mut actions);
+
+    actions
+}
+
+fn show_empty_dock(ui: &mut Ui) {
+    ui.centered_and_justified(|ui| {
+        ui.label("所有插件已弹出为独立窗口，可在窗口内点击 Pop in 返回主区域。");
+    });
 }
 
 fn show_split_dock(
     ui: &mut Ui,
     dock: &mut DockLayoutState,
-    chart_state: &mut ChartPluginState,
-    table_state: &mut TablePluginState,
+    left_plugin: &mut dyn MemRWPlugin,
+    right_plugin: &mut dyn MemRWPlugin,
     pool: &VariablePool,
     frame_data: &FrameData,
     running: bool,
-    open_tree: &mut Option<DockTab>,
+    actions: &mut Vec<PluginAction>,
 ) {
     let available = ui.available_size();
     let splitter_w = 6.0;
@@ -119,9 +141,9 @@ fn show_split_dock(
     egui::Frame::group(ui.style()).show(&mut left_ui, |ui| {
         ui.set_height(left_rect.height());
         if dock_control_bar(ui, "Pop out") {
-            dock.chart_popped = true;
+            dock.set_popped(left_plugin.id(), true);
         }
-        render_chart_content(ui, chart_state, pool, frame_data, running, open_tree);
+        render_plugin_content(ui, left_plugin, pool, frame_data, running, actions);
     });
 
     show_splitter(ui, dock, splitter_rect, content_w);
@@ -135,44 +157,27 @@ fn show_split_dock(
     egui::Frame::group(ui.style()).show(&mut right_ui, |ui| {
         ui.set_height(right_rect.height());
         if dock_control_bar(ui, "Pop out") {
-            dock.table_popped = true;
+            dock.set_popped(right_plugin.id(), true);
         }
-        render_table_content(ui, table_state, pool, frame_data, open_tree);
+        render_plugin_content(ui, right_plugin, pool, frame_data, running, actions);
     });
 }
 
-fn show_chart_docked(
+fn show_plugin_docked(
     ui: &mut Ui,
     dock: &mut DockLayoutState,
-    chart_state: &mut ChartPluginState,
+    plugin: &mut dyn MemRWPlugin,
     pool: &VariablePool,
     frame_data: &FrameData,
     running: bool,
-    open_tree: &mut Option<DockTab>,
+    actions: &mut Vec<PluginAction>,
 ) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_height(ui.available_height());
         if dock_control_bar(ui, "Pop out") {
-            dock.chart_popped = true;
+            dock.set_popped(plugin.id(), true);
         }
-        render_chart_content(ui, chart_state, pool, frame_data, running, open_tree);
-    });
-}
-
-fn show_table_docked(
-    ui: &mut Ui,
-    dock: &mut DockLayoutState,
-    table_state: &mut TablePluginState,
-    pool: &VariablePool,
-    frame_data: &FrameData,
-    open_tree: &mut Option<DockTab>,
-) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_height(ui.available_height());
-        if dock_control_bar(ui, "Pop out") {
-            dock.table_popped = true;
-        }
-        render_table_content(ui, table_state, pool, frame_data, open_tree);
+        render_plugin_content(ui, plugin, pool, frame_data, running, actions);
     });
 }
 
@@ -182,7 +187,7 @@ fn show_splitter(
     splitter_rect: egui::Rect,
     content_w: f32,
 ) {
-    let splitter_id = ui.make_persistent_id("chart_table_splitter");
+    let splitter_id = ui.make_persistent_id("plugin_splitter");
     let response = ui.interact(splitter_rect, splitter_id, egui::Sense::drag());
     if response.hovered() || response.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
@@ -208,20 +213,25 @@ fn show_splitter(
 fn show_popout_viewports(
     ui: &mut Ui,
     dock: &mut DockLayoutState,
-    chart_state: &mut ChartPluginState,
-    table_state: &mut TablePluginState,
+    plugins: &mut [Box<dyn MemRWPlugin>],
     pool: &VariablePool,
     frame_data: &FrameData,
     running: bool,
-    open_tree: &mut Option<DockTab>,
+    actions: &mut Vec<PluginAction>,
 ) {
-    if dock.chart_popped {
+    for plugin in plugins.iter_mut() {
+        if !dock.is_popped(plugin.id()) {
+            continue;
+        }
+
+        let plugin_id = plugin.id().to_owned();
+        let title = plugin.title().to_owned();
         let keep_popped = ui.ctx().show_viewport_immediate(
-            egui::ViewportId::from_hash_of("chart_popout_viewport"),
+            egui::ViewportId::from_hash_of(format!("{plugin_id}_popout_viewport")),
             egui::ViewportBuilder::default()
-                .with_title("Chart 实时数据")
-                .with_inner_size(egui::vec2(720.0, 420.0))
-                .with_min_inner_size(egui::vec2(360.0, 240.0))
+                .with_title(title)
+                .with_inner_size(plugin.viewport_size())
+                .with_min_inner_size(plugin.min_viewport_size())
                 .with_resizable(true),
             |viewport_ui, _class| {
                 if viewport_ui.ctx().input(|i| i.viewport().close_requested()) {
@@ -232,69 +242,33 @@ fn show_popout_viewports(
                     if dock_control_bar(ui, "Pop in") {
                         pop_in = true;
                     }
-                    render_chart_content(ui, chart_state, pool, frame_data, running, open_tree);
+                    render_plugin_content(ui, plugin.as_mut(), pool, frame_data, running, actions);
                 });
                 !pop_in
             },
         );
         if !keep_popped {
-            dock.chart_popped = false;
-        }
-    }
-
-    if dock.table_popped {
-        let keep_popped = ui.ctx().show_viewport_immediate(
-            egui::ViewportId::from_hash_of("table_popout_viewport"),
-            egui::ViewportBuilder::default()
-                .with_title("Table 读写数据")
-                .with_inner_size(egui::vec2(520.0, 360.0))
-                .with_min_inner_size(egui::vec2(320.0, 220.0))
-                .with_resizable(true),
-            |viewport_ui, _class| {
-                if viewport_ui.ctx().input(|i| i.viewport().close_requested()) {
-                    return false;
-                }
-                let mut pop_in = false;
-                egui::CentralPanel::default().show_inside(viewport_ui, |ui| {
-                    if dock_control_bar(ui, "Pop in") {
-                        pop_in = true;
-                    }
-                    render_table_content(ui, table_state, pool, frame_data, open_tree);
-                });
-                !pop_in
-            },
-        );
-        if !keep_popped {
-            dock.table_popped = false;
+            dock.set_popped(&plugin_id, false);
         }
     }
 }
 
-fn render_chart_content(
+fn render_plugin_content(
     ui: &mut Ui,
-    chart_state: &mut ChartPluginState,
+    plugin: &mut dyn MemRWPlugin,
     pool: &VariablePool,
     frame_data: &FrameData,
     running: bool,
-    open_tree: &mut Option<DockTab>,
+    actions: &mut Vec<PluginAction>,
 ) {
-    let action = chart_plugin::chart_panel(ui, chart_state, pool, frame_data, running);
-    if action == chart_plugin::PanelAction::OpenTree {
-        *open_tree = Some(DockTab::Chart);
-    }
-}
-
-fn render_table_content(
-    ui: &mut Ui,
-    table_state: &mut TablePluginState,
-    pool: &VariablePool,
-    frame_data: &FrameData,
-    open_tree: &mut Option<DockTab>,
-) {
-    let action = table_plugin::table_panel(ui, table_state, pool, frame_data);
-    if action == table_plugin::PanelAction::OpenTree {
-        *open_tree = Some(DockTab::Table);
-    }
+    actions.extend(plugin.render(
+        ui,
+        PluginRenderContext {
+            pool,
+            frame_data,
+            running,
+        },
+    ));
 }
 
 fn dock_control_bar(ui: &mut Ui, button: &str) -> bool {

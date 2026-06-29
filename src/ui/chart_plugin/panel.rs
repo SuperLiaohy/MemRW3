@@ -1,18 +1,16 @@
-use super::fft::{compute_fft, FftWindowType};
+use super::fft::{FftWindowType, compute_fft};
 use super::legend::ChartLegend;
-use crate::model::VariablePool;
 use crate::dwarf::types::ExtendType;
+use crate::model::VariablePool;
+use crate::ui::plugin::{
+    MemRWPlugin, PluginAction, PluginRenderContext, ToastLevel, temp_text_value,
+};
 use eframe::egui::{self, Color32, RichText, Ui};
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::time::Instant;
-
-#[derive(PartialEq)]
-pub enum PanelAction {
-    None,
-    OpenTree,
-}
 
 #[derive(Clone, PartialEq)]
 pub enum YAxisMode {
@@ -122,10 +120,20 @@ impl Default for ChartPluginState {
 }
 
 impl ChartPluginState {
-    pub fn add_legend(&mut self, variable_id: usize, pool: &VariablePool, curve_name: String, color: Color32) {
+    pub fn add_legend(
+        &mut self,
+        variable_id: usize,
+        pool: &VariablePool,
+        curve_name: String,
+        color: Color32,
+    ) {
         if let Some(var) = pool.get(variable_id) {
             let mut legend = ChartLegend::new(variable_id, var.name.clone());
-            legend.curve_name = if curve_name.is_empty() { var.name.clone() } else { curve_name };
+            legend.curve_name = if curve_name.is_empty() {
+                var.name.clone()
+            } else {
+                curve_name
+            };
             legend.color = color;
             self.legends.push(legend);
         }
@@ -140,8 +148,155 @@ impl ChartPluginState {
             }
         }
     }
-    pub fn legend_ids(&self) -> Vec<usize> {
-        self.legends.iter().map(|l| l.variable_id).collect()
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedChartLegend {
+    variable_name: String,
+    variable_address: u64,
+    curve_name: String,
+    color: [u8; 4],
+    visible: bool,
+    buffer_size: usize,
+}
+
+impl MemRWPlugin for ChartPluginState {
+    fn id(&self) -> &'static str {
+        "chart"
+    }
+
+    fn title(&self) -> &'static str {
+        "Chart 实时数据"
+    }
+
+    fn viewport_size(&self) -> egui::Vec2 {
+        egui::vec2(720.0, 420.0)
+    }
+
+    fn min_viewport_size(&self) -> egui::Vec2 {
+        egui::vec2(360.0, 240.0)
+    }
+
+    fn render(&mut self, ui: &mut Ui, ctx: PluginRenderContext<'_>) -> Vec<PluginAction> {
+        let mut actions = Vec::new();
+        if chart_panel(ui, self, ctx.pool, ctx.frame_data, ctx.running) {
+            actions.push(PluginAction::OpenVariableTree {
+                plugin_id: self.id().to_owned(),
+            });
+        }
+
+        for var_id in self.removed_var_ids.drain(..) {
+            actions.push(PluginAction::RemoveVariable { var_id });
+        }
+        if self.reset_timer {
+            self.reset_timer = false;
+            actions.push(PluginAction::ResetTimer);
+        }
+        if self.log_started {
+            self.log_started = false;
+            actions.push(PluginAction::Toast {
+                level: ToastLevel::Success,
+                message: "Log 开始".to_owned(),
+            });
+        }
+        if self.log_stopped {
+            self.log_stopped = false;
+            actions.push(PluginAction::Toast {
+                level: ToastLevel::Success,
+                message: "Log 停止".to_owned(),
+            });
+        }
+
+        actions
+    }
+
+    fn add_variable_ui(
+        &mut self,
+        ui: &mut Ui,
+        node_id: usize,
+        default_name: &str,
+        variable_id: usize,
+        pool: &VariablePool,
+    ) -> bool {
+        let color_id = ui.make_persistent_id(format!("chart_add_color_{node_id}"));
+        let name_id = ui.make_persistent_id(format!("chart_add_name_{node_id}"));
+        let name_default_id = ui.make_persistent_id(format!("chart_add_name_default_{node_id}"));
+        let mut chart_color =
+            ui.data_mut(|d| *d.get_temp_mut_or(color_id, Color32::from_rgb(66, 133, 244)));
+        let mut curve_name = temp_text_value(ui, name_id, name_default_id, default_name);
+
+        chart_add_config_ui(ui, default_name, &mut curve_name, &mut chart_color);
+        let added = ui.button("添加到 Chart").clicked();
+
+        ui.data_mut(|d| {
+            d.insert_temp(color_id, chart_color);
+            d.insert_temp(name_id, curve_name.clone());
+        });
+
+        if added {
+            self.add_legend(variable_id, pool, curve_name, chart_color);
+        }
+        added
+    }
+
+    fn is_dialog_open(&self) -> bool {
+        self.show_line_dialog
+    }
+
+    fn save_config(&self, pool: &VariablePool) -> serde_json::Value {
+        let legends: Vec<SavedChartLegend> = self
+            .legends
+            .iter()
+            .map(|legend| {
+                let var = pool.get(legend.variable_id);
+                SavedChartLegend {
+                    variable_name: var.map(|v| v.name.clone()).unwrap_or_default(),
+                    variable_address: var.map(|v| v.address).unwrap_or(0),
+                    curve_name: legend.curve_name.clone(),
+                    color: [
+                        legend.color.r(),
+                        legend.color.g(),
+                        legend.color.b(),
+                        legend.color.a(),
+                    ],
+                    visible: legend.visible,
+                    buffer_size: legend.buffer_size,
+                }
+            })
+            .collect();
+        serde_json::to_value(legends).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn load_config(
+        &mut self,
+        payload: &serde_json::Value,
+        pool: &mut VariablePool,
+    ) -> Result<(), String> {
+        let legends: Vec<SavedChartLegend> =
+            serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+
+        self.legends.clear();
+        for saved in legends {
+            let var_id = pool
+                .find_by_name_addr(&saved.variable_name, saved.variable_address)
+                .map(|v| v.id)
+                .ok_or_else(|| format!("图表变量 \"{}\" 匹配失败", saved.variable_name))?;
+
+            let mut legend = ChartLegend::new(var_id, saved.curve_name);
+            legend.color = Color32::from_rgba_premultiplied(
+                saved.color[0],
+                saved.color[1],
+                saved.color[2],
+                saved.color[3],
+            );
+            legend.visible = saved.visible;
+            legend.buffer_size = saved.buffer_size;
+            self.legends.push(legend);
+            if let Some(var) = pool.get_mut(var_id) {
+                var.plugins_cnt += 1;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -196,8 +351,8 @@ pub fn chart_panel(
     pool: &VariablePool,
     frame_data: &HashMap<usize, Vec<(f64, [u8; 8])>>,
     running: bool,
-) -> PanelAction {
-    let mut action = PanelAction::None;
+) -> bool {
+    let mut open_tree = false;
 
     if running {
         if !state.was_running {
@@ -294,12 +449,19 @@ pub fn chart_panel(
                 ui.heading(RichText::new("📈 实时数据图表").size(16.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_enabled_ui(!state.logging_active, |ui| {
-                        if ui.button(RichText::new("📋 打开变量树").size(12.0)).clicked() {
-                            action = PanelAction::OpenTree;
+                        if ui
+                            .button(RichText::new("📋 打开变量树").size(12.0))
+                            .clicked()
+                        {
+                            open_tree = true;
                         }
                     });
                     if !state.cursor_txt.is_empty() {
-                        ui.label(RichText::new(&state.cursor_txt).size(11.0).color(Color32::from_rgb(180, 180, 180)));
+                        ui.label(
+                            RichText::new(&state.cursor_txt)
+                                .size(11.0)
+                                .color(Color32::from_rgb(180, 180, 180)),
+                        );
                     }
                 });
             });
@@ -321,7 +483,11 @@ pub fn chart_panel(
                     state.td_plot_bounds = None;
                 }
                 ui.separator();
-                let fft_label = if state.show_fft { "📊 FFT 关" } else { "📊 FFT" };
+                let fft_label = if state.show_fft {
+                    "📊 FFT 关"
+                } else {
+                    "📊 FFT"
+                };
                 if ui
                     .selectable_label(state.show_fft, RichText::new(fft_label).size(12.0))
                     .clicked()
@@ -347,14 +513,14 @@ pub fn chart_panel(
                     .selected_text(x_mode_label(&state.x_mode))
                     .width(80.0)
                     .show_ui(ui, |ui| {
-                        if ui.selectable_label(state.x_mode == XAxisMode::Auto, "自动").clicked() {
+                        if ui
+                            .selectable_label(state.x_mode == XAxisMode::Auto, "自动")
+                            .clicked()
+                        {
                             state.x_mode = XAxisMode::Auto;
                         }
                         if ui
-                            .selectable_label(
-                                matches!(state.x_mode, XAxisMode::Fixed(_)),
-                                "固定",
-                            )
+                            .selectable_label(matches!(state.x_mode, XAxisMode::Fixed(_)), "固定")
                             .clicked()
                         {
                             let xr = state
@@ -372,7 +538,10 @@ pub fn chart_panel(
                 if let XAxisMode::Fixed(w) = &mut state.x_mode {
                     let mut w_str = format!("{:.3}", *w);
                     if ui
-                        .add_sized([65.0, 20.0], egui::TextEdit::singleline(&mut w_str).hint_text("s"))
+                        .add_sized(
+                            [65.0, 20.0],
+                            egui::TextEdit::singleline(&mut w_str).hint_text("s"),
+                        )
                         .changed()
                     {
                         if let Ok(v) = w_str.parse::<f64>() {
@@ -385,7 +554,10 @@ pub fn chart_panel(
                     .selected_text(y_mode_label(&state.y_mode))
                     .width(80.0)
                     .show_ui(ui, |ui| {
-                        if ui.selectable_label(state.y_mode == YAxisMode::Auto, "自动").clicked() {
+                        if ui
+                            .selectable_label(state.y_mode == YAxisMode::Auto, "自动")
+                            .clicked()
+                        {
                             state.y_mode = YAxisMode::Auto;
                         }
                         if ui
@@ -406,7 +578,10 @@ pub fn chart_panel(
                                 max: hi + range * 0.1,
                             };
                         }
-                        if ui.selectable_label(state.y_mode == YAxisMode::None, "无").clicked() {
+                        if ui
+                            .selectable_label(state.y_mode == YAxisMode::None, "无")
+                            .clicked()
+                        {
                             state.y_mode = YAxisMode::None;
                         }
                     });
@@ -455,7 +630,12 @@ pub fn chart_panel(
                         }
                     });
                     if let Some(ref p) = state.log_file {
-                        ui.label(p.file_name().unwrap_or_default().to_string_lossy().to_string());
+                        ui.label(
+                            p.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string(),
+                        );
                     } else {
                         ui.label("不 log");
                     }
@@ -472,7 +652,9 @@ pub fn chart_panel(
                             .color(Color32::from_rgb(150, 150, 150)),
                     );
                     ui.add_enabled_ui(!state.logging_active, |ui| {
-                        if ui.button("📋 打开变量树").clicked() { action = PanelAction::OpenTree; }
+                        if ui.button("📋 打开变量树").clicked() {
+                            open_tree = true;
+                        }
                     });
                 });
             } else if state.show_fft {
@@ -521,28 +703,31 @@ pub fn chart_panel(
                 egui::Modal::new(egui::Id::new("line_dialog_modal")).show(ui.ctx(), |ui| {
                     ui.set_width(320.0);
                     egui::Frame::NONE
-                    .inner_margin(egui::Margin {
-                        left: 20,
-                        right: 20,
-                        top: 16,
-                        bottom: 16,
-                    })
-                    .show(ui, |ui| {
-                        ui.heading(format!("曲线属性 - {}", win_title));
-                        ui.separator();
-                        let (ext_name, ext_addr, ext_type, ext_size) =
-                            ext_info.unwrap_or((String::new(), 0, ExtendType::U32, 0));
-                        action = super::line_dialog::line_dialog_ui(
-                            ui,
-                            &mut state.edit_curve_name,
-                            &mut state.edit_color,
-                            &mut state.edit_buffer_size,
-                            &mut state.edit_visible,
-                            &ext_name, ext_addr, &ext_type, ext_size,
-                            running,
-                            state.logging_active,
-                        );
-                    });
+                        .inner_margin(egui::Margin {
+                            left: 20,
+                            right: 20,
+                            top: 16,
+                            bottom: 16,
+                        })
+                        .show(ui, |ui| {
+                            ui.heading(format!("曲线属性 - {}", win_title));
+                            ui.separator();
+                            let (ext_name, ext_addr, ext_type, ext_size) =
+                                ext_info.unwrap_or((String::new(), 0, ExtendType::U32, 0));
+                            action = super::line_dialog::line_dialog_ui(
+                                ui,
+                                &mut state.edit_curve_name,
+                                &mut state.edit_color,
+                                &mut state.edit_buffer_size,
+                                &mut state.edit_visible,
+                                &ext_name,
+                                ext_addr,
+                                &ext_type,
+                                ext_size,
+                                running,
+                                state.logging_active,
+                            );
+                        });
                 });
                 if let Some(act) = action {
                     match act {
@@ -557,7 +742,9 @@ pub fn chart_panel(
                             legend.visible = state.edit_visible;
                             if legend.buffer_size != state.edit_buffer_size {
                                 legend.buffer_size = state.edit_buffer_size;
-                                legend.data_history = std::collections::VecDeque::with_capacity(state.edit_buffer_size);
+                                legend.data_history = std::collections::VecDeque::with_capacity(
+                                    state.edit_buffer_size,
+                                );
                             }
                         }
                     }
@@ -568,7 +755,7 @@ pub fn chart_panel(
             }
         }
     });
-    action
+    open_tree
 }
 
 fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
@@ -600,10 +787,9 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                         .legends
                         .iter()
                         .flat_map(|l| l.data_history.iter().map(|p| p.1))
-                        .fold(
-                            (f64::INFINITY, f64::NEG_INFINITY),
-                            |(lo, hi), y| (lo.min(y), hi.max(y)),
-                        );
+                        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
+                            (lo.min(y), hi.max(y))
+                        });
                     let y_pad = (g_max - g_min).max(10.0) * 0.1;
                     (g_min - y_pad, g_max + y_pad)
                 }
@@ -613,10 +799,9 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                         .legends
                         .iter()
                         .flat_map(|l| l.data_history.iter().map(|p| p.1))
-                        .fold(
-                            (f64::INFINITY, f64::NEG_INFINITY),
-                            |(lo, hi), y| (lo.min(y), hi.max(y)),
-                        );
+                        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
+                            (lo.min(y), hi.max(y))
+                        });
                     let y_pad = (g_max - g_min).max(10.0) * 0.1;
                     (g_min - y_pad, g_max + y_pad)
                 }
@@ -647,7 +832,12 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         state.auto_scroll = false;
         let factor = if td_scroll.y > 0.0 { 1.0 / 1.15 } else { 1.15 };
         let current = state.td_plot_bounds;
-        state.td_plot_bounds = Some(compute_td_scroll_zoom(current, factor, state.td_scroll_mode, state));
+        state.td_plot_bounds = Some(compute_td_scroll_zoom(
+            current,
+            factor,
+            state.td_scroll_mode,
+            state,
+        ));
     } else {
         if let Some(bounds) = &state.td_plot_bounds {
             let range = bounds.2 - bounds.3;
@@ -693,7 +883,9 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 let screen = plot_ui.screen_from_plot(cursor);
                 let mut data: Vec<(String, f64, f64, Color32)> = Vec::new();
                 for legend in &state.legends {
-                    if !legend.visible || legend.data_history.len() < 2 { continue; }
+                    if !legend.visible || legend.data_history.len() < 2 {
+                        continue;
+                    }
                     let (dt, dv) = find_point_at(&legend.data_history, t);
                     data.push((legend.curve_name.clone(), dt, dv, legend.color));
                 }
@@ -736,19 +928,12 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                         ));
                     }
                 } else if let Some((x_min, x_max, y_min, y_max)) = state.td_plot_bounds {
-                    plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                        [x_min, y_min],
-                        [x_max, y_max],
-                    ));
+                    plot_ui
+                        .set_plot_bounds(PlotBounds::from_min_max([x_min, y_min], [x_max, y_max]));
                 }
 
                 let pb = plot_ui.plot_bounds();
-                state.td_plot_bounds = Some((
-                    pb.min()[0],
-                    pb.max()[0],
-                    pb.min()[1],
-                    pb.max()[1],
-                ));
+                state.td_plot_bounds = Some((pb.min()[0], pb.max()[0], pb.min()[1], pb.max()[1]));
             }
         });
 
@@ -758,7 +943,9 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         let mut total_h = 0.0f32;
         for (name, dt, dv, _) in cursor_data {
             let line = format!("{}: {:.3} @ {}", name, dv, fmt_time(*dt));
-            let g = ui.painter().layout_no_wrap(line, font_id.clone(), Color32::WHITE);
+            let g = ui
+                .painter()
+                .layout_no_wrap(line, font_id.clone(), Color32::WHITE);
             max_w = max_w.max(g.size().x);
             total_h += g.size().y + 1.0;
         }
@@ -766,15 +953,22 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         let h = total_h + 4.0;
         let x = (*sx + 16.0).min(plot_rect.right() - w);
         let mut y = *sy + 8.0;
-        if y + h > plot_rect.bottom() { y = plot_rect.bottom() - h; }
+        if y + h > plot_rect.bottom() {
+            y = plot_rect.bottom() - h;
+        }
         let r = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
-        ui.painter().rect_filled(r, egui::CornerRadius::same(3), Color32::from_rgba_premultiplied(0, 0, 0, 210));
+        ui.painter().rect_filled(
+            r,
+            egui::CornerRadius::same(3),
+            Color32::from_rgba_premultiplied(0, 0, 0, 210),
+        );
         let mut ty = r.top() + 2.0;
         for (name, dt, dv, color) in cursor_data {
             let line = format!("{}: {} @ {:.3}", name, fmt_time(*dt), dv);
             let g = ui.painter().layout_no_wrap(line, font_id.clone(), *color);
             let gh = g.size().y;
-            ui.painter().galley(egui::pos2(r.left() + 4.0, ty), g, *color);
+            ui.painter()
+                .galley(egui::pos2(r.left() + 4.0, ty), g, *color);
             ty += gh + 1.0;
         }
     }
@@ -886,7 +1080,11 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
     if state.fft_scroll_mode == FftScrollMode::Both {
         state.fft_plot_bounds = None;
     } else if hovered && scroll_delta.y != 0.0 {
-        let factor = if scroll_delta.y > 0.0 { 1.0 / 1.15 } else { 1.15 };
+        let factor = if scroll_delta.y > 0.0 {
+            1.0 / 1.15
+        } else {
+            1.15
+        };
         let current_bounds = state.fft_plot_bounds;
         let new_bounds =
             compute_scroll_zoom(current_bounds, factor, state.fft_scroll_mode, &fft_series);
@@ -921,10 +1119,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         .set_margin_fraction(egui::vec2(0.02, 0.05))
         .show(ui, |plot_ui| {
             if let Some((x_min, x_max, y_min, y_max)) = state.fft_plot_bounds {
-                plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                    [x_min, y_min],
-                    [x_max, y_max],
-                ));
+                plot_ui.set_plot_bounds(PlotBounds::from_min_max([x_min, y_min], [x_max, y_max]));
             }
 
             for (name, color, freqs, mags, _sr) in &fft_series {
@@ -961,12 +1156,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
 
             if state.fft_scroll_mode != FftScrollMode::Both {
                 let pb = plot_ui.plot_bounds();
-                state.fft_plot_bounds = Some((
-                    pb.min()[0],
-                    pb.max()[0],
-                    pb.min()[1],
-                    pb.max()[1],
-                ));
+                state.fft_plot_bounds = Some((pb.min()[0], pb.max()[0], pb.min()[1], pb.max()[1]));
             }
         });
 
@@ -976,7 +1166,9 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         let mut total_h = 0.0f32;
         for (name, freq, mag, _) in cursor_data {
             let line = format!("{}: {:.1} Hz → {:.3}", name, freq, mag);
-            let g = ui.painter().layout_no_wrap(line, font_id.clone(), Color32::WHITE);
+            let g = ui
+                .painter()
+                .layout_no_wrap(line, font_id.clone(), Color32::WHITE);
             max_w = max_w.max(g.size().x);
             total_h += g.size().y + 1.0;
         }
@@ -998,7 +1190,8 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             let line = format!("{}: {:.1} Hz → {:.3}", name, freq, mag);
             let g = ui.painter().layout_no_wrap(line, font_id.clone(), *color);
             let gh = g.size().y;
-            ui.painter().galley(egui::pos2(r.left() + 4.0, ty), g, *color);
+            ui.painter()
+                .galley(egui::pos2(r.left() + 4.0, ty), g, *color);
             ty += gh + 1.0;
         }
     }
@@ -1073,10 +1266,9 @@ fn compute_td_scroll_zoom(
             .legends
             .iter()
             .flat_map(|l| l.data_history.iter().map(|p| p.1))
-            .fold(
-                (f64::INFINITY, f64::NEG_INFINITY),
-                |(lo, hi), y| (lo.min(y), hi.max(y)),
-            );
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
+                (lo.min(y), hi.max(y))
+            });
         let y_pad = ((y_max - y_min).max(10.0) * 0.1).max(0.001);
         (x_min, x_max, y_min - y_pad, y_max + y_pad)
     });
@@ -1256,12 +1448,23 @@ fn decode_value_f64(data: &[u8], ext_type: &crate::dwarf::types::ExtendType) -> 
 }
 
 fn find_point_at(data: &std::collections::VecDeque<(f64, f64)>, t: f64) -> (f64, f64) {
-    if data.is_empty() { return (t, 0.0); }
+    if data.is_empty() {
+        return (t, 0.0);
+    }
     let idx = data.partition_point(|&(x, _)| x < t);
-    if idx == 0 { return data[0]; }
-    if idx >= data.len() { return data[data.len() - 1]; }
-    let p0 = data[idx - 1]; let p1 = data[idx];
-    if (t - p0.0).abs() < (p1.0 - t).abs() { p0 } else { p1 }
+    if idx == 0 {
+        return data[0];
+    }
+    if idx >= data.len() {
+        return data[data.len() - 1];
+    }
+    let p0 = data[idx - 1];
+    let p1 = data[idx];
+    if (t - p0.0).abs() < (p1.0 - t).abs() {
+        p0
+    } else {
+        p1
+    }
 }
 
 fn y_axis_fmt(v: f64) -> String {

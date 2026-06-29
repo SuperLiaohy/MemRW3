@@ -1,18 +1,19 @@
 use crate::dwarf;
-use crate::model::{AppSession, DockTab, VariablePool};
+use crate::model::{AppSession, VariablePool};
 use crate::probe::{AcqSlot, ProbeCell, ProbeSession, VarSlotMapping};
 use crate::sync::Sync;
 use crate::ui;
 use crate::ui::chart_plugin::ChartPluginState;
-use crate::ui::dock::{DockLayoutState, FrameData};
+use crate::ui::dock::DockLayoutState;
+use crate::ui::plugin::{FrameData, MemRWPlugin, PluginAction, SavedPluginConfig, ToastLevel};
 use crate::ui::table_plugin::TablePluginState;
 use eframe::egui;
 use egui::{Color32, Ui};
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -22,8 +23,7 @@ pub struct MemRW3App {
     dock: DockLayoutState,
     pub session: AppSession,
     pub dwarf_state: dwarf::types::DwarfState,
-    pub chart_state: ChartPluginState,
-    pub table_state: TablePluginState,
+    plugins: Vec<Box<dyn MemRWPlugin>>,
     probe: Arc<ProbeCell>,
     sync: Arc<Sync>,
     pub toasts: egui_notify::Toasts,
@@ -75,6 +75,13 @@ fn acq_thread(
 }
 
 impl MemRW3App {
+    fn default_plugins() -> Vec<Box<dyn MemRWPlugin>> {
+        vec![
+            Box::new(ChartPluginState::default()),
+            Box::new(TablePluginState::default()),
+        ]
+    }
+
     pub fn new(dwarf_state: dwarf::types::DwarfState) -> Self {
         let mut session = AppSession {
             config: crate::model::Config {
@@ -115,8 +122,7 @@ impl MemRW3App {
             dock: DockLayoutState::default(),
             session,
             dwarf_state,
-            chart_state: ChartPluginState::default(),
-            table_state: TablePluginState::default(),
+            plugins: Self::default_plugins(),
             probe,
             sync,
             toasts: egui_notify::Toasts::default().with_anchor(egui_notify::Anchor::BottomRight),
@@ -362,6 +368,52 @@ impl MemRW3App {
             self.rebuild_slots();
         }
     }
+
+    fn handle_plugin_actions(&mut self, actions: Vec<PluginAction>) {
+        for action in actions {
+            match action {
+                PluginAction::OpenVariableTree { plugin_id } => {
+                    self.session.active_bottom_sheet = Some(plugin_id);
+                }
+                PluginAction::RemoveVariable { var_id } => {
+                    self.unbind_variable(var_id);
+                }
+                PluginAction::WriteVariable { var_id, value } => {
+                    let ok = self.write_variable(var_id, value);
+                    if ok {
+                        self.toasts
+                            .success("写入成功")
+                            .duration(Some(Duration::from_secs(2)));
+                    } else {
+                        self.toasts
+                            .error("写入失败")
+                            .duration(Some(Duration::from_secs(3)));
+                    }
+                }
+                PluginAction::ResetTimer => {
+                    self.clear_all_buffers();
+                }
+                PluginAction::Toast { level, message } => {
+                    self.show_plugin_toast(level, message);
+                }
+            }
+        }
+    }
+
+    fn show_plugin_toast(&mut self, level: ToastLevel, message: String) {
+        match level {
+            ToastLevel::Success => {
+                self.toasts
+                    .success(message)
+                    .duration(Some(Duration::from_secs(2)));
+            }
+            ToastLevel::Error => {
+                self.toasts
+                    .error(message)
+                    .duration(Some(Duration::from_secs(3)));
+            }
+        }
+    }
 }
 
 impl Drop for MemRW3App {
@@ -442,7 +494,7 @@ impl eframe::App for MemRW3App {
         }
 
         let bs_open = self.session.active_bottom_sheet.is_some();
-        let dialog_open = self.table_state.show_entry_dialog;
+        let dialog_open = self.plugins.iter().any(|plugin| plugin.is_dialog_open());
         let running = self.session.is_running();
 
         egui::Frame::NONE
@@ -460,56 +512,16 @@ impl eframe::App for MemRW3App {
 
             if bs_open {}
             if dock_h > 0.0 {
-                let mut open_tree = self.session.active_bottom_sheet;
                 let pool = &self.session.config.pool;
-                ui::dock::show_chart_table_dock(
+                let actions = ui::dock::show_plugins_dock(
                     ui,
                     &mut self.dock,
-                    &mut self.chart_state,
-                    &mut self.table_state,
+                    &mut self.plugins,
                     pool,
                     &frame_data,
                     running,
-                    &mut open_tree,
                 );
-
-                self.session.active_bottom_sheet = open_tree;
-
-                let removed_chart: Vec<usize> = self.chart_state.removed_var_ids.drain(..).collect();
-                for var_id in removed_chart {
-                    self.unbind_variable(var_id);
-                }
-                let removed_table: Vec<usize> = self.table_state.removed_var_ids.drain(..).collect();
-                for var_id in removed_table {
-                    self.unbind_variable(var_id);
-                }
-                let writes: Vec<(usize, u64)> = self.table_state.pending_writes.drain(..).collect();
-                for (var_id, value) in writes {
-                    let ok = self.write_variable(var_id, value);
-                    if ok {
-                        self.toasts.success("写入成功").duration(Some(Duration::from_secs(2)));
-                    } else {
-                        self.toasts.error("写入失败").duration(Some(Duration::from_secs(3)));
-                    }
-                }
-                if let Some(ref msg) = self.table_state.status_message {
-                    if self.table_state.status_error {
-                        self.toasts.error(msg.clone()).duration(Some(Duration::from_secs(3)));
-                    }
-                    self.table_state.status_message = None;
-                }
-                if self.chart_state.reset_timer {
-                    self.chart_state.reset_timer = false;
-                    self.clear_all_buffers();
-                }
-                if self.chart_state.log_started {
-                    self.chart_state.log_started = false;
-                    self.toasts.success("Log 开始").duration(Some(Duration::from_secs(2)));
-                }
-                if self.chart_state.log_stopped {
-                    self.chart_state.log_stopped = false;
-                    self.toasts.success("Log 停止").duration(Some(Duration::from_secs(2)));
-                }
+                self.handle_plugin_actions(actions);
             }
 
             if bs_open {
@@ -541,7 +553,7 @@ impl eframe::App for MemRW3App {
                         let card_bg = ui.visuals().window_fill();
                         let card_stroke = ui.visuals().window_stroke();
 
-                        let target_tab = self.session.active_bottom_sheet;
+                        let target_plugin_id = self.session.active_bottom_sheet.clone();
                         egui::Frame::NONE
                             .fill(card_bg)
                             .stroke(card_stroke)
@@ -665,62 +677,28 @@ impl eframe::App for MemRW3App {
                                                         self.session.selected_variables.insert(id);
                                                         (id, true)
                                                     };
-                                                    let color_id = ui.make_persistent_id(format!("chart_add_color_{}", node.id));
-                                                    let name_id = ui.make_persistent_id(format!("chart_add_name_{}", node.id));
-                                                    let name_default_id = ui.make_persistent_id(format!("chart_add_name_default_{}", node.id));
-                                                    let table_name_id = ui.make_persistent_id(format!("table_add_name_{}", node.id));
-                                                    let table_name_default_id = ui.make_persistent_id(format!("table_add_name_default_{}", node.id));
-                                                    let mut chart_color = ui.data_mut(|d| *d.get_temp_mut_or(color_id, Color32::from_rgb(66,133,244)));
-                                                    let default_add_name = format!("{} @ 0x{:X}", config.name, config.address);
-                                                    let mut chart_curve_name = add_name_value(
-                                                        ui,
-                                                        name_id,
-                                                        name_default_id,
-                                                        &default_add_name,
-                                                    );
-                                                    let mut table_display_name = add_name_value(
-                                                        ui,
-                                                        table_name_id,
-                                                        table_name_default_id,
-                                                        &default_add_name,
-                                                    );
-                                                    let added = match target_tab {
-                                                        Some(DockTab::Chart) => {
-                                                            let result = ui::vari_properties_ui(ui, node, config, |ui, node_name| {
-                                                                ui::chart_plugin::chart_add_config_ui(ui, node_name, &mut chart_curve_name, &mut chart_color);
-                                                                ui.button("添加到 Chart").clicked()
-                                                            });
-                                                            ui.data_mut(|d| {
-                                                                d.insert_temp(color_id, chart_color);
-                                                                d.insert_temp(name_id, chart_curve_name.clone());
-                                                            });
-                                                            if result {
-                                                                self.chart_state.add_legend(
-                                                                    var_id,
-                                                                    &self.session.config.pool,
-                                                                    std::mem::take(&mut chart_curve_name),
-                                                                    chart_color,
-                                                                );
-                                                            }
-                                                            result
-                                                        }
-                                                        Some(DockTab::Table) => {
-                                                            let result = ui::vari_properties_ui(ui, node, config, |ui, node_name| {
-                                                                ui::table_plugin::table_add_config_ui(ui, node_name, &mut table_display_name);
-                                                                ui.button("添加到 Table").clicked()
-                                                            });
-                                                            ui.data_mut(|d| { d.insert_temp(table_name_id, table_display_name.clone()); });
-                                                            if result {
-                                                                self.table_state.add_entry(
-                                                                    var_id,
-                                                                    &self.session.config.pool,
-                                                                    std::mem::take(&mut table_display_name),
-                                                                );
-                                                            }
-                                                            result
-                                                        }
-                                                        None => false,
-                                                    };
+                                                    let plugins = &mut self.plugins;
+                                                    let pool = &self.session.config.pool;
+                                                    let added = ui::vari_properties_ui(ui, node, config, |ui, node_name| {
+                                                        let Some(plugin_id) = target_plugin_id.as_deref() else {
+                                                            ui.label("未选择目标插件");
+                                                            return false;
+                                                        };
+                                                        let Some(plugin) = plugins
+                                                            .iter_mut()
+                                                            .find(|plugin| plugin.id() == plugin_id)
+                                                        else {
+                                                            ui.label(format!("目标插件不存在: {plugin_id}"));
+                                                            return false;
+                                                        };
+                                                        plugin.add_variable_ui(
+                                                            ui,
+                                                            node_id,
+                                                            node_name,
+                                                            var_id,
+                                                            pool,
+                                                        )
+                                                    });
                                                     if added {
                                                         if let Some(var) = self.session.config.pool.get_mut(var_id) {
                                                             var.plugins_cnt += 1;
@@ -763,25 +741,6 @@ impl eframe::App for MemRW3App {
     }
 }
 
-fn add_name_value(
-    ui: &mut Ui,
-    value_id: egui::Id,
-    default_id: egui::Id,
-    default_name: &str,
-) -> String {
-    ui.data_mut(|data| {
-        let previous_default = data.get_temp::<String>(default_id);
-        let mut value = data
-            .get_temp::<String>(value_id)
-            .unwrap_or_else(|| default_name.to_owned());
-        if value.is_empty() || previous_default.as_deref() != Some(default_name) {
-            value = default_name.to_owned();
-        }
-        data.insert_temp(default_id, default_name.to_owned());
-        value
-    })
-}
-
 #[derive(Serialize, Deserialize)]
 struct SaveConfig {
     elf_path: String,
@@ -789,33 +748,15 @@ struct SaveConfig {
     probe_protocol: String,
     probe_speed_khz: u32,
     variables: Vec<SavedVariable>,
-    chart_legends: Vec<SavedChartLegend>,
-    table_entries: Vec<SavedTableEntry>,
+    plugins: Vec<SavedPluginConfig>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct SavedVariable {
     name: String,
     address: u64,
-    ext_type: String,
+    ext_type: dwarf::types::ExtendType,
     size: u32,
-}
-
-#[derive(Serialize, Deserialize)]
-struct SavedChartLegend {
-    variable_name: String,
-    variable_address: u64,
-    curve_name: String,
-    color: [u8; 4],
-    visible: bool,
-    buffer_size: usize,
-}
-
-#[derive(Serialize, Deserialize)]
-struct SavedTableEntry {
-    variable_name: String,
-    variable_address: u64,
-    display_name: String,
 }
 
 impl MemRW3App {
@@ -839,46 +780,38 @@ impl MemRW3App {
                 .map(|v| SavedVariable {
                     name: v.name.clone(),
                     address: v.address,
-                    ext_type: format!("{:?}", v.ext_type),
+                    ext_type: v.ext_type.clone(),
                     size: v.size,
                 })
                 .collect(),
-            chart_legends: self
-                .chart_state
-                .legends
+            plugins: self
+                .plugins
                 .iter()
-                .map(|l| {
-                    let v = self.session.config.pool.get(l.variable_id);
-                    SavedChartLegend {
-                        variable_name: v.map(|v| v.name.clone()).unwrap_or_default(),
-                        variable_address: v.map(|v| v.address).unwrap_or(0),
-                        curve_name: l.curve_name.clone(),
-                        color: [l.color.r(), l.color.g(), l.color.b(), l.color.a()],
-                        visible: l.visible,
-                        buffer_size: l.buffer_size,
-                    }
-                })
-                .collect(),
-            table_entries: self
-                .table_state
-                .entries
-                .iter()
-                .map(|e| {
-                    let v = self.session.config.pool.get(e.variable_id);
-                    SavedTableEntry {
-                        variable_name: v.map(|v| v.name.clone()).unwrap_or_default(),
-                        variable_address: v.map(|v| v.address).unwrap_or(0),
-                        display_name: e.display_name.clone(),
-                    }
+                .map(|plugin| SavedPluginConfig {
+                    plugin_id: plugin.id().to_owned(),
+                    payload: plugin.save_config(&self.session.config.pool),
                 })
                 .collect(),
         };
 
-        if let Ok(json) = serde_json::to_string_pretty(&config) {
-            std::fs::write(&path, json).ok();
-            self.toasts
-                .success("配置已保存")
-                .duration(Some(Duration::from_secs(2)));
+        match serde_json::to_string_pretty(&config) {
+            Ok(json) => match std::fs::write(&path, json) {
+                Ok(()) => {
+                    self.toasts
+                        .success("配置已保存")
+                        .duration(Some(Duration::from_secs(2)));
+                }
+                Err(e) => {
+                    self.toasts
+                        .error(format!("保存配置失败: {e}"))
+                        .duration(Some(Duration::from_secs(5)));
+                }
+            },
+            Err(e) => {
+                self.toasts
+                    .error(format!("序列化配置失败: {e}"))
+                    .duration(Some(Duration::from_secs(5)));
+            }
         }
     }
 
@@ -904,105 +837,50 @@ impl MemRW3App {
             }
         };
 
-        self.session.config.probe_chip = config.probe_chip;
-        self.session.config.probe_protocol = config.probe_protocol;
-        self.session.config.probe_speed_khz = config.probe_speed_khz;
-        self.session.config.elf_path = config.elf_path;
-
-        self.session.config.pool = VariablePool::default();
-        self.chart_state.legends.clear();
-        self.table_state.entries.clear();
-
+        let mut new_pool = VariablePool::default();
         for sv in &config.variables {
-            let ext_type = match sv.ext_type.as_str() {
-                "U8" => dwarf::types::ExtendType::U8,
-                "U16" => dwarf::types::ExtendType::U16,
-                "U32" => dwarf::types::ExtendType::U32,
-                "U64" => dwarf::types::ExtendType::U64,
-                "I8" => dwarf::types::ExtendType::I8,
-                "I16" => dwarf::types::ExtendType::I16,
-                "I32" => dwarf::types::ExtendType::I32,
-                "I64" => dwarf::types::ExtendType::I64,
-                "Float" => dwarf::types::ExtendType::Float,
-                "Double" => dwarf::types::ExtendType::Double,
-                _ => dwarf::types::ExtendType::Other,
-            };
             let c = dwarf::types::ExtendConfig {
                 name: sv.name.clone(),
                 address: sv.address,
-                ext_type,
+                ext_type: sv.ext_type.clone(),
                 size: sv.size,
                 array_index: None,
                 array_count: None,
             };
-            self.session.config.pool.add(&c);
+            new_pool.add(&c);
         }
 
-        for sl in &config.chart_legends {
-            let var_id = self
-                .session
-                .config
-                .pool
-                .find_by_name_addr(&sl.variable_name, sl.variable_address)
-                .map(|v| v.id);
-            match var_id {
-                Some(id) => {
-                    let mut legend =
-                        crate::ui::chart_plugin::ChartLegend::new(id, sl.curve_name.clone());
-                    legend.color = Color32::from_rgba_premultiplied(
-                        sl.color[0],
-                        sl.color[1],
-                        sl.color[2],
-                        sl.color[3],
-                    );
-                    legend.visible = sl.visible;
-                    legend.buffer_size = sl.buffer_size;
-                    self.chart_state.legends.push(legend);
-                    if let Some(var) = self.session.config.pool.get_mut(id) {
-                        var.plugins_cnt += 1;
+        let mut new_plugins = Self::default_plugins();
+        let mut skipped_plugins = Vec::new();
+        for saved_plugin in &config.plugins {
+            match new_plugins
+                .iter_mut()
+                .find(|plugin| plugin.id() == saved_plugin.plugin_id)
+            {
+                Some(plugin) => {
+                    if let Err(e) = plugin.load_config(&saved_plugin.payload, &mut new_pool) {
+                        self.toasts
+                            .error(e)
+                            .duration(Some(Duration::from_secs(10)))
+                            .closable(true);
+                        return;
                     }
                 }
-                None => {
-                    self.session.config.pool = VariablePool::default();
-                    self.chart_state.legends.clear();
-                    self.table_state.entries.clear();
-                    self.toasts
-                        .error(format!("图表变量 \"{}\" 匹配失败", sl.variable_name))
-                        .duration(Some(Duration::from_secs(10)))
-                        .closable(true);
-                    return;
-                }
+                None => skipped_plugins.push(saved_plugin.plugin_id.clone()),
             }
         }
 
-        for se in &config.table_entries {
-            let var_id = self
-                .session
-                .config
-                .pool
-                .find_by_name_addr(&se.variable_name, se.variable_address)
-                .map(|v| v.id);
-            match var_id {
-                Some(id) => {
-                    let mut entry =
-                        crate::ui::table_plugin::TableEntry::new(id, se.display_name.clone());
-                    entry.display_name = se.display_name.clone();
-                    self.table_state.entries.push(entry);
-                    if let Some(var) = self.session.config.pool.get_mut(id) {
-                        var.plugins_cnt += 1;
-                    }
-                }
-                None => {
-                    self.session.config.pool = VariablePool::default();
-                    self.chart_state.legends.clear();
-                    self.table_state.entries.clear();
-                    self.toasts
-                        .error(format!("表格变量 \"{}\" 匹配失败", se.variable_name))
-                        .duration(Some(Duration::from_secs(10)))
-                        .closable(true);
-                    return;
-                }
-            }
+        self.session.config.probe_chip = config.probe_chip;
+        self.session.config.probe_protocol = config.probe_protocol;
+        self.session.config.probe_speed_khz = config.probe_speed_khz;
+        self.session.config.elf_path = config.elf_path;
+        self.session.config.pool = new_pool;
+        self.plugins = new_plugins;
+
+        for plugin_id in skipped_plugins {
+            self.toasts
+                .info(format!("跳过未知插件配置: {plugin_id}"))
+                .duration(Some(Duration::from_secs(5)));
         }
 
         self.toasts

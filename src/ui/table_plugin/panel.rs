@@ -1,14 +1,12 @@
-use super::table_dialog::{table_entry_dialog_ui, TableEntry};
+use super::table_dialog::{TableEntry, table_add_config_ui, table_entry_dialog_ui};
 use crate::dwarf::types::ExtendType;
 use crate::model::VariablePool;
+use crate::ui::plugin::{
+    MemRWPlugin, PluginAction, PluginRenderContext, ToastLevel, temp_text_value,
+};
 use eframe::egui::{self, Color32, RichText, Ui};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-#[derive(PartialEq)]
-pub enum PanelAction {
-    None,
-    OpenTree,
-}
 
 pub struct TablePluginState {
     pub entries: Vec<TableEntry>,
@@ -54,8 +52,126 @@ impl TablePluginState {
             }
         }
     }
-    pub fn entry_ids(&self) -> Vec<usize> {
-        self.entries.iter().map(|e| e.variable_id).collect()
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedTableEntry {
+    variable_name: String,
+    variable_address: u64,
+    display_name: String,
+}
+
+impl MemRWPlugin for TablePluginState {
+    fn id(&self) -> &'static str {
+        "table"
+    }
+
+    fn title(&self) -> &'static str {
+        "Table 读写数据"
+    }
+
+    fn viewport_size(&self) -> egui::Vec2 {
+        egui::vec2(520.0, 360.0)
+    }
+
+    fn min_viewport_size(&self) -> egui::Vec2 {
+        egui::vec2(320.0, 220.0)
+    }
+
+    fn render(&mut self, ui: &mut Ui, ctx: PluginRenderContext<'_>) -> Vec<PluginAction> {
+        let mut actions = Vec::new();
+        if table_panel(ui, self, ctx.pool, ctx.frame_data) {
+            actions.push(PluginAction::OpenVariableTree {
+                plugin_id: self.id().to_owned(),
+            });
+        }
+
+        for var_id in self.removed_var_ids.drain(..) {
+            actions.push(PluginAction::RemoveVariable { var_id });
+        }
+        for (var_id, value) in self.pending_writes.drain(..) {
+            actions.push(PluginAction::WriteVariable { var_id, value });
+        }
+        if let Some(message) = self.status_message.take() {
+            if self.status_error {
+                actions.push(PluginAction::Toast {
+                    level: ToastLevel::Error,
+                    message,
+                });
+            }
+            self.status_error = false;
+        }
+
+        actions
+    }
+
+    fn add_variable_ui(
+        &mut self,
+        ui: &mut Ui,
+        node_id: usize,
+        default_name: &str,
+        variable_id: usize,
+        pool: &VariablePool,
+    ) -> bool {
+        let name_id = ui.make_persistent_id(format!("table_add_name_{node_id}"));
+        let name_default_id = ui.make_persistent_id(format!("table_add_name_default_{node_id}"));
+        let mut display_name = temp_text_value(ui, name_id, name_default_id, default_name);
+
+        table_add_config_ui(ui, default_name, &mut display_name);
+        let added = ui.button("添加到 Table").clicked();
+
+        ui.data_mut(|d| {
+            d.insert_temp(name_id, display_name.clone());
+        });
+
+        if added {
+            self.add_entry(variable_id, pool, display_name);
+        }
+        added
+    }
+
+    fn is_dialog_open(&self) -> bool {
+        self.show_entry_dialog
+    }
+
+    fn save_config(&self, pool: &VariablePool) -> serde_json::Value {
+        let entries: Vec<SavedTableEntry> = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let var = pool.get(entry.variable_id);
+                SavedTableEntry {
+                    variable_name: var.map(|v| v.name.clone()).unwrap_or_default(),
+                    variable_address: var.map(|v| v.address).unwrap_or(0),
+                    display_name: entry.display_name.clone(),
+                }
+            })
+            .collect();
+        serde_json::to_value(entries).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn load_config(
+        &mut self,
+        payload: &serde_json::Value,
+        pool: &mut VariablePool,
+    ) -> Result<(), String> {
+        let entries: Vec<SavedTableEntry> =
+            serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+
+        self.entries.clear();
+        for saved in entries {
+            let var_id = pool
+                .find_by_name_addr(&saved.variable_name, saved.variable_address)
+                .map(|v| v.id)
+                .ok_or_else(|| format!("表格变量 \"{}\" 匹配失败", saved.variable_name))?;
+
+            self.entries
+                .push(TableEntry::new(var_id, saved.display_name));
+            if let Some(var) = pool.get_mut(var_id) {
+                var.plugins_cnt += 1;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -64,8 +180,8 @@ pub fn table_panel(
     state: &mut TablePluginState,
     pool: &VariablePool,
     frame_data: &HashMap<usize, Vec<(f64, [u8; 8])>>,
-) -> PanelAction {
-    let mut action = PanelAction::None;
+) -> bool {
+    let mut open_tree = false;
 
     ui.vertical(|ui| {
         let dialog_is_open = state.show_entry_dialog;
@@ -78,7 +194,7 @@ pub fn table_panel(
                         .button(RichText::new("📋 打开变量树").size(12.0))
                         .clicked()
                     {
-                        action = PanelAction::OpenTree;
+                        open_tree = true;
                     }
                     ui.label(format!("{} 个变量", state.entries.len()));
                 });
@@ -95,7 +211,7 @@ pub fn table_panel(
                                 .color(Color32::from_rgb(150, 150, 150)),
                         );
                         if ui.button("📋 打开变量树").clicked() {
-                            action = PanelAction::OpenTree;
+                            open_tree = true;
                         }
                     });
                 } else {
@@ -146,7 +262,7 @@ pub fn table_panel(
         }
     });
 
-    action
+    open_tree
 }
 
 fn render_table(

@@ -16,7 +16,7 @@ pub struct AppSession {
     pub hz_last_cycles: u64,
     pub hz_last_time: Instant,
     pub acq_stop: Arc<AtomicBool>,
-    pub active_bottom_sheet: Option<DockTab>,
+    pub active_bottom_sheet: Option<String>,
     pub bottom_sheet_drag: Option<(f32, f32)>,
     pub selected_variables: HashSet<usize>,
     pub load_error: Option<String>,
@@ -96,11 +96,4 @@ impl Default for Config {
             probe_speed_khz: 10000,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DockTab {
-    #[default]
-    Chart,
-    Table,
 }
