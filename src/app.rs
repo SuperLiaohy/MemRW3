@@ -498,8 +498,8 @@ impl eframe::App for MemRW3App {
         let running = self.session.is_running();
 
         egui::Frame::NONE
-            .fill(if ui.visuals().dark_mode { Color32::from_rgb(35, 35, 38) } else { Color32::from_rgb(230, 230, 230) })
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(180, 180, 200)))
+            .fill(ui.visuals().panel_fill)
+            .stroke(ui.visuals().window_stroke())
             .corner_radius(2)
             .show(ui, |ui| {
         ui.vertical(|ui| {
