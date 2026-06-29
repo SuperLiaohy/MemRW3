@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量监控工具，是对原 Qt/QML MemRW2 的重构。使用 gimli/object 替代 libdwarf 解析 DWARF 调试信息（支持 DWARF 2/3/4/5），使用 probe-rs 替代 libusb 手动协议解析进行 MCU 数据采集，使用 eframe + 手写 dock/pop-out 布局替代 Qt QML 实现 UI；Chart/Table 默认停靠在主界面，Pop out 后使用 egui multi-viewport 创建原生操作系统窗口。
+MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量监控工具，是对原 Qt/QML MemRW2 的重构。使用 gimli/object 替代 libdwarf 解析 DWARF 调试信息（支持 DWARF 2/3/4/5），使用 probe-rs 替代 libusb 手动协议解析进行 MCU 数据采集，使用 eframe + 手写插件 dock/pop-out 布局替代 Qt QML 实现 UI；Chart/Table 作为内置 `MemRWPlugin` 默认停靠在主界面，Pop out 后使用 egui multi-viewport 创建原生操作系统窗口。
 
 ## 整体布局
 
@@ -44,7 +44,7 @@ MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量�
 ```
 src/
 ├── main.rs                 # 入口: 启动空 DwarfState → eframe
-├── app.rs                  # 主 App + MemRW3App (控制栏/采集/连接/配置/BottomSheet 编排)
+├── app.rs                  # 主 App + MemRW3App (控制栏/采集/连接/插件池/配置/BottomSheet 编排)
 ├── sync.rs                 # 同步原语: Sync (两阶段握手) - 匹配 MemRW2 的 3-semaphore 模式
 ├── dwarf/
 │   ├── mod.rs              # DWARF 模块入口
@@ -61,16 +61,17 @@ src/
 └── ui/
     ├── mod.rs
     ├── control_bar.rs      # 控制栏 (连接/采集/Probe配置Dialog)
-    ├── dock.rs             # 手写 Chart/Table 分栏 dock + egui multi-viewport 原生窗口 Pop out/in
+    ├── dock.rs             # 手写插件分栏 dock + egui multi-viewport 原生窗口 Pop out/in
+    ├── plugin.rs           # MemRWPlugin trait + PluginAction/FrameData/插件配置 payload
     ├── chart_plugin/
     │   ├── mod.rs
     │   ├── legend.rs       # ChartLegend (曲线名/颜色/可见/缓冲/data_history)
     │   ├── fft.rs           # FFT 频谱计算 (自包含: Complex/Radix-2/Hann/Hamming/Blackman/矩形窗, 最大65536点)
-    │   ├── panel.rs        # 图表面板 (时域+频域, 坐标轴/曲线/图例/光标/ExtendType解码/自定义颜色/Log CSV)
+    │   ├── panel.rs        # 图表插件实现 (时域+频域, 坐标轴/曲线/图例/光标/ExtendType解码/自定义颜色/Log CSV)
     │   └── line_dialog.rs  # 曲线属性 Dialog (编辑曲线属性 + 显示PooledVariable的Extend属性)
     ├── table_plugin/
     │   ├── mod.rs
-    │   ├── panel.rs        # 表格面板 (TableView 读写/ExtendType 格式化)
+    │   ├── panel.rs        # 表格插件实现 (TableView 读写/ExtendType 格式化)
     │   └── table_dialog.rs # TableEntry + 属性 Dialog (显示PooledVariable的Extend属性)
     ├── vari_tree.rs        # DWARF 变量树 (左面板, 搜索自动滚动, DefaultOpen(false) 折叠)
     └── vari_properties.rs  # 属性面板 (Basic/Extend/Add 三段竖直布局, ExtendConfig驱动)
@@ -139,6 +140,39 @@ pub struct PooledVariable {
 - `incoming` 通过 `Arc` 共享: rebuild_slots 时 clone 到 `VarSlotMapping.incoming`, 采集线程无锁写入, UI 线程无锁 drain
 - 去重: 添加变量前检查 `Pool.find_by_name_addr(name, address)`, 同 name+address 不重复添加
 - Chart/Table 面板直接使用 `var.ext_type` 进行值解码和格式化
+
+### MemRWPlugin (动态插件分发)
+
+`MemRW3App` 不再持有固定的 `chart_state` / `table_state` 字段，而是持有:
+
+```rust
+plugins: Vec<Box<dyn MemRWPlugin>>
+```
+
+内置插件按顺序创建为 Chart、Table。Dock、BottomSheet、变量添加、删除、写入、Toast、配置保存/加载都通过 trait object 统一分发，不再通过 `DockTab` enum 或 Chart/Table 专用分支判断。
+
+```rust
+pub trait MemRWPlugin {
+    fn id(&self) -> &'static str;
+    fn title(&self) -> &'static str;
+    fn render(&mut self, ui: &mut Ui, ctx: PluginRenderContext<'_>) -> Vec<PluginAction>;
+    fn add_variable_ui(&mut self, ui: &mut Ui, node_id: usize, default_name: &str, variable_id: usize, pool: &VariablePool) -> bool;
+    fn save_config(&self, pool: &VariablePool) -> serde_json::Value;
+    fn load_config(&mut self, payload: &serde_json::Value, pool: &mut VariablePool) -> Result<(), String>;
+}
+```
+
+`PluginAction` 是插件向 App 发起副作用的唯一通道:
+
+```rust
+OpenVariableTree { plugin_id }
+RemoveVariable { var_id }
+WriteVariable { var_id, value }
+ResetTimer
+Toast { level, message }
+```
+
+App 仍然是唯一执行硬件写入、变量池解绑、timer reset 和 toast 的编排层。插件只声明意图并管理自身 UI 状态。
 
 ### BasicType vs ExtendType
 
@@ -214,7 +248,7 @@ ProbeSession.connect()
 ### 3. 浏览变量树
 
 ```
-Chart/Table dock 面板中点击 "📋 打开变量树" → BottomSheet 覆盖显示
+任一插件 dock 面板中点击 "📋 打开变量树" → 插件返回 `PluginAction::OpenVariableTree { plugin_id }` → BottomSheet 覆盖显示
 
 BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭] 按钮退出)
    ├─ 顶部: ELF 文件路径输入框 + [浏览] (rfd 文件选择器, *.elf;*.axf) + [加载] + [追踪] 按钮 + 错误提示
@@ -235,18 +269,20 @@ BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭]
         ├─ Extend (可编辑): Name(只读label) / Address(hex TextEdit) /
         │   Size(只读label, 随Type自动绑定) / Type(ComboBox: u8~u64, i8~i64, float, double, other)
         └─ Add:
-           ├─ type ≠ other → 显示添加配置 → "添加到 Chart/Table"
-           │   ├─ 曲线名(TextEdit) + 颜色(自定义拾色器 + 预设色块) → 添加到 Chart
-           │   └─ 显示名(TextEdit) → 添加到 Table
+           ├─ type ≠ other → 根据 active plugin 显示添加配置
+           │   ├─ Chart 插件: 曲线名(TextEdit) + 颜色(自定义拾色器 + 预设色块) → 添加到 Chart
+           │   └─ Table 插件: 显示名(TextEdit) → 添加到 Table
            └─ type = other → 红色提示 "type 为 other，不可添加到 Chart 或 Table"
 
       添加流程:
         ├─ extend_name 和 extend_address 由 DwarfState 从 DWARF 树计算得到
         ├─ 用户可在 Extend 段编辑 address/type (size 自动绑定)
         ├─ 编辑结果存入 ExtendConfig (AppSession.extend_configs HashMap)
-        ├─ 点 "添加到 Chart/Table" → VariablePool.add(&ExtendConfig)
-        ├─ Chart: 曲线名 + 颜色 → 存入 ChartLegend (颜色persist via egui memory)
-        └─ Table: 显示名 → 存入 TableEntry
+        ├─ App 先按 `(name, address)` 复用或创建 VariablePool 条目
+        ├─ 根据 active plugin id 查找 `Box<dyn MemRWPlugin>`
+        └─ 调用 `plugin.add_variable_ui(...)`
+            ├─ Chart: 曲线名 + 颜色 → 存入 ChartLegend (颜色persist via egui memory)
+            └─ Table: 显示名 → 存入 TableEntry
 ```
 
 ### 4. 数据采集 (多线程架构)
@@ -296,7 +332,7 @@ BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭]
   ├─ Pool.find_by_name_addr(name, addr) → 去重
   │   ├─ 已存在 → 复用 var_id
   │   └─ 新变量 → VariablePool.add(config) → rebuild_slots (sync)
-  └─ Plugin.add_legend/entry(var_id) → PooledVariable.plugins_cnt += 1
+  └─ target_plugin.add_variable_ui(var_id) → PooledVariable.plugins_cnt += 1
 
 [点击"开始"]
   ├─ first start 或 after clear → reset_timer() (sync)
@@ -312,15 +348,14 @@ UI 线程 (每帧开始):
   for var in pool.iter():
     frame_data[var.id] = var.incoming.drain()  ← 每个变量只 drain 一次
 
-  chart_panel(&frame_data):   ← 从 frame_data 读, 不再调用 drain
-  table_panel(&frame_data):   ← 同上
+  plugin.render(&frame_data): ← 从 frame_data 读, 不再调用 drain
 ```
 
 **插件删除 → 解绑**:
 
 ```
-remove_legend/entry → removed_var_ids.push(var_id)
-ui() drain removed_var_ids:
+remove_legend/entry → 插件返回 PluginAction::RemoveVariable { var_id }
+App.handle_plugin_actions:
   PooledVariable.plugins_cnt -= 1
   if plugins_cnt == 0 → pool.remove(var_id) + rebuild_slots (sync)
 ```
@@ -488,7 +523,7 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 | 添加配置颜色 | `egui::color_picker::color_edit_button_srgba()` 自定义拾色器 + 预设色块网格, egui memory 持久化 |
 | 空状态 | 居中提示"暂无监控变量" + 打开变量树按钮 |
 | Log CSV | 可选择 CSV 文件, 开始采集时覆盖写入 header+数据行, 暂停时关闭; toast 提醒开始/停止; logging 期间禁用添加/删除/改选项 |
-| 保存/加载 | JSON 格式保存 Probe/chart/table/pool/ELF 配置; 加载后自动 trace 更新地址 |
+| 保存/加载 | JSON 格式保存 Probe/pool/plugin payload/ELF 配置; 加载后自动 trace 更新地址 |
 | 游标 (Cursor) | 鼠标悬停时显示竖线 + 浮层: 逐曲线显示时间戳和当前值 |
 | FFT 频谱图 | 工具栏 `📊 FFT` 按钮切换; 开启后视图上下分屏: 时域(55%) + 频域(45%) |
 | FFT 配置 | 窗函数选择 (Rectangular/Hann/Hamming/Blackman) + 取样点数 (4~65536, 从数据末尾取) |
@@ -562,11 +597,14 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 **保存** (`save_config`): JSON 格式 (`serde`)，通过 `rfd` 文件对话框保存。包含:
 - Probe 配置 (`chip`, `protocol`, `speed`)
 - VariablePool (name, address, ext_type, size)
-- Chart legends (variable_name+address, curve_name, color, visible, buffer_size)
-- Table entries (variable_name+address, display_name)
+- 插件配置列表 `plugins: [{ plugin_id, payload }]`
+  - Chart payload: legends (variable_name+address, curve_name, color, visible, buffer_size)
+  - Table payload: entries (variable_name+address, display_name)
 - ELF path
 
-**加载** (`load_config`): 解析 JSON → 清空现有 pool/plugins → 重建 VariablePool → 按 `(name, address)` 精确匹配 chart/table 子项 → `plugins_cnt += 1`。任一匹配失败 → 全部清空 + toast 错误。
+**加载** (`load_config`): 解析 JSON → 在临时 `VariablePool` 和默认插件池中重建配置 → 按 `plugin_id` 分发 payload → 插件按 `(name, address)` 精确匹配自身子项并 `plugins_cnt += 1`。任一插件加载失败时保留当前运行状态并 toast 错误；全部成功后才替换当前 pool/plugins。
+
+当前配置格式以 `plugins` 字段为准，不做旧版 `chart_legends` / `table_entries` 字段迁移。
 
 加载成功后自动 `trace_variables()`:
 1. `load_elf()` 重新解析 DWARF
@@ -668,9 +706,9 @@ serde_json = "1"          # JSON
 
 8. **VariablePool 用 Vec+HashMap**: 模拟链表 + 哈希对, O(1) 增删查, 比纯 HashMap 更适合频繁迭代的采集场景
 
-9. **Chart 插件与 Table 插件独立**: 各自管理状态 (ChartPluginState / TablePluginState), 通过 VariablePool 共享数据
+9. **Chart 插件与 Table 插件实现同一个动态 trait**: `ChartPluginState` 与 `TablePluginState` 都实现 `MemRWPlugin`; App/Dock/BottomSheet 只通过 `Box<dyn MemRWPlugin>` 分发, 不使用 Chart/Table enum 做中心化分支
 
-10. **添加配置回调注入**: `vari_properties_ui()` 通过 `FnOnce` 闭包接收插件定制的添加 UI, 避免 centralized enum dispatch; 添加后回写用户选择的曲线名/颜色/显示名
+10. **添加配置由目标插件提供**: `vari_properties_ui()` 仍通过 `FnOnce` 闭包承载 Add 区域, 但闭包内部按 active `plugin_id` 调用 `plugin.add_variable_ui(...)`; 添加后插件自行保存曲线名/颜色/显示名
 
 11. **多线程采集架构 (参考 MemRW2)**:
     - `acq_thread`: 独立采集线程, 非阻塞 `try_acquire` 检查同步请求, 正常运行时全速采集
@@ -681,7 +719,8 @@ serde_json = "1"          # JSON
     - **两阶段采集**: Phase1 read32 全部去重槽位 → Phase2 按 byte_offset 组装变量值
     - `DoubleBuffer`: SPSC 无锁双缓冲, `fetch_xor` 原子翻转, 预分配容量 2560
     - `delay_us: Arc<AtomicU64>`: 默认 0 (全速), 采集线程 sleep 节流, 主线程独立 vsync 刷新
-    - **FrameData 预 drain**: UI 每帧开始时统一 drain 所有 DoubleBuffer 到 HashMap, plugin 只读不 drain — 避免同一变量被多处引用时多次切换缓冲区
+    - **FrameData 预 drain**: UI 每帧开始时统一 drain 所有 DoubleBuffer 到 HashMap, plugin render 只读不 drain — 避免同一变量被多处引用时多次切换缓冲区
+    - **PluginAction**: 插件只返回 OpenVariableTree/RemoveVariable/WriteVariable/ResetTimer/Toast 等意图, App 统一执行副作用
     - **plugins_cnt**: 变量被 plugin 绑定时 +1, 解绑时 -1; 归零自动从 Pool 移除 + rebuild_slots
     - **Hz**: `acq_cycle_count: Arc<AtomicU64>` 采集线程每轮 +1, 主线程每秒计算采集轮询频率
     - **计时**: `timer_was_started` 追踪, 首次"开始"和清空后第一次"开始"归零, 暂停再继续累积

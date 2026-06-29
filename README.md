@@ -11,7 +11,8 @@
 - **滚轮缩放**: 时域 + 频域均支持 X / Y / Both 三模式滚轮缩放，手动模式下锚定视图中心
 - **变量读写**: Table 面板支持按 ExtendType 写入（u8~u64, i8~i64, f32, f64），带范围校验
 - **CSV 日志**: 可选择 CSV 文件，开始采集时覆盖写入时间戳 + 所有曲线数据行
-- **配置保存/加载**: JSON 格式保存 Probe 配置、变量池、图表图例、表格条目、ELF 路径
+- **插件化界面**: Chart 与 Table 均实现 `MemRWPlugin` trait，Dock、变量树添加、写入、删除、Toast、配置保存/加载统一通过动态插件池分发
+- **配置保存/加载**: JSON 格式保存 Probe 配置、变量池、插件 payload、ELF 路径；Chart/Table 各自保存图例和表格条目
 - **多探针支持**: CMSIS-DAP / ST-Link / J-Link，SWD / JTAG 协议，可调速度 100-20000 kHz
 - **跨平台**: Linux / macOS / Windows
 
@@ -83,7 +84,7 @@ Release 模式下生成的二进制在 `target/release/MemRW3`。
 cargo run --release
 ```
 
-启动后窗口 1280×720，界面分为控制栏（顶部）和手写 Dock 区域。Chart 与 Table 默认 Pop in 并左右分栏显示，可通过各自右上角 **Pop out** 弹出为原生操作系统窗口，再通过 **Pop in** 回到主界面。
+启动后窗口 1280×720，界面分为控制栏（顶部）和手写 Dock 区域。Chart 与 Table 作为内置 `MemRWPlugin` 默认 Pop in 并左右分栏显示，可通过各自右上角 **Pop out** 弹出为原生操作系统窗口，再通过 **Pop in** 回到主界面。
 
 ### 2. 加载 ELF 文件
 
@@ -147,7 +148,7 @@ cargo run --release
 ```
 src/
 ├── main.rs              # 入口
-├── app.rs               # 主 App + 采集/连接/配置编排
+├── app.rs               # 主 App + 采集/连接/插件池/配置编排
 ├── sync.rs              # 同步原语 (双 Condvar 握手)
 ├── dwarf/
 │   ├── mod.rs           # DWARF 模块入口
@@ -164,16 +165,17 @@ src/
 └── ui/
     ├── mod.rs           # UI 模块入口
     ├── control_bar.rs   # 控制栏
-    ├── dock.rs          # 手写 Chart/Table dock + 原生 OS 窗口 pop-out/pop-in
+    ├── dock.rs          # 手写插件 dock + 原生 OS 窗口 pop-out/pop-in
+    ├── plugin.rs        # MemRWPlugin trait + 统一 PluginAction/FrameData/配置 payload
     ├── vari_tree.rs     # DWARF 变量树
     ├── vari_properties.rs # 属性面板
     ├── chart_plugin/
     │   ├── legend.rs    # ChartLegend
     │   ├── fft.rs        # FFT 频谱计算 (自包含)
-    │   ├── panel.rs     # 图表面板 (时域+频域)
+    │   ├── panel.rs     # 图表插件实现 (时域+频域)
     │   └── line_dialog.rs # 曲线属性 Dialog
     └── table_plugin/
-        ├── panel.rs     # 表格面板
+        ├── panel.rs     # 表格插件实现
         └── table_dialog.rs # TableEntry + 属性 Dialog
 ```
 
