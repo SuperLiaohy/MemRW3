@@ -18,6 +18,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+use rfd::MessageDialogResult::No;
 
 pub struct MemRW3App {
     dock: DockLayoutState,
@@ -625,7 +626,11 @@ impl eframe::App for MemRW3App {
                                                 self.session.config.elf_path = path.display().to_string();
                                             }
                                         }
-                                        if ui.button("加载").clicked() { self.load_elf(); }
+                                        if ui.button("加载").clicked() {
+                                            self.load_elf();
+                                            self.session.extend_configs.clear();
+                                            self.dwarf_state.selected_node = None;
+                                        }
                                         if ui.button("追踪").clicked() {
                                             self.trace_variables();
                                         }
@@ -685,18 +690,18 @@ impl eframe::App for MemRW3App {
                                                             }
                                                         }
                                                         if config.array_index.is_none() { config.array_index = Some(0); }
-                                                        let idx = config.array_index.unwrap_or(0);
-                                                        let new_name = format!("[{}]", idx);
-                                                        let new_addr = elem_size * idx;
-                                                        if let Some(tree_node) = self.dwarf_state.find_node_mut(node_id) {
-                                                            tree_node.name = new_name.clone();
-                                                            tree_node.address = new_addr;
-                                                        }
-                                                        self.dwarf_state.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
+                                                        // let idx = config.array_index.unwrap_or(0);
+                                                        // let new_name = format!("[{}]", idx);
+                                                        // let new_addr = elem_size * idx;
+                                                        // if let Some(tree_node) = self.dwarf_state.find_node_mut(node_id) {
+                                                        //     tree_node.name = new_name.clone();
+                                                        //     tree_node.address = new_addr;
+                                                        // }
+                                                        // self.dwarf_state.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
                                                         config.name = self.dwarf_state.compute_extend_name(node_id);
                                                         config.address = self.dwarf_state.compute_extend_address(node_id).unwrap_or(0);
                                                     } else {
-                                                        if config.name.is_empty() {
+                                                        if config.name.is_empty() || config.name.contains('[') {
                                                             config.name = self.dwarf_state.compute_extend_name(node_id);
                                                             config.address = self.dwarf_state.compute_extend_address(node_id).unwrap_or(0);
                                                         }
