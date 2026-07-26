@@ -1,5 +1,6 @@
 use eframe::egui::{self, RichText, Ui};
 use crate::dwarf::types::ExtendType;
+use crate::ui::theme;
 
 pub struct TableEntry {
     pub variable_id: usize,
@@ -64,7 +65,7 @@ pub fn table_entry_dialog_ui(
 
     let mut result = None;
     ui.horizontal(|ui| {
-        if ui.button(RichText::new("删除").color(egui::Color32::from_rgb(220, 60, 50))).clicked() {
+        if ui.button(RichText::new("删除").color(theme::danger_text(ui))).clicked() {
             result = Some(true);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

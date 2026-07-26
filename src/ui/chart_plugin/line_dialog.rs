@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32, RichText, Ui};
 use crate::dwarf::types::ExtendType;
+use crate::ui::theme;
 use super::legend::preset_colors;
 
 pub enum DialogAction {
@@ -65,7 +66,7 @@ pub fn line_dialog_ui(
     let mut result = None;
     ui.horizontal(|ui| {
         ui.add_enabled_ui(!logging_active, |ui| {
-            if ui.button(RichText::new("删除").color(Color32::from_rgb(220,60,50))).clicked() {
+            if ui.button(RichText::new("删除").color(theme::danger_text(ui))).clicked() {
                 result = Some(DialogAction::Delete);
             }
         });

@@ -1,227 +1,274 @@
 use std::collections::HashMap;
 
-use eframe::egui::{self, Ui};
+use eframe::egui::{self, RichText, Ui};
 
-use crate::model::{DockTab, VariablePool};
-use crate::ui::chart_plugin::{self, ChartPluginState};
-use crate::ui::table_plugin::{self, TablePluginState};
-
-pub type FrameData = HashMap<usize, Vec<(f64, [u8; 8])>>;
+use crate::model::VariablePool;
+use crate::ui::plugin::{FrameData, MemRWPlugin, PluginAction, PluginRenderContext};
+use crate::ui::theme;
 
 #[derive(Debug, Clone)]
 pub struct DockLayoutState {
-    chart_popped: bool,
-    table_popped: bool,
-    split_ratio: f32,
-    split_drag_start: Option<(f32, f32)>,
+    popped: HashMap<String, bool>,
+    active_plugin: Option<String>,
 }
 
 impl Default for DockLayoutState {
     fn default() -> Self {
         Self {
-            chart_popped: false,
-            table_popped: false,
-            split_ratio: 0.5,
-            split_drag_start: None,
+            popped: HashMap::new(),
+            active_plugin: None,
         }
     }
 }
 
-pub fn show_chart_table_dock(
+impl DockLayoutState {
+    fn is_popped(&self, plugin_id: &str) -> bool {
+        self.popped.get(plugin_id).copied().unwrap_or(false)
+    }
+
+    fn set_popped(&mut self, plugin_id: &str, popped: bool) {
+        self.popped.insert(plugin_id.to_owned(), popped);
+    }
+
+    fn active_plugin_id(&self) -> Option<&str> {
+        self.active_plugin.as_deref()
+    }
+
+    fn set_active_plugin(&mut self, plugin_id: impl Into<String>) {
+        self.active_plugin = Some(plugin_id.into());
+    }
+}
+
+pub fn show_plugin_activity_bar(
     ui: &mut Ui,
     dock: &mut DockLayoutState,
-    chart_state: &mut ChartPluginState,
-    table_state: &mut TablePluginState,
+    plugins: &mut [Box<dyn MemRWPlugin>],
+) {
+    if plugins.is_empty() {
+        return;
+    }
+    ensure_active_plugin(dock, plugins);
+    show_activity_bar(ui, dock, plugins);
+}
+
+pub fn show_active_plugin_content(
+    ui: &mut Ui,
+    dock: &mut DockLayoutState,
+    plugins: &mut [Box<dyn MemRWPlugin>],
     pool: &VariablePool,
     frame_data: &FrameData,
     running: bool,
-    open_tree: &mut Option<DockTab>,
-) {
-    let chart_docked = !dock.chart_popped;
-    let table_docked = !dock.table_popped;
+) -> Vec<PluginAction> {
+    let mut actions = Vec::new();
 
-    match (chart_docked, table_docked) {
-        (true, true) => show_split_dock(
-            ui,
-            dock,
-            chart_state,
-            table_state,
-            pool,
-            frame_data,
-            running,
-            open_tree,
-        ),
-        (true, false) => {
-            show_chart_docked(ui, dock, chart_state, pool, frame_data, running, open_tree)
-        }
-        (false, true) => show_table_docked(ui, dock, table_state, pool, frame_data, open_tree),
-        (false, false) => {
-            ui.centered_and_justified(|ui| {
-                ui.label("Chart 和 Table 已弹出为独立窗口，可在窗口内点击 Pop in 返回主区域。");
+    if plugins.is_empty() {
+        ui.centered_and_justified(|ui| {
+            ui.label("没有已加载的插件。");
+        });
+        return actions;
+    }
+
+    ensure_active_plugin(dock, plugins);
+    let active_id = dock.active_plugin.clone();
+    let Some(active_idx) = active_id
+        .as_deref()
+        .and_then(|id| plugins.iter().position(|plugin| plugin.id() == id))
+    else {
+        show_empty_dock(ui);
+        return actions;
+    };
+
+    let plugin = plugins[active_idx].as_mut();
+    show_plugin_docked(ui, dock, plugin, pool, frame_data, running, &mut actions);
+    actions
+}
+
+pub fn show_plugin_popouts(
+    ui: &mut Ui,
+    dock: &mut DockLayoutState,
+    plugins: &mut [Box<dyn MemRWPlugin>],
+    pool: &VariablePool,
+    frame_data: &FrameData,
+    running: bool,
+) -> Vec<PluginAction> {
+    let mut actions = Vec::new();
+    show_popout_viewports(ui, dock, plugins, pool, frame_data, running, &mut actions);
+    actions
+}
+
+fn show_empty_dock(ui: &mut Ui) {
+    ui.centered_and_justified(|ui| {
+        ui.label("所有插件已弹出为独立窗口，可在窗口内点击 Pop in 返回主区域。");
+    });
+}
+
+fn ensure_active_plugin(dock: &mut DockLayoutState, plugins: &[Box<dyn MemRWPlugin>]) {
+    let active_is_available = dock.active_plugin_id().is_some_and(|active_id| {
+        plugins
+            .iter()
+            .any(|plugin| plugin.id() == active_id && !dock.is_popped(plugin.id()))
+    });
+
+    if active_is_available {
+        return;
+    }
+
+    dock.active_plugin = plugins
+        .iter()
+        .find(|plugin| !dock.is_popped(plugin.id()))
+        .map(|plugin| plugin.id().to_owned());
+}
+
+fn show_activity_bar(ui: &mut Ui, dock: &mut DockLayoutState, plugins: &[Box<dyn MemRWPlugin>]) {
+    let colors = theme::palette(ui);
+    egui::Frame::NONE
+        .fill(colors.sidebar_bg)
+        .stroke(theme::panel_stroke(ui))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_height(ui.available_height());
+            ui.add_space(6.0);
+
+            for plugin in plugins {
+                let plugin_id = plugin.id();
+                let is_active = dock.active_plugin_id() == Some(plugin_id);
+                let is_popped = dock.is_popped(plugin_id);
+                let response = activity_button(ui, plugin.as_ref(), is_active, is_popped);
+                let button_rect = response.rect;
+
+                if response.clicked() {
+                    dock.set_popped(plugin_id, false);
+                    dock.set_active_plugin(plugin_id);
+                }
+
+                if is_active {
+                    let indicator = egui::Rect::from_min_size(
+                        button_rect.left_center() - egui::vec2(0.0, 14.0),
+                        egui::vec2(3.0, 28.0),
+                    );
+                    ui.painter().rect_filled(
+                        indicator,
+                        egui::CornerRadius::same(2),
+                        colors.accent,
+                    );
+                }
+            }
+
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                ui.add_space(6.0);
             });
-        }
-    }
-
-    show_popout_viewports(
-        ui,
-        dock,
-        chart_state,
-        table_state,
-        pool,
-        frame_data,
-        running,
-        open_tree,
-    );
+        });
 }
 
-fn show_split_dock(
+fn activity_button(
+    ui: &mut Ui,
+    plugin: &dyn MemRWPlugin,
+    is_active: bool,
+    is_popped: bool,
+) -> egui::Response {
+    let colors = theme::palette(ui);
+    let fill = if is_active {
+        colors.accent_weak
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    let text_color = if is_active {
+        colors.accent_hover
+    } else if is_popped {
+        colors.text_muted
+    } else {
+        colors.text
+    };
+
+    ui.add_sized(
+        [44.0, 42.0],
+        egui::Button::new(
+            RichText::new(plugin_icon(plugin.id(), plugin.title()))
+                .size(20.0)
+                .color(text_color),
+        )
+        .fill(fill)
+        .frame(is_active),
+    )
+    .on_hover_text(if is_popped {
+        format!("{} 已弹出，点击返回主区域", plugin.title())
+    } else {
+        plugin.title().to_owned()
+    })
+}
+
+fn plugin_icon(plugin_id: &str, title: &str) -> String {
+    match plugin_id {
+        "chart" => "📈".to_owned(),
+        "table" => "📋".to_owned(),
+        _ => title.chars().next().unwrap_or('□').to_string(),
+    }
+}
+
+fn native_window_title(plugin_id: &str, title: &str) -> String {
+    match plugin_id {
+        "chart" => "Chart".to_owned(),
+        "table" => "Table".to_owned(),
+        _ => {
+            let title = title
+                .chars()
+                .filter(|ch| ch.is_ascii_graphic() || ch.is_ascii_whitespace())
+                .collect::<String>();
+            if title.trim().is_empty() {
+                plugin_id.to_owned()
+            } else {
+                title.trim().to_owned()
+            }
+        }
+    }
+}
+
+fn show_plugin_docked(
     ui: &mut Ui,
     dock: &mut DockLayoutState,
-    chart_state: &mut ChartPluginState,
-    table_state: &mut TablePluginState,
+    plugin: &mut dyn MemRWPlugin,
     pool: &VariablePool,
     frame_data: &FrameData,
     running: bool,
-    open_tree: &mut Option<DockTab>,
+    actions: &mut Vec<PluginAction>,
 ) {
-    let available = ui.available_size();
-    let splitter_w = 6.0;
-    let content_w = (available.x - splitter_w).max(0.0);
-    let left_w = if content_w >= 320.0 {
-        (content_w * dock.split_ratio).clamp(160.0, content_w - 160.0)
-    } else {
-        content_w * dock.split_ratio
-    };
-    let right_w = if content_w >= 320.0 {
-        (content_w - left_w).max(160.0)
-    } else {
-        content_w - left_w
-    };
-
-    let (dock_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
-    let left_rect =
-        egui::Rect::from_min_size(dock_rect.min, egui::vec2(left_w, dock_rect.height()));
-    let splitter_rect = egui::Rect::from_min_size(
-        egui::pos2(left_rect.max.x, dock_rect.min.y),
-        egui::vec2(splitter_w, dock_rect.height()),
-    );
-    let right_rect = egui::Rect::from_min_size(
-        egui::pos2(splitter_rect.max.x, dock_rect.min.y),
-        egui::vec2(right_w, dock_rect.height()),
-    );
-
-    let mut left_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(left_rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    left_ui.set_clip_rect(left_rect);
-    egui::Frame::group(ui.style()).show(&mut left_ui, |ui| {
-        ui.set_height(left_rect.height());
-        if dock_control_bar(ui, "Pop out") {
-            dock.chart_popped = true;
-        }
-        render_chart_content(ui, chart_state, pool, frame_data, running, open_tree);
-    });
-
-    show_splitter(ui, dock, splitter_rect, content_w);
-
-    let mut right_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(right_rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    right_ui.set_clip_rect(right_rect);
-    egui::Frame::group(ui.style()).show(&mut right_ui, |ui| {
-        ui.set_height(right_rect.height());
-        if dock_control_bar(ui, "Pop out") {
-            dock.table_popped = true;
-        }
-        render_table_content(ui, table_state, pool, frame_data, open_tree);
-    });
-}
-
-fn show_chart_docked(
-    ui: &mut Ui,
-    dock: &mut DockLayoutState,
-    chart_state: &mut ChartPluginState,
-    pool: &VariablePool,
-    frame_data: &FrameData,
-    running: bool,
-    open_tree: &mut Option<DockTab>,
-) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
+    let colors = theme::palette(ui);
+    egui::Frame::NONE
+        .fill(colors.panel_bg)
+        .stroke(theme::panel_stroke(ui))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
         ui.set_height(ui.available_height());
-        if dock_control_bar(ui, "Pop out") {
-            dock.chart_popped = true;
+        if dock_control_bar(ui, Some(plugin.title()), "Pop out") {
+            dock.set_popped(plugin.id(), true);
+            return;
         }
-        render_chart_content(ui, chart_state, pool, frame_data, running, open_tree);
-    });
-}
-
-fn show_table_docked(
-    ui: &mut Ui,
-    dock: &mut DockLayoutState,
-    table_state: &mut TablePluginState,
-    pool: &VariablePool,
-    frame_data: &FrameData,
-    open_tree: &mut Option<DockTab>,
-) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_height(ui.available_height());
-        if dock_control_bar(ui, "Pop out") {
-            dock.table_popped = true;
-        }
-        render_table_content(ui, table_state, pool, frame_data, open_tree);
-    });
-}
-
-fn show_splitter(
-    ui: &mut Ui,
-    dock: &mut DockLayoutState,
-    splitter_rect: egui::Rect,
-    content_w: f32,
-) {
-    let splitter_id = ui.make_persistent_id("chart_table_splitter");
-    let response = ui.interact(splitter_rect, splitter_id, egui::Sense::drag());
-    if response.hovered() || response.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-    }
-    if response.dragged() && content_w > 0.0 {
-        if let Some(pointer) = response.interact_pointer_pos() {
-            let (origin_x, initial_ratio) = dock
-                .split_drag_start
-                .unwrap_or((pointer.x, dock.split_ratio));
-            dock.split_drag_start = Some((origin_x, initial_ratio));
-            dock.split_ratio = (initial_ratio + (pointer.x - origin_x) / content_w).clamp(0.2, 0.8);
-        }
-    } else {
-        dock.split_drag_start = None;
-    }
-    ui.painter().rect_filled(
-        splitter_rect.shrink2(egui::vec2(2.0, 0.0)),
-        egui::CornerRadius::same(2),
-        ui.visuals().widgets.noninteractive.bg_stroke.color,
-    );
+        render_plugin_content(ui, plugin, pool, frame_data, running, actions);
+        });
 }
 
 fn show_popout_viewports(
     ui: &mut Ui,
     dock: &mut DockLayoutState,
-    chart_state: &mut ChartPluginState,
-    table_state: &mut TablePluginState,
+    plugins: &mut [Box<dyn MemRWPlugin>],
     pool: &VariablePool,
     frame_data: &FrameData,
     running: bool,
-    open_tree: &mut Option<DockTab>,
+    actions: &mut Vec<PluginAction>,
 ) {
-    if dock.chart_popped {
+    for plugin in plugins.iter_mut() {
+        if !dock.is_popped(plugin.id()) {
+            continue;
+        }
+
+        let plugin_id = plugin.id().to_owned();
+        let title = native_window_title(plugin.id(), plugin.title());
         let keep_popped = ui.ctx().show_viewport_immediate(
-            egui::ViewportId::from_hash_of("chart_popout_viewport"),
+            egui::ViewportId::from_hash_of(format!("{plugin_id}_popout_viewport")),
             egui::ViewportBuilder::default()
-                .with_title("Chart 实时数据")
-                .with_inner_size(egui::vec2(720.0, 420.0))
-                .with_min_inner_size(egui::vec2(360.0, 240.0))
+                .with_title(title)
+                .with_inner_size(plugin.viewport_size())
+                .with_min_inner_size(plugin.min_viewport_size())
                 .with_resizable(true),
             |viewport_ui, _class| {
                 if viewport_ui.ctx().input(|i| i.viewport().close_requested()) {
@@ -229,77 +276,45 @@ fn show_popout_viewports(
                 }
                 let mut pop_in = false;
                 egui::CentralPanel::default().show_inside(viewport_ui, |ui| {
-                    if dock_control_bar(ui, "Pop in") {
+                    if dock_control_bar(ui, Some(plugin.title()), "Pop in") {
                         pop_in = true;
                     }
-                    render_chart_content(ui, chart_state, pool, frame_data, running, open_tree);
+                    render_plugin_content(ui, plugin.as_mut(), pool, frame_data, running, actions);
                 });
                 !pop_in
             },
         );
         if !keep_popped {
-            dock.chart_popped = false;
-        }
-    }
-
-    if dock.table_popped {
-        let keep_popped = ui.ctx().show_viewport_immediate(
-            egui::ViewportId::from_hash_of("table_popout_viewport"),
-            egui::ViewportBuilder::default()
-                .with_title("Table 读写数据")
-                .with_inner_size(egui::vec2(520.0, 360.0))
-                .with_min_inner_size(egui::vec2(320.0, 220.0))
-                .with_resizable(true),
-            |viewport_ui, _class| {
-                if viewport_ui.ctx().input(|i| i.viewport().close_requested()) {
-                    return false;
-                }
-                let mut pop_in = false;
-                egui::CentralPanel::default().show_inside(viewport_ui, |ui| {
-                    if dock_control_bar(ui, "Pop in") {
-                        pop_in = true;
-                    }
-                    render_table_content(ui, table_state, pool, frame_data, open_tree);
-                });
-                !pop_in
-            },
-        );
-        if !keep_popped {
-            dock.table_popped = false;
+            dock.set_popped(&plugin_id, false);
         }
     }
 }
 
-fn render_chart_content(
+fn render_plugin_content(
     ui: &mut Ui,
-    chart_state: &mut ChartPluginState,
+    plugin: &mut dyn MemRWPlugin,
     pool: &VariablePool,
     frame_data: &FrameData,
     running: bool,
-    open_tree: &mut Option<DockTab>,
+    actions: &mut Vec<PluginAction>,
 ) {
-    let action = chart_plugin::chart_panel(ui, chart_state, pool, frame_data, running);
-    if action == chart_plugin::PanelAction::OpenTree {
-        *open_tree = Some(DockTab::Chart);
-    }
+    actions.extend(plugin.render(
+        ui,
+        PluginRenderContext {
+            pool,
+            frame_data,
+            running,
+        },
+    ));
 }
 
-fn render_table_content(
-    ui: &mut Ui,
-    table_state: &mut TablePluginState,
-    pool: &VariablePool,
-    frame_data: &FrameData,
-    open_tree: &mut Option<DockTab>,
-) {
-    let action = table_plugin::table_panel(ui, table_state, pool, frame_data);
-    if action == table_plugin::PanelAction::OpenTree {
-        *open_tree = Some(DockTab::Table);
-    }
-}
-
-fn dock_control_bar(ui: &mut Ui, button: &str) -> bool {
+fn dock_control_bar(ui: &mut Ui, title: Option<&str>, button: &str) -> bool {
+    let colors = theme::palette(ui);
     let mut clicked = false;
     ui.horizontal(|ui| {
+        if let Some(title) = title {
+            ui.label(RichText::new(title).strong().color(colors.text));
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             clicked = ui.button(button).clicked();
         });
