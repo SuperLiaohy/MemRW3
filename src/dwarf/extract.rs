@@ -872,63 +872,111 @@ fn collect_fields(
     let mut children = node.children();
     while let Some(child) = children.next()? {
         let entry = child.entry();
-        if entry.tag() == gimli::DW_TAG_member {
-            let name = match entry.attr_value(gimli::DW_AT_name)? {
-                Some(attr) => attr_to_string(dwarf, unit, attr)?,
-                None => None,
-            };
-            let offset = member_offset(unit, entry)?;
-            let type_ref = if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                match attr {
-                    AttributeValue::UnitRef(unit_offset) => {
-                        resolve_type(dwarf, unit, unit_offset, unit.header.offset(), type_defs)?
-                    }
-                    AttributeValue::DebugInfoRef(di_offset) => {
-                        match find_unit_for_debug_info_ref(dwarf, di_offset)? {
-                            Some((target_unit, uo)) => resolve_type(
-                                dwarf, &target_unit, uo, target_unit.header.offset(), type_defs,
-                            ).unwrap_or_else(|_| TypeRef {
-                                name: None,
-                                size: None,
-                                kind: TypeKind::Other,
-                                unit_offset: entry.offset(),
-                                unit_header_offset: unit.header.offset(),
-                                element_type: None,
-                            }),
-                            None => TypeRef {
-                                name: None,
-                                size: None,
-                                kind: TypeKind::Other,
-                                unit_offset: entry.offset(),
-                                unit_header_offset: unit.header.offset(),
-                                element_type: None,
-                            },
+        match entry.tag() {
+            gimli::DW_TAG_member => {
+                let name = match entry.attr_value(gimli::DW_AT_name)? {
+                    Some(attr) => attr_to_string(dwarf, unit, attr)?,
+                    None => None,
+                };
+                let offset = member_offset(unit, entry)?;
+                let type_ref = if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
+                    match attr {
+                        AttributeValue::UnitRef(unit_offset) => {
+                            resolve_type(dwarf, unit, unit_offset, unit.header.offset(), type_defs)?
                         }
+                        AttributeValue::DebugInfoRef(di_offset) => {
+                            match find_unit_for_debug_info_ref(dwarf, di_offset)? {
+                                Some((target_unit, uo)) => resolve_type(
+                                    dwarf, &target_unit, uo, target_unit.header.offset(), type_defs,
+                                ).unwrap_or_else(|_| TypeRef {
+                                    name: None,
+                                    size: None,
+                                    kind: TypeKind::Other,
+                                    unit_offset: entry.offset(),
+                                    unit_header_offset: unit.header.offset(),
+                                    element_type: None,
+                                }),
+                                None => TypeRef {
+                                    name: None,
+                                    size: None,
+                                    kind: TypeKind::Other,
+                                    unit_offset: entry.offset(),
+                                    unit_header_offset: unit.header.offset(),
+                                    element_type: None,
+                                },
+                            }
+                        }
+                        _ => TypeRef {
+                            name: None,
+                            size: None,
+                            kind: TypeKind::Other,
+                            unit_offset: entry.offset(),
+                            unit_header_offset: unit.header.offset(),
+                            element_type: None,
+                        },
                     }
-                    _ => TypeRef {
+                } else {
+                    TypeRef {
                         name: None,
                         size: None,
                         kind: TypeKind::Other,
                         unit_offset: entry.offset(),
                         unit_header_offset: unit.header.offset(),
                         element_type: None,
-                    },
+                    }
+                };
+                fields.push(FieldInfo {
+                    name,
+                    offset,
+                    type_ref,
+                });
+            }
+            gimli::DW_TAG_inheritance => {
+                let base_offset = member_offset(unit, entry)?;
+                let Some(attr) = entry.attr_value(gimli::DW_AT_type)? else {
+                    continue;
+                };
+                let base_type = match attr {
+                    AttributeValue::UnitRef(unit_offset) => {
+                        resolve_type(
+                            dwarf,
+                            unit,
+                            unit_offset,
+                            unit.header.offset(),
+                            type_defs,
+                        )?
+                    }
+                    AttributeValue::DebugInfoRef(di_offset) => {
+                        match find_unit_for_debug_info_ref(dwarf, di_offset)? {
+                            Some((target_unit, uo)) => {
+                                resolve_type(
+                                    dwarf,
+                                    &target_unit,
+                                    uo,
+                                    target_unit.header.offset(),
+                                    type_defs,
+                                )?
+                            }
+
+                            None => continue,
+                        }
+                    }
+                    _ => continue,
+                };
+
+                let mut base_fields = struct_fields(
+                    dwarf,
+                    &base_type,
+                    type_defs,
+                )?;
+
+                for field in &mut base_fields {
+                    field.offset += base_offset;
                 }
-            } else {
-                TypeRef {
-                    name: None,
-                    size: None,
-                    kind: TypeKind::Other,
-                    unit_offset: entry.offset(),
-                    unit_header_offset: unit.header.offset(),
-                    element_type: None,
-                }
-            };
-            fields.push(FieldInfo {
-                name,
-                offset,
-                type_ref,
-            });
+
+                fields.extend(base_fields);
+            }
+            _ => {}
         }
     }
     fields.sort_by_key(|field| field.offset);
