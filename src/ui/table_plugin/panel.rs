@@ -8,6 +8,7 @@ use crate::ui::theme;
 use eframe::egui::{self, RichText, Ui};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 pub struct TablePluginState {
     pub entries: Vec<TableEntry>,
@@ -184,6 +185,18 @@ pub fn table_panel(
 ) -> bool {
     let mut open_tree = false;
 
+    for entry in &mut state.entries {
+        let Some((_, raw)) = frame_data
+            .get(&entry.variable_id)
+            .and_then(|samples| samples.last())
+        else {
+            continue;
+        };
+        if let Some(var) = pool.get(entry.variable_id) {
+            format_value_into(raw, &var.ext_type, &mut entry.current_value);
+        }
+    }
+
     ui.vertical(|ui| {
         let dialog_is_open = state.show_entry_dialog;
 
@@ -216,7 +229,7 @@ pub fn table_panel(
                         }
                     });
                 } else {
-                    render_table(ui, state, pool, frame_data);
+                    render_table(ui, state, pool);
                 }
             });
         });
@@ -270,7 +283,6 @@ fn render_table(
     ui: &mut Ui,
     state: &mut TablePluginState,
     pool: &VariablePool,
-    frame_data: &HashMap<usize, Vec<(f64, [u8; 8])>>,
 ) {
     let mut to_edit = None;
 
@@ -297,30 +309,22 @@ fn render_table(
                     to_edit = Some(i);
                 }
 
-                let current_val = var
-                    .and_then(|v| {
-                        frame_data
-                            .get(&entry.variable_id)
-                            .and_then(|d| d.last())
-                            .map(|(_, data)| format_value(data, &v.ext_type))
-                    })
-                    .unwrap_or_else(|| "--".into());
-                ui.label(RichText::new(&current_val).size(12.0).monospace());
+                ui.label(
+                    RichText::new(&entry.current_value)
+                        .size(12.0)
+                        .monospace(),
+                );
 
-                let var_info = var.map(|v| (v.ext_type.clone(), v.size));
-                let mut edit_buf = entry.edit_buffer.clone();
+                let ext_type = var.map(|v| &v.ext_type);
                 ui.horizontal(|ui| {
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut edit_buf)
+                    ui.add(
+                        egui::TextEdit::singleline(&mut entry.edit_buffer)
                             .id(row_id.with("write_edit"))
                             .desired_width(70.0)
                             .font(egui::TextStyle::Monospace),
                     );
-                    if resp.changed() {
-                        entry.edit_buffer = edit_buf;
-                    }
                     if ui.add(egui::Button::new("写").small()).clicked() {
-                        if let Some((ref ext_type, _)) = var_info {
+                        if let Some(ext_type) = ext_type {
                             match validate_write(&entry.edit_buffer, ext_type) {
                                 Ok(value) => {
                                     state.pending_writes.push((entry.variable_id, value));
@@ -392,56 +396,59 @@ fn validate_write(input: &str, ext_type: &ExtendType) -> Result<u64, String> {
     }
 }
 
-fn format_value(data: &[u8], ext_type: &ExtendType) -> String {
+fn format_value_into(data: &[u8], ext_type: &ExtendType, output: &mut String) {
     use ExtendType::*;
+    output.clear();
     if data.is_empty() {
-        return "--".into();
+        output.push_str("--");
+        return;
     }
     match ext_type {
-        U8 => format!("0x{:02X} ({})", data[0], data[0]),
+        U8 => write!(output, "0x{:02X} ({})", data[0], data[0]),
         I8 => {
             let val = i8::from_le_bytes([data[0]]);
-            format!("0x{:02X} ({})", data[0], val)
+            write!(output, "0x{:02X} ({})", data[0], val)
         }
         U16 if data.len() >= 2 => {
             let val = u16::from_le_bytes([data[0], data[1]]);
-            format!("0x{val:04X} ({val})")
+            write!(output, "0x{val:04X} ({val})")
         }
         I16 if data.len() >= 2 => {
             let val = i16::from_le_bytes([data[0], data[1]]);
-            format!("0x{val:04X} ({val})")
+            write!(output, "0x{val:04X} ({val})")
         }
         U32 if data.len() >= 4 => {
             let val = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            format!("0x{val:08X} ({val})")
+            write!(output, "0x{val:08X} ({val})")
         }
         I32 if data.len() >= 4 => {
             let val = i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            format!("0x{val:08X} ({val})")
+            write!(output, "0x{val:08X} ({val})")
         }
         U64 if data.len() >= 8 => {
             let val = u64::from_le_bytes([
                 data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
             ]);
-            format!("0x{val:016X} ({val})")
+            write!(output, "0x{val:016X} ({val})")
         }
         I64 if data.len() >= 8 => {
             let val = i64::from_le_bytes([
                 data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
             ]);
-            format!("0x{val:016X} ({val})")
+            write!(output, "0x{val:016X} ({val})")
         }
         Float if data.len() >= 4 => {
             let val = f32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            format!("{val:.4}")
+            write!(output, "{val:.4}")
         }
         Double if data.len() >= 8 => {
             let val = f64::from_le_bytes([
                 data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
             ]);
-            format!("{val:.6}")
+            write!(output, "{val:.6}")
         }
-        Other => format!("{data:02X?}"),
-        _ => format!("{data:02X?}"),
+        Other => write!(output, "{data:02X?}"),
+        _ => write!(output, "{data:02X?}"),
     }
+    .expect("writing to a String cannot fail");
 }

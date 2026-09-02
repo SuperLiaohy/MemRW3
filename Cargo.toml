@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
+crossbeam-queue = "0.3"
 gimli = "0.31"
 object = { version = "0.36", features = ["read", "elf"] }
 eframe = "0.34"

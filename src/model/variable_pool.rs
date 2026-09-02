@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use crate::dwarf::types::{ExtendConfig, ExtendType};
-use crate::model::DoubleBuffer;
+use crate::model::RingBuffer;
 use std::collections::HashMap;
 
 pub struct PooledVariable {
@@ -9,7 +9,7 @@ pub struct PooledVariable {
     pub address: u64,
     pub ext_type: ExtendType,
     pub size: u32,
-    pub incoming: Arc<DoubleBuffer<(f64, [u8; 8])>>,
+    pub incoming: Arc<RingBuffer<(f64, [u8; 8])>>,
     pub plugins_cnt: usize,
 }
 
@@ -31,7 +31,7 @@ impl VariablePool {
             address: config.address,
             ext_type: config.ext_type.clone(),
             size: config.size,
-            incoming: Arc::new(DoubleBuffer::new()),
+            incoming: Arc::new(RingBuffer::new()),
             plugins_cnt: 0,
         });
         self.id_index.insert(id, idx);

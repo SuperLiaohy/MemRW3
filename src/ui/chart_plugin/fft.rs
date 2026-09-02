@@ -1,5 +1,8 @@
+use std::collections::VecDeque;
 use std::f64::consts::PI;
 use std::ops::{Add, Mul, Sub};
+
+use egui_plot::PlotPoint;
 
 #[derive(Clone, Copy)]
 struct Complex {
@@ -8,18 +11,32 @@ struct Complex {
 }
 
 impl Complex {
-    fn new(re: f64, im: f64) -> Self { Self { re, im } }
-    fn norm(self) -> f64 { (self.re * self.re + self.im * self.im).sqrt() }
+    fn new(re: f64, im: f64) -> Self {
+        Self { re, im }
+    }
+    fn norm(self) -> f64 {
+        (self.re * self.re + self.im * self.im).sqrt()
+    }
 }
 
 impl Add for Complex {
     type Output = Self;
-    fn add(self, rhs: Self) -> Self { Self { re: self.re + rhs.re, im: self.im + rhs.im } }
+    fn add(self, rhs: Self) -> Self {
+        Self {
+            re: self.re + rhs.re,
+            im: self.im + rhs.im,
+        }
+    }
 }
 
 impl Sub for Complex {
     type Output = Self;
-    fn sub(self, rhs: Self) -> Self { Self { re: self.re - rhs.re, im: self.im - rhs.im } }
+    fn sub(self, rhs: Self) -> Self {
+        Self {
+            re: self.re - rhs.re,
+            im: self.im - rhs.im,
+        }
+    }
 }
 
 impl Mul for Complex {
@@ -96,36 +113,21 @@ impl FftWindowType {
     ];
 }
 
-fn generate_window(win_type: FftWindowType, size: usize) -> Vec<f64> {
+fn window_value(win_type: FftWindowType, size: usize, index: usize) -> f64 {
     if size < 2 {
-        return vec![1.0; size];
+        return 1.0;
     }
-    let n = size as f64;
+    let x = 2.0 * PI * index as f64 / (size as f64 - 1.0);
     match win_type {
-        FftWindowType::Rectangular => vec![1.0; size],
-        FftWindowType::Hann => (0..size)
-            .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1.0)).cos()))
-            .collect(),
-        FftWindowType::Hamming => (0..size)
-            .map(|i| 0.54 - 0.46 * (2.0 * PI * i as f64 / (n - 1.0)).cos())
-            .collect(),
-        FftWindowType::Blackman => {
-            let a0 = 0.42;
-            let a1 = 0.5;
-            let a2 = 0.08;
-            (0..size)
-                .map(|i| {
-                    let x = 2.0 * PI * i as f64 / (n - 1.0);
-                    a0 - a1 * x.cos() + a2 * (2.0 * x).cos()
-                })
-                .collect()
-        }
+        FftWindowType::Rectangular => 1.0,
+        FftWindowType::Hann => 0.5 * (1.0 - x.cos()),
+        FftWindowType::Hamming => 0.54 - 0.46 * x.cos(),
+        FftWindowType::Blackman => 0.42 - 0.5 * x.cos() + 0.08 * (2.0 * x).cos(),
     }
 }
 
 pub struct FftResult {
-    pub frequencies: Vec<f64>,
-    pub magnitudes: Vec<f64>,
+    pub points: Vec<PlotPoint>,
     pub sample_rate: f64,
 }
 
@@ -135,7 +137,11 @@ pub struct FftResult {
 /// (clamped to `[4, data.len()]`).  `window_type` selects the window function.
 ///
 /// Returns `None` if there are fewer than 4 usable points.
-pub fn compute_fft(data: &[(f64, f64)], sample_count: usize, window_type: FftWindowType) -> Option<FftResult> {
+pub fn compute_fft(
+    data: &VecDeque<PlotPoint>,
+    sample_count: usize,
+    window_type: FftWindowType,
+) -> Option<FftResult> {
     let total = data.len();
     if total < 4 {
         return None;
@@ -145,10 +151,8 @@ pub fn compute_fft(data: &[(f64, f64)], sample_count: usize, window_type: FftWin
     let take = desired_take.min(n);
 
     let offset = total - take;
-    let slice = &data[offset..];
-
-    let t_first = slice.first()?.0;
-    let t_last = slice.last()?.0;
+    let t_first = data.get(offset)?.x;
+    let t_last = data.back()?.x;
     let duration = (t_last - t_first).max(0.0);
     let sample_rate = if duration > 0.0 {
         (take - 1) as f64 / duration
@@ -156,26 +160,49 @@ pub fn compute_fft(data: &[(f64, f64)], sample_count: usize, window_type: FftWin
         1.0
     };
 
-    let window = generate_window(window_type, take);
-
     let mut signal: Vec<Complex> = vec![Complex::new(0.0, 0.0); n];
-    for i in 0..take {
-        signal[i] = Complex::new(slice[i].1 * window[i], 0.0);
+    for (i, point) in data.iter().skip(offset).take(take).enumerate() {
+        signal[i] = Complex::new(point.y * window_value(window_type, take, i), 0.0);
     }
 
     fft(&mut signal);
 
     let n_half = n / 2;
-    let mut frequencies = Vec::with_capacity(n_half);
-    let mut magnitudes = Vec::with_capacity(n_half);
-    for k in 0..n_half {
-        frequencies.push(k as f64 * sample_rate / n as f64);
-        magnitudes.push(signal[k].norm() / take as f64 * 2.0);
+    let mut points = Vec::with_capacity(n_half);
+    for (k, value) in signal.iter().take(n_half).enumerate() {
+        points.push(PlotPoint::new(
+            k as f64 * sample_rate / n as f64,
+            (*value).norm() / take as f64 * 2.0,
+        ));
     }
 
     Some(FftResult {
-        frequencies,
-        magnitudes,
+        points,
         sample_rate,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use egui_plot::PlotPoint;
+
+    use super::{FftWindowType, compute_fft};
+
+    #[test]
+    fn computes_spectrum_directly_from_plot_history() {
+        let history = (0..8)
+            .map(|index| {
+                let time = index as f64 * 0.001;
+                PlotPoint::new(time, (index as f64).sin())
+            })
+            .collect::<VecDeque<_>>();
+
+        let result = compute_fft(&history, 8, FftWindowType::Rectangular).unwrap();
+        assert_eq!(result.points.len(), 4);
+        assert!((result.sample_rate - 1000.0).abs() < 1e-6);
+        assert!(result.points.windows(2).all(|pair| pair[0].x < pair[1].x));
+        assert!(result.points.iter().all(|point| point.y.is_finite()));
+    }
 }

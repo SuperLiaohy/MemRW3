@@ -68,6 +68,7 @@ pub struct ChartPluginState {
     pub edit_visible: bool,
     pub log_file: Option<std::path::PathBuf>,
     log_writer: Option<BufWriter<std::fs::File>>,
+    log_positions: Vec<usize>,
     logging_active: bool,
     pub log_started: bool,
     pub log_stopped: bool,
@@ -102,6 +103,7 @@ impl Default for ChartPluginState {
             edit_visible: true,
             log_file: None,
             log_writer: None,
+            log_positions: Vec::new(),
             logging_active: false,
             log_started: false,
             log_stopped: false,
@@ -386,9 +388,10 @@ pub fn chart_panel(
                     None => continue,
                 };
                 let n = data.len() as u64;
-                for (t, raw) in data {
+                let skip = legend.prepare_batch(data.len());
+                for (t, raw) in data.iter().skip(skip) {
                     let val = decode_value_f64(raw, &var.ext_type);
-                    legend.push_value(*t, val);
+                    legend.push_prepared(*t, val);
                 }
                 state.acq_frame_count += n;
             }
@@ -410,34 +413,13 @@ pub fn chart_panel(
 
     if running && state.logging_active {
         if let Some(ref mut w) = state.log_writer {
-            let mut timestamps: Vec<f64> = Vec::new();
-            for legend in &state.legends {
-                if let Some(data) = frame_data.get(&legend.variable_id) {
-                    for (t, _) in data {
-                        if !timestamps.contains(t) {
-                            timestamps.push(*t);
-                        }
-                    }
-                }
-            }
-            timestamps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            for t in &timestamps {
-                let _ = write!(w, "{:.6}", t);
-                for legend in &state.legends {
-                    if let Some(data) = frame_data.get(&legend.variable_id) {
-                        let val = data.iter().find(|(dt, _)| (dt - t).abs() < 1e-9);
-                        if let Some((_, raw)) = val {
-                            if let Some(var) = pool.get(legend.variable_id) {
-                                let f = decode_value_f64(raw, &var.ext_type);
-                                let _ = write!(w, ",{:.6}", f);
-                                continue;
-                            }
-                        }
-                    }
-                    let _ = write!(w, ",");
-                }
-                let _ = writeln!(w);
-            }
+            write_log_frame(
+                w,
+                &mut state.log_positions,
+                &state.legends,
+                pool,
+                frame_data,
+            );
             let _ = w.flush();
         }
     }
@@ -528,8 +510,8 @@ pub fn chart_panel(
                                 .legends
                                 .iter()
                                 .filter_map(|l| {
-                                    let front = l.data_history.front().map(|p| p.0);
-                                    let back = l.data_history.back().map(|p| p.0);
+                                    let front = l.data_history.front().map(|p| p.x);
+                                    let back = l.data_history.back().map(|p| p.x);
                                     front.zip(back).map(|(f, b)| (b - f).max(6.0))
                                 })
                                 .fold(6.0f64, f64::max);
@@ -571,7 +553,7 @@ pub fn chart_panel(
                             let (lo, hi) = state
                                 .legends
                                 .iter()
-                                .flat_map(|l| l.data_history.iter().map(|p| p.1))
+                                .flat_map(|l| l.data_history.iter().map(|p| p.y))
                                 .fold((0.0f64, 0.0f64), |(lo, hi), y| (lo.min(y), hi.max(y)));
                             let range = (hi - lo).max(10.0);
                             state.y_mode = YAxisMode::Fixed {
@@ -759,9 +741,61 @@ pub fn chart_panel(
     open_tree
 }
 
+fn write_log_frame(
+    writer: &mut impl Write,
+    positions: &mut Vec<usize>,
+    legends: &[ChartLegend],
+    pool: &VariablePool,
+    frame_data: &HashMap<usize, Vec<(f64, [u8; 8])>>,
+) {
+    positions.clear();
+    positions.resize(legends.len(), 0);
+
+    loop {
+        let next_timestamp = legends
+            .iter()
+            .enumerate()
+            .filter_map(|(index, legend)| {
+                frame_data
+                    .get(&legend.variable_id)
+                    .and_then(|samples| samples.get(positions[index]))
+                    .map(|(timestamp, _)| *timestamp)
+            })
+            .min_by(f64::total_cmp);
+        let Some(timestamp) = next_timestamp else {
+            break;
+        };
+
+        let _ = write!(writer, "{timestamp:.6}");
+        for (index, legend) in legends.iter().enumerate() {
+            let sample = frame_data
+                .get(&legend.variable_id)
+                .and_then(|samples| samples.get(positions[index]));
+            if let Some((sample_timestamp, raw)) = sample {
+                let same_timestamp = sample_timestamp.total_cmp(&timestamp).is_eq()
+                    || (*sample_timestamp - timestamp).abs() < 1e-9;
+                if same_timestamp {
+                    positions[index] += 1;
+                    if let Some(var) = pool.get(legend.variable_id) {
+                        let value = decode_value_f64(raw, &var.ext_type);
+                        let _ = write!(writer, ",{value:.6}");
+                        continue;
+                    }
+                }
+            }
+            let _ = write!(writer, ",");
+        }
+        let _ = writeln!(writer);
+    }
+}
+
 fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
     let available_h = ui.available_height();
     let plot_height = (available_h - 24.0).max(100.0);
+
+    for legend in &mut state.legends {
+        legend.refresh_plot_bridge();
+    }
 
     let has_data = state.legends.iter().any(|l| l.data_history.len() >= 2);
     let show_y_axis = !matches!(state.y_mode, YAxisMode::None);
@@ -770,12 +804,12 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         let t_max = state
             .legends
             .iter()
-            .filter_map(|l| l.data_history.back().map(|p| p.0))
+            .filter_map(|l| l.data_history.back().map(|p| p.x))
             .fold(0.0f64, f64::max);
         let t_min = state
             .legends
             .iter()
-            .filter_map(|l| l.data_history.front().map(|p| p.0))
+            .filter_map(|l| l.data_history.front().map(|p| p.x))
             .fold(f64::MAX, f64::min);
         if has_data {
             let xr = (t_max - t_min).max(6.0);
@@ -787,7 +821,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                     let (g_min, g_max) = state
                         .legends
                         .iter()
-                        .flat_map(|l| l.data_history.iter().map(|p| p.1))
+                        .flat_map(|l| l.data_history.iter().map(|p| p.y))
                         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
                             (lo.min(y), hi.max(y))
                         });
@@ -799,7 +833,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                     let (g_min, g_max) = state
                         .legends
                         .iter()
-                        .flat_map(|l| l.data_history.iter().map(|p| p.1))
+                        .flat_map(|l| l.data_history.iter().map(|p| p.y))
                         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
                             (lo.min(y), hi.max(y))
                         });
@@ -864,20 +898,33 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         .y_axis_formatter(|v, _range| y_axis_fmt(v.value))
         .set_margin_fraction(egui::vec2(0.02, 0.05))
         .show(ui, |plot_ui| {
-            for legend in &state.legends {
+            for (legend_index, legend) in state.legends.iter().enumerate() {
                 if !legend.visible || legend.data_history.len() < 2 {
                     continue;
                 }
-                let pts: Vec<[f64; 2]> = legend
-                    .data_history
-                    .iter()
-                    .map(|&(t, val)| [t, val])
-                    .collect();
+                let (first, second) = legend.data_history.as_slices();
                 plot_ui.line(
-                    Line::new(legend.curve_name.clone(), PlotPoints::new(pts))
+                    Line::new(legend.curve_name.clone(), PlotPoints::Borrowed(first))
+                        .id(egui::Id::new(("chart_line", legend_index, 0)))
                         .color(legend.color)
                         .width(1.5),
                 );
+                if let Some(bridge) = legend.plot_bridge.as_ref() {
+                    plot_ui.line(
+                        Line::new(legend.curve_name.clone(), PlotPoints::Borrowed(bridge))
+                            .id(egui::Id::new(("chart_line", legend_index, 1)))
+                            .color(legend.color)
+                            .width(1.5),
+                    );
+                }
+                if !second.is_empty() {
+                    plot_ui.line(
+                        Line::new(legend.curve_name.clone(), PlotPoints::Borrowed(second))
+                            .id(egui::Id::new(("chart_line", legend_index, 2)))
+                            .color(legend.color)
+                            .width(1.5),
+                    );
+                }
             }
 
             if let Some(cursor) = plot_ui.pointer_coordinate() {
@@ -983,19 +1030,21 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
 }
 
 fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
-    let mut fft_series: Vec<(&str, Color32, Vec<f64>, Vec<f64>, f64)> = Vec::new();
+    let mut fft_series: Vec<(&str, Color32, Vec<egui_plot::PlotPoint>, f64)> = Vec::new();
 
     for legend in &state.legends {
         if !legend.visible || legend.data_history.len() < 4 {
             continue;
         }
-        let data: Vec<(f64, f64)> = legend.data_history.iter().copied().collect();
-        if let Some(fft) = compute_fft(&data, state.fft_sample_count, state.fft_window_type) {
+        if let Some(fft) = compute_fft(
+            &legend.data_history,
+            state.fft_sample_count,
+            state.fft_window_type,
+        ) {
             fft_series.push((
                 legend.curve_name.as_str(),
                 legend.color,
-                fft.frequencies,
-                fft.magnitudes,
+                fft.points,
                 fft.sample_rate,
             ));
         }
@@ -1013,7 +1062,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         return;
     }
 
-    let avg_sr = fft_series.iter().map(|s| s.4).sum::<f64>() / fft_series.len() as f64;
+    let avg_sr = fft_series.iter().map(|s| s.3).sum::<f64>() / fft_series.len() as f64;
 
     ui.horizontal(|ui| {
         ui.label(
@@ -1125,14 +1174,9 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 plot_ui.set_plot_bounds(PlotBounds::from_min_max([x_min, y_min], [x_max, y_max]));
             }
 
-            for (name, color, freqs, mags, _sr) in &fft_series {
-                let pts: Vec<[f64; 2]> = freqs
-                    .iter()
-                    .zip(mags.iter())
-                    .map(|(&f, &m)| [f, m])
-                    .collect();
+            for (name, color, points, _sr) in &fft_series {
                 plot_ui.line(
-                    Line::new(*name, PlotPoints::new(pts))
+                    Line::new(*name, PlotPoints::Borrowed(points))
                         .color(*color)
                         .width(1.2),
                 );
@@ -1142,8 +1186,8 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 let freq = cursor.x;
                 let screen = plot_ui.screen_from_plot(cursor);
                 let mut data: Vec<(String, f64, f64, Color32)> = Vec::new();
-                for (name, color, freqs, mags, _sr) in &fft_series {
-                    let mag = nearest_mag(freqs, mags, freq);
+                for (name, color, points, _sr) in &fft_series {
+                    let mag = nearest_mag(points, freq);
                     data.push((name.to_string(), freq, mag, *color));
                 }
                 if !data.is_empty() {
@@ -1204,24 +1248,24 @@ fn compute_scroll_zoom(
     current: Option<(f64, f64, f64, f64)>,
     factor: f64,
     mode: FftScrollMode,
-    fft_series: &[(&str, Color32, Vec<f64>, Vec<f64>, f64)],
+    fft_series: &[(&str, Color32, Vec<egui_plot::PlotPoint>, f64)],
 ) -> (f64, f64, f64, f64) {
     let (x_min, x_max, y_min, y_max) = current.unwrap_or_else(|| {
         let x_min = fft_series
             .iter()
-            .flat_map(|s| s.2.first().copied())
+            .filter_map(|s| s.2.first().map(|point| point.x))
             .fold(f64::MAX, f64::min);
         let x_max = fft_series
             .iter()
-            .flat_map(|s| s.2.last().copied())
+            .filter_map(|s| s.2.last().map(|point| point.x))
             .fold(0.0, f64::max);
         let y_min = fft_series
             .iter()
-            .flat_map(|s| s.3.iter().copied())
+            .flat_map(|s| s.2.iter().map(|point| point.y))
             .fold(f64::MAX, f64::min);
         let y_max = fft_series
             .iter()
-            .flat_map(|s| s.3.iter().copied())
+            .flat_map(|s| s.2.iter().map(|point| point.y))
             .fold(f64::NEG_INFINITY, f64::max);
         let y_pad = ((y_max - y_min).max(0.001) * 0.1).max(0.001);
         (x_min, x_max, y_min - y_pad, y_max + y_pad)
@@ -1258,17 +1302,17 @@ fn compute_td_scroll_zoom(
         let x_max = state
             .legends
             .iter()
-            .filter_map(|l| l.data_history.back().map(|p| p.0))
+            .filter_map(|l| l.data_history.back().map(|p| p.x))
             .fold(0.0f64, f64::max);
         let x_min = state
             .legends
             .iter()
-            .filter_map(|l| l.data_history.front().map(|p| p.0))
+            .filter_map(|l| l.data_history.front().map(|p| p.x))
             .fold(f64::MAX, f64::min);
         let (y_min, y_max) = state
             .legends
             .iter()
-            .flat_map(|l| l.data_history.iter().map(|p| p.1))
+            .flat_map(|l| l.data_history.iter().map(|p| p.y))
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
                 (lo.min(y), hi.max(y))
             });
@@ -1297,23 +1341,23 @@ fn compute_td_scroll_zoom(
     }
 }
 
-fn nearest_mag(freqs: &[f64], mags: &[f64], target: f64) -> f64 {
-    if freqs.is_empty() {
+fn nearest_mag(points: &[egui_plot::PlotPoint], target: f64) -> f64 {
+    if points.is_empty() {
         return 0.0;
     }
-    let idx = freqs.partition_point(|&f| f < target);
+    let idx = points.partition_point(|point| point.x < target);
     if idx == 0 {
-        return mags[0];
+        return points[0].y;
     }
-    if idx >= freqs.len() {
-        return mags[freqs.len() - 1];
+    if idx >= points.len() {
+        return points[points.len() - 1].y;
     }
-    let left = freqs[idx - 1];
-    let right = freqs[idx];
+    let left = points[idx - 1].x;
+    let right = points[idx].x;
     if (target - left).abs() <= (right - target).abs() {
-        mags[idx - 1]
+        points[idx - 1].y
     } else {
-        mags[idx]
+        points[idx].y
     }
 }
 
@@ -1451,24 +1495,27 @@ fn decode_value_f64(data: &[u8], ext_type: &crate::dwarf::types::ExtendType) -> 
     }
 }
 
-fn find_point_at(data: &std::collections::VecDeque<(f64, f64)>, t: f64) -> (f64, f64) {
+fn find_point_at(data: &std::collections::VecDeque<egui_plot::PlotPoint>, t: f64) -> (f64, f64) {
     if data.is_empty() {
         return (t, 0.0);
     }
-    let idx = data.partition_point(|&(x, _)| x < t);
+    let idx = data.partition_point(|point| point.x < t);
     if idx == 0 {
-        return data[0];
+        let point = data[0];
+        return (point.x, point.y);
     }
     if idx >= data.len() {
-        return data[data.len() - 1];
+        let point = data[data.len() - 1];
+        return (point.x, point.y);
     }
     let p0 = data[idx - 1];
     let p1 = data[idx];
-    if (t - p0.0).abs() < (p1.0 - t).abs() {
+    let point = if (t - p0.x).abs() < (p1.x - t).abs() {
         p0
     } else {
         p1
-    }
+    };
+    (point.x, point.y)
 }
 
 fn y_axis_fmt(v: f64) -> String {
@@ -1501,5 +1548,57 @@ fn x_mode_label(mode: &XAxisMode) -> String {
     match mode {
         XAxisMode::Auto => "自动".to_string(),
         XAxisMode::Fixed(w) => format!("{:.3}s", w),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::dwarf::types::{ExtendConfig, ExtendType};
+    use crate::model::VariablePool;
+
+    use super::{ChartLegend, write_log_frame};
+
+    fn add_u8(pool: &mut VariablePool, name: &str, address: u64) -> usize {
+        pool.add(&ExtendConfig {
+            name: name.to_owned(),
+            address,
+            ext_type: ExtendType::U8,
+            size: 1,
+            array_index: None,
+            array_count: None,
+        })
+    }
+
+    #[test]
+    fn log_writer_merges_fifo_batches_without_timestamp_scratch() {
+        let mut pool = VariablePool::default();
+        let first_id = add_u8(&mut pool, "first", 0x1000);
+        let second_id = add_u8(&mut pool, "second", 0x1001);
+        let legends = vec![
+            ChartLegend::new(first_id, "first".to_owned()),
+            ChartLegend::new(second_id, "second".to_owned()),
+        ];
+        let mut frame_data = HashMap::new();
+        frame_data.insert(first_id, vec![(1.0, [1; 8]), (2.0, [2; 8])]);
+        frame_data.insert(second_id, vec![(1.0, [10; 8]), (3.0, [30; 8])]);
+
+        let mut output = Vec::new();
+        let mut positions = Vec::new();
+        write_log_frame(
+            &mut output,
+            &mut positions,
+            &legends,
+            &pool,
+            &frame_data,
+        );
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "1.000000,1.000000,10.000000\n\
+             2.000000,2.000000,\n\
+             3.000000,,30.000000\n"
+        );
     }
 }

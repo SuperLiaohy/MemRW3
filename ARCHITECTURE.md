@@ -47,7 +47,7 @@ src/
 │   ├── mod.rs
 │   ├── state.rs            # AppSession (连接/采样/BottomSheet/load_error/extend_configs)
 │   ├── variable_pool.rs    # VariablePool (Vec + HashMap, O(1) 增删查, 仅存extend数据)
-│   └── double_buffer.rs    # 无锁双缓冲 (SPSC, [UnsafeCell<Vec<T>>; 2] + AtomicUsize)
+│   └── ring_buffer.rs      # 有界 lock-free 环形队列 (crossbeam ArrayQueue)
 ├── probe/
 │   ├── mod.rs              # ProbeCell (UnsafeCell wrapper, Sync协议保证互斥)
 │   └── session.rs          # ProbeSession + AcqSlot (probe-rs 连接/采集/读写)
@@ -125,13 +125,13 @@ pub struct PooledVariable {
     pub address: u64,          // extend_address
     pub ext_type: ExtendType,  // extend_type
     pub size: u32,             // extend_size
-    pub incoming: Arc<DoubleBuffer<(f64, [u8; 8])>>,  // 无锁双缓冲, 采集线程push, UI线程drain
+    pub incoming: Arc<RingBuffer<(f64, [u8; 8])>>,  // 无锁环形队列, 采集线程push, UI线程drain
 }
 ```
 
 - 不再包含 `TreeNode`，只存实际用于采集和显示的数据
 - `VariablePool.add(&ExtendConfig)` 创建条目
-- `incoming` 通过 `Arc` 共享: rebuild_slots 时 clone 到 `VarSlotMapping.incoming`, 采集线程无锁写入, UI 线程无锁 drain
+- `incoming` 通过 `Arc` 共享: rebuild_slots 时 clone 到 `VarSlotMapping.incoming`, 采集线程无锁写入, UI 线程无锁 drain；满载时丢弃最旧样本
 - 去重: 添加变量前检查 `Pool.find_by_name_addr(name, address)`, 同 name+address 不重复添加
 - Chart/Table 面板直接使用 `var.ext_type` 进行值解码和格式化
 
@@ -287,15 +287,15 @@ BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭]
 ┌─ 主线程 (UI) ───────────────────────────────────────────────┐
 │  egui frame loop:                                            │
 │    request_repaint() ← 持续刷新                               │
-│    drain DoubleBuffer ← 无锁读取采集数据                        │
+│    drain_into RingBuffer → 复用 FrameData                      │
 │    sync.send_request(|| { probe操作 }) ← 同步时阻塞主线程       │
 └──────────────────────────────────────────────────────────────┘
-         ↑ ↓ Sync 握手                     ↑ ↓ Arc<DoubleBuffer>
+         ↑ ↓ Sync 握手                     ↑ ↓ Arc<RingBuffer>
 ┌─ 采集线程 (acq_thread) ───────────────────────────────────────┐
 │  loop:                                                       │
 │    sync.try_acquire() ← 非阻塞检查同步请求                     │
 │    if running:                                                │
-│      acquire_from_slots() → push to DoubleBuffer ← 无锁写入   │
+│      acquire_from_slots() → push to RingBuffer ← 无锁写入     │
 │      thread::sleep(delay_us) ← 采集节流                       │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -333,14 +333,15 @@ BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭]
   └─ rebuild_slots() → sync → acq_thread.slots + var_mappings
 
 采集线程 (每轮):
-  Phase 1: read32 all slots → HashMap<u64, [u8; 4]>
+  Phase 1: read32 all slots → 复用 Vec<[u8; 4]>
   Phase 2: for mapping in var_mappings:
-    assemble value from slots → mapping.incoming.push((ts, val))
+    按 slot_indices 组装值 → mapping.incoming.push((ts, val))
   cycle_count.fetch_add(1) → Hz 统计
 
 UI 线程 (每帧开始):
   for var in pool.iter():
-    frame_data[var.id] = var.incoming.drain()  ← 每个变量只 drain 一次
+    var.incoming.drain_into(&mut frame_data[var.id])
+    // FrameData HashMap 和各 Vec 跨帧复用容量
 
   plugin.render(&frame_data): ← 从 frame_data 读, 不再调用 drain
 ```
@@ -388,8 +389,8 @@ fn acquire_from_slots(&mut self) {
     self.ensure_core();
     // raw pointer 避免 &mut self 与 &self.slots 的借用冲突
     let core = unsafe { &mut *(self.cached_core.as_mut().unwrap() as *mut _) };
-    for slot in &self.slots {
-        core.read_word_32(slot.address) → slot.incoming.push((ts, val));
+    for (index, slot) in self.slots.iter().enumerate() {
+        self.slot_values[index] = core.read_word_32(slot.address).to_le_bytes();
     }
 }
 ```
@@ -410,10 +411,10 @@ pub struct AcqSlot {
 
 ```rust
 pub struct VarSlotMapping {
-    pub slots: Vec<Arc<AcqSlot>>,   // 该变量的全部 32-bit 槽位
+    pub slot_indices: Vec<usize>,   // 该变量引用的 slot_values 索引
     pub size: u32,                   // 变量总大小
     pub byte_offset: usize,          // 变量地址在首槽位中的字节偏移
-    pub incoming: Arc<DoubleBuffer<(f64, [u8; 8])>>,
+    pub incoming: Arc<RingBuffer<(f64, [u8; 8])>>,
 }
 ```
 
@@ -425,38 +426,37 @@ pub struct VarSlotMapping {
       - u32@0x2000_0000 → [0x2000_0000]
       - u64@0x2000_0000 → [0x2000_0000, 0x2000_0004]
       - u8@0x2000_0001  → [0x2000_0000] (byte_offset=1)
-   b. 去重: HashMap<u64, Arc<AcqSlot>>, 同地址共享 Arc
-   c. 构建 VarSlotMapping { slots, size, byte_offset, incoming }
-2. 将去重后的 Vec<Arc<AcqSlot>> 和 Vec<VarSlotMapping> 写入 ProbeSession (通过 sync)
+   b. 去重: HashMap<u64, usize>, 地址仅在 rebuild 时映射为连续索引
+   c. 构建 VarSlotMapping { slot_indices, size, byte_offset, incoming }
+2. 将 Vec<AcqSlot>、Vec<VarSlotMapping> 写入 ProbeSession，并复用同长度 slot_values
 ```
 
 **两阶段采集** (acq_thread):
 
 ```
 Phase 1: 读取全部去重槽位
-  for slot in slots:
-    slot_value = core.read_word_32(slot.address)
-    → HashMap<u64, [u8; 4]>
+  for (index, slot) in slots:
+    slot_values[index] = core.read_word_32(slot.address).to_le_bytes()
 
-Phase 2: 组装变量值 → push DoubleBuffer
+Phase 2: 组装变量值 → push RingBuffer
   for mapping in var_mappings:
     val = [0u8; 8]
-    for (i, slot) in mapping.slots:
-      sv = slot_values[slot.address]
+    for (i, slot_index) in mapping.slot_indices:
+      sv = slot_values[slot_index]
       if i == 0: copy sv[mapping.byte_offset..]  → val
       else:      copy sv[..]                      → val
     mapping.incoming.push((ts, val))
 ```
 
-#### DoubleBuffer (SPSC 无锁双缓冲)
+#### RingBuffer (有界 lock-free 环形队列)
 
 ```rust
-pub struct DoubleBuffer<T> {
-    bufs: [UnsafeCell<Vec<T>>; 2],
-    write_idx: AtomicUsize,  // fetch_xor(1) 原子翻转
+pub struct RingBuffer<T> {
+    queue: crossbeam_queue::ArrayQueue<T>,
 }
-// push() → 采集线程; drain() → UI 线程
-// 预分配容量避免频繁分配: with_capacity(2560)
+// push() → 采集线程; drain_into() → UI 线程，可同时执行
+// 固定容量 2560；满载时覆盖最旧样本
+// drain_into() 复用目标 Vec；discard_all() 清空时不分配
 ```
 
 #### 延迟控制 + 计时规则
@@ -486,8 +486,8 @@ Vec<PooledVariable> + HashMap<usize, usize> (id → index)
   ├─ get(id)      → O(1) id_index → Vec[index]
   └─ iter_mut()   → 直接迭代 Vec (采集循环用)
 
-PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<...>>, plugins_cnt: usize }
-                                                          ↑ Arc 共享: 采集线程 push, UI 线程 drain    ↑ 绑定计数: 0 时自动移除
+PooledVariable { id, name, address, ext_type, size, incoming: Arc<RingBuffer<...>>, plugins_cnt: usize }
+                                                          ↑ Arc 共享: 采集线程 push, UI 线程 drain_into ↑ 绑定计数: 0 时自动移除
 ```
 
 **plugins_cnt 生命周期**:
@@ -501,7 +501,7 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 |------|------|
 | 坐标轴 | Y 轴数值标签, X 轴时间标签(s) |
 | 网格线 | 自适应深色/浅色 |
-| 曲线绘制 | 从 `data_history: VecDeque<(time, value)>` 读取, 折线连接 |
+| 曲线绘制 | 历史直接存为 `VecDeque<PlotPoint>`；绘图借用两个物理切片，并用 2 点 bridge 连接环形边界，不复制整段历史 |
 | 值解码 | 按 `var.ext_type` 解析: u/i/float/double → f64, Other → 0.0 |
 | 图例 (Legend) | 图表右上角浮动: `[色条] 曲线名` |
 | 单击图例 | 切换 visible (曲线消失/恢复, 图例变暗) |
@@ -510,13 +510,13 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 | 编辑确认 | 对话框内编本地副本 (state.edit_*), "确定"生效 / "取消"丢弃, 非 running 时缓冲区长度可编辑 |
 | 缓冲区 | "确定"时若长度变化 → `data_history = VecDeque::with_capacity(new_size)` 清空重建 |
 | X 轴 | 默认 Auto 模式 6s 视窗, 无数据时初始 [0, 6.0] |
-| 清空 | 清除 data_history + `clear_all_buffers()` (sync pause → drain all DoubleBuffers + reset timer) |
+| 清空 | 清除 data_history + `clear_all_buffers()` (sync pause → discard all RingBuffers + reset timer) |
 | Hz | `acq_cycle_count: Arc<AtomicU64>` 每采集轮询 `fetch_add(1)`, 主线程每秒计算 |
 | 计时 | 首次"开始"或"清空"后第一次"开始" → timer 归零; 暂停再继续 → 累积计时 |
 | 控制栏 | 显示 `Vari:N Slot:M` (PooledVariable 数 / 去重 AcqSlot 数) + `Hz: xxxx` |
 | 添加配置颜色 | `egui::color_picker::color_edit_button_srgba()` 自定义拾色器 + 预设色块网格, egui memory 持久化 |
 | 空状态 | 居中提示"暂无监控变量" + 打开变量树按钮 |
-| Log CSV | 可选择 CSV 文件, 开始采集时覆盖写入 header+数据行, 暂停时关闭; toast 提醒开始/停止; logging 期间禁用添加/删除/改选项 |
+| Log CSV | 可选择 CSV 文件, 开始采集时覆盖写入 header+数据行, 暂停时关闭; 使用 FIFO 多路归并直接输出，不复制/排序时间戳; logging 期间禁用添加/删除/改选项 |
 | 保存/加载 | JSON 格式保存 Probe/pool/plugin payload/ELF 配置; 加载后自动 trace 更新地址 |
 | 游标 (Cursor) | 鼠标悬停时显示竖线 + 浮层: 逐曲线显示时间戳和当前值 |
 | FFT 频谱图 | 工具栏 `📊 FFT` 按钮切换; 开启后视图上下分屏: 时域(55%) + 频域(45%) |
@@ -549,9 +549,9 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 | `Complex` | 自定义复数类型 + Add/Sub/Mul 运算 |
 | `fft()` | Radix-2 Cooley-Tukey FFT (原地, 前向), 支持任意 2^k 大小 |
 | `FftWindowType` | 枚举: Rectangular / Hann / Hamming / Blackman, 各含 `label()` 和 `ALL` 常量 |
-| `generate_window()` | 根据窗类型生成系数向量 (Rectangular=全1, Hann=cos², Hamming=0.54-0.46cos, Blackman=三阶) |
-| `compute_fft()` | 公开接口: `(data, sample_count, window_type) → Option<FftResult>` |
-| `FftResult` | 输出: `frequencies: Vec<f64>`, `magnitudes: Vec<f64>`, `sample_rate: f64` |
+| `window_value()` | 按点计算窗系数，不再分配临时系数向量 |
+| `compute_fft()` | 直接遍历 `VecDeque<PlotPoint>`: `(data, sample_count, window_type) → Option<FftResult>` |
+| `FftResult` | 输出: `points: Vec<PlotPoint>`, `sample_rate: f64`，绘图直接借用 points |
 
 **计算流程**：
 1. 从数据末尾取 `sample_count` 个点 (clamp: `[4, min(total, 65536)]`)
@@ -649,6 +649,7 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<DoubleBuffer<.
 eframe = "0.34"           # GUI 框架
 egui_ltreeview = "0.7.0"  # 树形视图 (DWARF 变量树)
 probe-rs = "0.31"         # MCU 调试 (CMSIS-DAP/ST-Link/J-Link)
+crossbeam-queue = "0.3"   # 有界 lock-free 采集环形队列
 gimli = "0.31"            # DWARF 解析
 object = "0.36"           # ELF 解析
 anyhow = "1.0"            # 错误处理
@@ -709,11 +710,12 @@ serde_json = "1"          # JSON
     - `Sync`: **双 Condvar** 握手 (`cv_main` + `cv_worker`), 消除共享单 Condvar 死锁
     - `ProbeCell` (UnsafeCell): 无 Mutex 开销, Sync 协议保证互斥
     - **Core 缓存**: `session.core(0)` 首次调用后通过 `unsafe transmute` 缓存为 `Core<'static>`, 避免每帧重复初始化 (性能关键: 200-500µs → ~0µs)
-    - `AcqSlot`: 纯 32-bit 地址标记, 去重: 多变量共享同地址; `VarSlotMapping` 将变量映射到其槽位集合
-    - **两阶段采集**: Phase1 read32 全部去重槽位 → Phase2 按 byte_offset 组装变量值
-    - `DoubleBuffer`: SPSC 无锁双缓冲, `fetch_xor` 原子翻转, 预分配容量 2560
+    - `AcqSlot`: 纯 32-bit 地址标记；`VarSlotMapping` 保存连续 slot 索引，不在采集热路径中使用 HashMap/Arc 查找
+    - **两阶段采集**: Phase1 read32 到跨轮复用的 `slot_values: Vec<[u8; 4]>` → Phase2 按索引和 byte_offset 组装变量值
+    - `RingBuffer`: 基于 `crossbeam_queue::ArrayQueue` 的有界 lock-free 环形队列，容量 2560，满载时丢弃最旧样本
     - `delay_us: Arc<AtomicU64>`: 默认 0 (全速), 采集线程 sleep 节流, 主线程独立 vsync 刷新
-    - **FrameData 预 drain**: UI 每帧开始时统一 drain 所有 DoubleBuffer 到 HashMap, plugin render 只读不 drain — 避免同一变量被多处引用时多次切换缓冲区
+    - **FrameData 预 drain**: UI 每帧用 `drain_into` 消费到跨帧复用的 HashMap/Vec，plugin render 只读 — 稳态不再为每变量分配 batch Vec
+    - **Plot/FFT**: 时域 Plot 直接借用 VecDeque 切片；FFT 直接遍历历史并输出 `Vec<PlotPoint>` 供绘图借用，应用层不再复制整段点集
     - **PluginAction**: 插件只返回 OpenVariableTree/RemoveVariable/WriteVariable/ResetTimer/Toast 等意图, App 统一执行副作用
     - **plugins_cnt**: 变量被 plugin 绑定时 +1, 解绑时 -1; 归零自动从 Pool 移除 + rebuild_slots
     - **Hz**: `acq_cycle_count: Arc<AtomicU64>` 采集线程每轮 +1, 主线程每秒计算采集轮询频率

@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use eframe::egui::debug_text::print;
-use probe_rs::{CoreInterface, MemoryInterface, Session};
 use probe_rs::probe::list::Lister;
+use probe_rs::{MemoryInterface, Session};
 
-use crate::model::DoubleBuffer;
+use crate::model::RingBuffer;
 
 /// A single 32-bit aligned probe read slot.
 /// Deduplicated: multiple variables may share the same address.
@@ -15,11 +13,11 @@ pub struct AcqSlot {
 
 /// Maps one PooledVariable to its set of AcqSlots.
 pub struct VarSlotMapping {
-    pub slots: Vec<Arc<AcqSlot>>,
+    pub slot_indices: Vec<usize>,
     pub size: u32,
     /// Byte offset of the variable's address within the first 32-bit slot.
     pub byte_offset: usize,
-    pub incoming: Arc<DoubleBuffer<(f64, [u8; 8])>>,
+    pub incoming: Arc<RingBuffer<(f64, [u8; 8])>>,
 }
 
 pub struct ProbeSession {
@@ -34,8 +32,10 @@ pub struct ProbeSession {
     pub selected_probe_id: Option<String>,
     pub last_error: Option<String>,
     /// Deduplicated 32-bit aligned read slots.
-    pub slots: Vec<Arc<AcqSlot>>,
-    /// Per-variable mapping: slots → DoubleBuffer.
+    pub slots: Vec<AcqSlot>,
+    /// Reused on every acquisition cycle; indexed by `VarSlotMapping::slot_indices`.
+    pub slot_values: Vec<[u8; 4]>,
+    /// Per-variable mapping: slots → lock-free ring buffer.
     pub var_mappings: Vec<VarSlotMapping>,
     pub timer: Instant,
 }
@@ -57,6 +57,7 @@ impl Default for ProbeSession {
             selected_probe_id: None,
             last_error: None,
             slots: Vec::new(),
+            slot_values: Vec::new(),
             var_mappings: Vec::new(),
             timer: Instant::now(),
         }
@@ -213,8 +214,8 @@ impl ProbeSession {
     }
 
     /// Two-phase acquisition:
-    /// 1. Read all 32-bit slots → slot_values
-    /// 2. Assemble per-variable values from slots → push to DoubleBuffer
+    /// 1. Read all 32-bit slots into the reusable `slot_values` array
+    /// 2. Assemble per-variable values from slots → push to the ring buffer
     pub fn acquire_from_slots(&mut self) {
         if !self.connected || self.slots.is_empty() {
             return;
@@ -227,12 +228,11 @@ impl ProbeSession {
             &mut *(self.cached_core.as_mut().unwrap() as *mut probe_rs::Core<'static>)
         };
 
-        let mut slot_values: HashMap<u64, [u8; 4]> =
-            HashMap::with_capacity(self.slots.len());
-        for slot in &self.slots {
+        self.slot_values.resize(self.slots.len(), [0; 4]);
+        for (index, slot) in self.slots.iter().enumerate() {
             match core.read_word_32(slot.address) {
                 Ok(v) => {
-                    slot_values.insert(slot.address, v.to_le_bytes());
+                    self.slot_values[index] = v.to_le_bytes();
                 }
                 Err(e) => {
                     self.last_error = Some(format!(
@@ -249,11 +249,8 @@ impl ProbeSession {
             let mut val = [0u8; 8];
             let mut pos: usize = 0;
             let size = (mapping.size as usize).min(8);
-            for (i, slot) in mapping.slots.iter().enumerate() {
-                let sv = match slot_values.get(&slot.address) {
-                    Some(v) => v,
-                    None => continue,
-                };
+            for (i, &slot_index) in mapping.slot_indices.iter().enumerate() {
+                let sv = &self.slot_values[slot_index];
                 if i == 0 {
                     let start = mapping.byte_offset.min(3);
                     let copy_len = (4 - start).min(size - pos);

@@ -5,7 +5,7 @@
 ## 特性
 
 - **DWARF 变量树**: 解析 ELF 文件中的 DWARF 2/3/4/5 调试信息，自动构建变量树（结构体、数组、嵌套类型），支持跨编译单元类型引用
-- **实时数据采集**: 独立采集线程，双 Condvar 握手同步协议，无锁 DoubleBuffer SPSC 数据传递，Core 缓存优化，最高 ~7KHz 采集速率
+- **实时数据采集**: 独立采集线程，双 Condvar 握手同步协议，有界 lock-free ring buffer 数据传递，Core 缓存优化，最高 ~7KHz 采集速率
 - **时域图表**: 多曲线叠加，自动/固定坐标轴，图例浮动覆层（单击开关可见/右键属性编辑），鼠标游标跨曲线数值追踪
 - **FFT 频谱分析**: 自包含 Radix-2 FFT（零外部依赖），4 种窗函数（Rectangular/Hann/Hamming/Blackman），可配置取样点数（4~65536，从数据末尾取），多曲线频谱叠加，频率游标追踪
 - **滚轮缩放**: 时域 + 频域均支持 X / Y / Both 三模式滚轮缩放，手动模式下锚定视图中心
@@ -52,6 +52,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 | egui_ltreeview | 0.7 | DWARF 变量树视图 |
 | egui-notify | 0.22 | Toast 通知 |
 | probe-rs | 0.31 | MCU 调试探针连接与采集 |
+| crossbeam-queue | 0.3 | 有界 lock-free 采集环形队列 |
 | gimli | 0.31 | DWARF 调试信息解析 |
 | object | 0.36 | ELF 文件解析 |
 | rfd | 0.15 | 系统文件对话框 |
@@ -159,7 +160,7 @@ src/
 │   ├── mod.rs           # Model 模块入口
 │   ├── state.rs         # AppSession
 │   ├── variable_pool.rs # VariablePool (Vec + HashMap)
-│   └── double_buffer.rs # 无锁双缓冲 (SPSC)
+│   └── ring_buffer.rs   # 有界 lock-free 环形队列
 ├── probe/
 │   ├── mod.rs           # ProbeCell (UnsafeCell wrapper)
 │   └── session.rs       # ProbeSession (probe-rs 连接/采集)

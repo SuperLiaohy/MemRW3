@@ -18,8 +18,6 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use rfd::MessageDialogResult::No;
-
 pub struct MemRW3App {
     dock: DockLayoutState,
     pub session: AppSession,
@@ -28,6 +26,7 @@ pub struct MemRW3App {
     probe: Arc<ProbeCell>,
     sync: Arc<Sync>,
     pub toasts: egui_notify::Toasts,
+    frame_data: FrameData,
     _acq_handle: Option<JoinHandle<()>>,
 }
 
@@ -127,6 +126,7 @@ impl MemRW3App {
             probe,
             sync,
             toasts: egui_notify::Toasts::default().with_anchor(egui_notify::Anchor::BottomRight),
+            frame_data: FrameData::default(),
             _acq_handle,
         }
     }
@@ -228,7 +228,7 @@ impl MemRW3App {
                 .closable(true);
         } else {
             for var in self.session.config.pool.iter() {
-                var.incoming.drain();
+                var.incoming.discard_all();
             }
             let sync = self.sync.clone();
             let running = self.session.running.clone();
@@ -292,7 +292,7 @@ impl MemRW3App {
         self.sync.send_request(move || {
             unsafe { probe.get_mut() }.timer = Instant::now();
             for var in pool.iter() {
-                var.incoming.drain();
+                var.incoming.discard_all();
             }
         });
     }
@@ -315,36 +315,40 @@ impl MemRW3App {
     pub fn rebuild_slots(&self) {
         let probe = self.probe.clone();
         let pool = &self.session.config.pool;
-        let mut slot_map: std::collections::HashMap<u64, Arc<AcqSlot>> =
+        let mut slot_map: std::collections::HashMap<u64, usize> =
             std::collections::HashMap::new();
+        let mut slots: Vec<AcqSlot> = Vec::new();
         let mut mappings: Vec<VarSlotMapping> = Vec::new();
 
         for var in pool.iter() {
             let addrs = ProbeSession::slot_addresses(var.address, var.size);
             let byte_offset = (var.address & 3) as usize;
-            let mut var_slots: Vec<Arc<AcqSlot>> = Vec::with_capacity(addrs.len());
+            let mut slot_indices: Vec<usize> = Vec::with_capacity(addrs.len());
             for addr in addrs {
-                var_slots.push(
-                    slot_map
-                        .entry(addr)
-                        .or_insert_with(|| Arc::new(AcqSlot { address: addr }))
-                        .clone(),
-                );
+                let slot_index = if let Some(&index) = slot_map.get(&addr) {
+                    index
+                } else {
+                    let index = slots.len();
+                    slots.push(AcqSlot { address: addr });
+                    slot_map.insert(addr, index);
+                    index
+                };
+                slot_indices.push(slot_index);
             }
             mappings.push(VarSlotMapping {
-                slots: var_slots,
+                slot_indices,
                 size: var.size,
                 byte_offset,
                 incoming: var.incoming.clone(),
             });
         }
 
-        let slots: Vec<Arc<AcqSlot>> = slot_map.into_values().collect();
         let slot_n = slots.len() as u64;
         let sc = self.session.slot_count.clone();
         self.sync.send_request(move || {
             let p = unsafe { probe.get_mut() };
             p.slots = slots;
+            p.slot_values.resize(p.slots.len(), [0; 4]);
             p.var_mappings = mappings;
             sc.store(slot_n, Ordering::Relaxed);
         });
@@ -483,13 +487,15 @@ impl eframe::App for MemRW3App {
             self.session.hz_last_time = Instant::now();
         }
 
-        let mut frame_data = FrameData::default();
+        let mut frame_data = std::mem::take(&mut self.frame_data);
+        frame_data.retain(|id, samples| {
+            samples.clear();
+            self.session.config.pool.contains(*id)
+        });
         if running {
             for var in self.session.config.pool.iter() {
-                let drained = var.incoming.drain();
-                if !drained.is_empty() {
-                    frame_data.insert(var.id, drained);
-                }
+                let samples = frame_data.entry(var.id).or_default();
+                var.incoming.drain_into(samples);
             }
         }
 
@@ -776,6 +782,7 @@ impl eframe::App for MemRW3App {
                     });
             }
         });
+        self.frame_data = frame_data;
         self.toasts.show(ui.ctx());
     }
 }
