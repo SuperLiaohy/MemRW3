@@ -1,9 +1,36 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use probe_rs::probe::list::Lister;
 use probe_rs::{MemoryInterface, Session};
 
 use crate::model::RingBuffer;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirmwareImageKind {
+    Elf,
+    Hex,
+    Bin,
+    Uf2,
+}
+
+impl FirmwareImageKind {
+    fn from_path(path: &Path) -> Result<Self, String> {
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .ok_or_else(|| "无法识别固件格式：文件没有扩展名".to_owned())?;
+
+        match extension.as_str() {
+            "elf" | "axf" | "out" => Ok(Self::Elf),
+            "hex" | "ihex" => Ok(Self::Hex),
+            "bin" => Ok(Self::Bin),
+            "uf2" => Ok(Self::Uf2),
+            _ => Err(format!("不支持的固件格式: .{extension}")),
+        }
+    }
+}
 
 /// A single 32-bit aligned probe read slot.
 /// Deduplicated: multiple variables may share the same address.
@@ -169,6 +196,67 @@ impl ProbeSession {
         }
     }
 
+    pub fn flash_firmware(&mut self, path: &Path) -> Result<(), String> {
+        if !self.connected {
+            return Err("请先连接目标设备".to_owned());
+        }
+
+        let image_kind = FirmwareImageKind::from_path(path)?;
+        self.cached_core = None;
+        self.last_error = None;
+
+        let result: Result<(), String> = (|| {
+            let session = self
+                .session
+                .as_mut()
+                .ok_or_else(|| "Probe 会话不可用，请重新连接".to_owned())?;
+            let format = match image_kind {
+                FirmwareImageKind::Elf => probe_rs::flashing::Format::Elf(Default::default()),
+                FirmwareImageKind::Hex => probe_rs::flashing::Format::Hex,
+                FirmwareImageKind::Uf2 => probe_rs::flashing::Format::Uf2,
+                FirmwareImageKind::Bin => {
+                    let base_address = session
+                        .target()
+                        .memory_map
+                        .iter()
+                        .filter_map(|region| region.as_nvm_region())
+                        .find(|region| region.is_boot_memory() && !region.is_alias)
+                        .or_else(|| {
+                            session
+                                .target()
+                                .memory_map
+                                .iter()
+                                .filter_map(|region| region.as_nvm_region())
+                                .find(|region| !region.is_alias)
+                        })
+                        .map(|region| region.range.start)
+                        .ok_or_else(|| "目标芯片没有可用的 NVM 区域，无法确定 BIN 基址".to_owned())?;
+                    probe_rs::flashing::Format::Bin(probe_rs::flashing::BinOptions {
+                        base_address: Some(base_address),
+                        skip: 0,
+                    })
+                }
+            };
+
+            let mut options = probe_rs::flashing::DownloadOptions::default();
+            options.verify = true;
+            probe_rs::flashing::download_file_with_options(session, path, format, options)
+                .map_err(|error| format!("烧录失败: {error}"))?;
+
+            session
+                .core(0)
+                .and_then(|mut core| core.reset())
+                .map_err(|error| format!("固件已写入，但复位目标失败: {error}"))?;
+            Ok(())
+        })();
+
+        self.cached_core = None;
+        if let Err(error) = &result {
+            self.last_error = Some(error.clone());
+        }
+        result
+    }
+
     pub fn list_probes(&mut self) -> Vec<String> {
         Lister::new()
             .list_all()
@@ -284,5 +372,37 @@ impl ProbeSession {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::FirmwareImageKind;
+
+    #[test]
+    fn detects_supported_firmware_formats_case_insensitively() {
+        assert_eq!(
+            FirmwareImageKind::from_path(Path::new("firmware.ELF")),
+            Ok(FirmwareImageKind::Elf)
+        );
+        assert_eq!(
+            FirmwareImageKind::from_path(Path::new("firmware.axf")),
+            Ok(FirmwareImageKind::Elf)
+        );
+        assert_eq!(
+            FirmwareImageKind::from_path(Path::new("firmware.hex")),
+            Ok(FirmwareImageKind::Hex)
+        );
+        assert_eq!(
+            FirmwareImageKind::from_path(Path::new("firmware.bin")),
+            Ok(FirmwareImageKind::Bin)
+        );
+        assert_eq!(
+            FirmwareImageKind::from_path(Path::new("firmware.uf2")),
+            Ok(FirmwareImageKind::Uf2)
+        );
+        assert!(FirmwareImageKind::from_path(Path::new("firmware.txt")).is_err());
     }
 }

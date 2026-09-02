@@ -27,7 +27,13 @@ pub struct MemRW3App {
     sync: Arc<Sync>,
     pub toasts: egui_notify::Toasts,
     frame_data: FrameData,
+    flash_task: Option<FlashTask>,
     _acq_handle: Option<JoinHandle<()>>,
+}
+
+struct FlashTask {
+    receiver: std::sync::mpsc::Receiver<Result<(), String>>,
+    file_name: String,
 }
 
 fn acq_thread(
@@ -127,6 +133,7 @@ impl MemRW3App {
             sync,
             toasts: egui_notify::Toasts::default().with_anchor(egui_notify::Anchor::BottomRight),
             frame_data: FrameData::default(),
+            flash_task: None,
             _acq_handle,
         }
     }
@@ -276,6 +283,78 @@ impl MemRW3App {
         self.sync.send_request(move || {
             unsafe { probe.get_mut() }.reset_target();
         });
+    }
+
+    pub fn is_flashing(&self) -> bool {
+        self.flash_task.is_some()
+    }
+
+    pub fn start_flash_firmware(&mut self, path: std::path::PathBuf) -> Result<(), String> {
+        if !self.session.connected {
+            return Err("请先连接目标设备".to_owned());
+        }
+        if self.flash_task.is_some() {
+            return Err("已有烧录任务正在执行".to_owned());
+        }
+
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("firmware")
+            .to_owned();
+        self.session.set_running(false);
+        self.session.timer_was_started = false;
+        for variable in self.session.config.pool.iter() {
+            variable.incoming.discard_all();
+        }
+
+        let probe = self.probe.clone();
+        let sync = self.sync.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let mut outcome = Err("烧录任务未执行".to_owned());
+            sync.send_request(|| {
+                outcome = unsafe { probe.get_mut() }.flash_firmware(&path);
+            });
+            let _ = sender.send(outcome);
+        });
+
+        self.flash_task = Some(FlashTask {
+            receiver,
+            file_name,
+        });
+        Ok(())
+    }
+
+    fn poll_flash_task(&mut self) {
+        let Some(task) = self.flash_task.as_ref() else {
+            return;
+        };
+        let outcome = match task.receiver.try_recv() {
+            Ok(outcome) => outcome,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("烧录线程意外结束".to_owned())
+            }
+        };
+        let task = self.flash_task.take().unwrap();
+
+        for variable in self.session.config.pool.iter() {
+            variable.incoming.discard_all();
+        }
+        match outcome {
+            Ok(()) => {
+                self.toasts
+                    .success(format!("固件 {} 烧录并校验成功", task.file_name))
+                    .duration(Some(Duration::from_secs(5)));
+            }
+            Err(error) => {
+                self.toasts
+                    .error(error)
+                    .duration(Some(Duration::from_secs(8)))
+                    .closable(true);
+            }
+        }
     }
 
     pub fn reset_timer(&self) {
@@ -474,6 +553,10 @@ fn bottom_sheet_handle(
 
 impl eframe::App for MemRW3App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.poll_flash_task();
+        if self.is_flashing() {
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
+        }
         let running = self.session.is_running();
         if running {
             ui.ctx().request_repaint();
@@ -783,8 +866,26 @@ impl eframe::App for MemRW3App {
             }
         });
         self.frame_data = frame_data;
+        if let Some(task) = self.flash_task.as_ref() {
+            firmware_flash_modal(ui.ctx(), &task.file_name);
+        }
         self.toasts.show(ui.ctx());
     }
+}
+
+fn firmware_flash_modal(ctx: &egui::Context, file_name: &str) {
+    egui::Modal::new(egui::Id::new("firmware_flash_modal")).show(ctx, |ui| {
+        ui.set_min_width(280.0);
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().size(18.0));
+            ui.vertical(|ui| {
+                ui.strong("正在烧录并校验固件");
+                ui.label(file_name);
+            });
+        });
+        ui.add_space(6.0);
+        ui.label("请保持目标板和调试器连接，完成后目标将自动复位。");
+    });
 }
 
 #[derive(Serialize, Deserialize)]

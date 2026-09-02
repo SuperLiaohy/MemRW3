@@ -10,6 +10,7 @@
 - **FFT 频谱分析**: 自包含 Radix-2 FFT（零外部依赖），4 种窗函数（Rectangular/Hann/Hamming/Blackman），可配置取样点数（4~65536，从数据末尾取），多曲线频谱叠加，频率游标追踪
 - **滚轮缩放**: 时域 + 频域均支持 X / Y / Both 三模式滚轮缩放，手动模式下锚定视图中心
 - **变量读写**: Table 面板支持按 ExtendType 写入（u8~u64, i8~i64, f32, f64），带范围校验
+- **固件烧录**: Control Bar 直接烧录并校验 ELF/AXF、HEX、BIN 或 UF2，完成后自动复位目标
 - **CSV 日志**: 可选择 CSV 文件，开始采集时覆盖写入时间戳 + 所有曲线数据行
 - **插件化界面**: Chart 与 Table 均实现 `MemRWPlugin` trait，Dock、变量树添加、写入、删除、Toast、配置保存/加载统一通过动态插件池分发
 - **统一主题**: App 背景、Activity Bar、控制栏、Dock、BottomSheet、状态提示和 Dialog 语义色来自同一套 `theme` palette
@@ -100,6 +101,12 @@ cargo run --release
 
 - 点击控制栏 **⚙ 设置**，选择 MCU 型号、协议（SWD/JTAG）、速度
 - 点击 **连接** 通过调试探针连接目标设备
+
+### 3.1 烧录固件
+
+- 连接目标后点击控制栏 **烧录固件**，选择 ELF/AXF、HEX、BIN 或 UF2 文件
+- 确认目标芯片与文件后开始烧录；采集会自动暂停，界面显示烧录状态
+- BIN 文件自动使用目标芯片的启动 Flash 基址；写入后执行校验并复位目标
 
 ### 4. 添加监控变量
 

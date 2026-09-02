@@ -23,6 +23,8 @@ pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
                 ui.separator();
                 reset_button(ui, app);
                 ui.separator();
+                flash_button(ui, app);
+                ui.separator();
                 if ui.button(RichText::new("保存").size(12.0)).clicked() {
                     app.save_config();
                 }
@@ -285,6 +287,51 @@ fn reset_button(ui: &mut Ui, app: &mut MemRW3App) {
             app.sync_reset();
         }
     });
+}
+
+fn flash_button(ui: &mut Ui, app: &mut MemRW3App) {
+    let response = ui
+        .add_enabled(
+            app.session.connected && !app.is_flashing(),
+            egui::Button::new(RichText::new("烧录固件").size(12.0)),
+        )
+        .on_hover_text("支持 ELF/AXF、HEX、BIN 和 UF2；BIN 自动使用目标启动 Flash 基址");
+
+    if !response.clicked() {
+        return;
+    }
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("固件", &["elf", "axf", "out", "hex", "ihex", "bin", "uf2"])
+        .add_filter("ELF/AXF", &["elf", "axf", "out"])
+        .add_filter("Intel HEX", &["hex", "ihex"])
+        .add_filter("Binary", &["bin"])
+        .add_filter("UF2", &["uf2"])
+        .pick_file()
+    else {
+        return;
+    };
+
+    let confirmed = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title("确认烧录固件")
+        .set_description(format!(
+            "将 {} 烧录到 {}。此操作会修改目标芯片的 Flash，是否继续？",
+            path.display(),
+            app.session.config.probe_chip
+        ))
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show()
+        == rfd::MessageDialogResult::Yes;
+    if !confirmed {
+        return;
+    }
+
+    if let Err(error) = app.start_flash_firmware(path) {
+        app.toasts
+            .error(error)
+            .duration(Some(std::time::Duration::from_secs(5)))
+            .closable(true);
+    }
 }
 
 fn sampling_status(ui: &mut Ui, app: &MemRW3App) {

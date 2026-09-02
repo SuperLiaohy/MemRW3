@@ -9,7 +9,7 @@ MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量�
 ```
 ┌────┬─────────────────────────────────────────────────────────┐
 │ 📈 │ 控制栏 (Control Bar)                                    │
-│ 📋 │ [连接/断开] [开始/暂停] [⚙设置] [延迟] [Reset] [保存] [加载] Hz: xxx │
+│ 📋 │ [连接/断开] [开始/暂停] [⚙设置] [延迟] [Reset] [烧录固件] [保存] [加载] Hz: xxx │
 │    ├─────────────────────────────────────────────────────────┤ ← 模态阻塞: 右侧不可交互
 │    │ 当前插件内容区 (默认 Pop in, 可弹出 OS 窗口)             │
 │    │ Chart: 坐标轴+曲线+图例 / Table: Name|Value|Write       │
@@ -317,7 +317,7 @@ BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭]
 两个 Condvar 独立: `cv_main` (主线程等) 和 `cv_worker` (采集线程等)，消除共享单 Condvar 的死锁风险。
 
 - **正常运行时**: 采集线程全速采集，主线程无锁 drain 数据渲染。两线程无交互。
-- **同步操作时** (连接/断开/复位/写入/更新slots): 主线程通过 `sync.send_request` 暂停采集线程后独占 probe，完成后恢复。闭包运行在**主线程**。
+- **同步操作时** (连接/断开/复位/写入/更新slots): 主线程通过 `sync.send_request` 暂停采集线程后独占 probe，完成后恢复。烧录由后台任务调用同一握手，在进度 Modal 阻止其他 probe 操作。
 
 #### 数据流 (无锁路径)
 
@@ -610,6 +610,7 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<RingBuffer<...
 - 加载: `add_enabled_ui(!running)`
 - 保存: 始终可用
 - Reset: `add_enabled_ui(connected)`
+- 烧录固件: 连接后可用；选择文件并二次确认，任务期间自动暂停采集并显示不可关闭的进度 Modal
 - ⚙设置: `add_enabled_ui(!connected)`
 
 ### 9. 模态 (Modal) 行为 + Toast 通知
@@ -622,6 +623,7 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<RingBuffer<...
 | 曲线属性 line_dialog | `Modal::new("line_dialog_modal").show(ctx)` | [确定]/[取消]/[删除] |
 | 变量属性 table_dialog | `Modal::new("table_entry_modal").show(ctx)` | [确定]/[取消]/[删除] |
 | 设置 Dialog | `Modal::new("probe_settings_modal").show(ctx)` | [确定]/[取消] |
+| 固件烧录 | `Modal::new("firmware_flash_modal").show(ctx)` | 烧录线程完成后自动关闭 |
 
 **Toast 通知** (`egui-notify 0.22`): 右下角 (Anchor::BottomRight), 写入成功=绿色2s可关闭, 失败=红色3s可关闭, 追踪失败=红色15s可关闭。`self.toasts.show(ctx)` 每帧在 ui() 末尾调用。
 
