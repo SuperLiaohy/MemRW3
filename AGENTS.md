@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-MemRW3 is a single Rust 2024 desktop binary. `src/main.rs` starts the eframe application, while `src/app.rs` coordinates UI state, configuration, probe access, and the acquisition thread. Keep domain code in its existing modules: `src/dwarf/` parses ELF/DWARF data, `src/model/` owns session and buffering types, `src/probe/` wraps `probe-rs`, and `src/ui/` contains egui views plus the Chart and Table plugins. Consult `ARCHITECTURE.md` before changing data flow or plugin boundaries; `README.md` documents setup and user workflows. Build output belongs in `target/` and must not be committed.
+MemRW3 is a single Rust 2024 desktop binary. `src/main.rs` starts the eframe application, while `src/app.rs` coordinates UI state, configuration, probe access, and the acquisition thread. Keep domain code in its existing modules: `src/dwarf/` parses ELF/DWARF data, `src/svd/` normalizes CMSIS-SVD register trees, `src/model/` owns session and buffering types, `src/probe/` wraps `probe-rs`, and `src/ui/` contains egui views plus the Chart and Table plugins. Consult `ARCHITECTURE.md` before changing data flow or plugin boundaries; `README.md` documents setup and user workflows. Build output belongs in `target/` and must not be committed.
 
 ## Build, Test, and Development Commands
 

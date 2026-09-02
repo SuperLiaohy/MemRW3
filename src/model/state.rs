@@ -1,11 +1,9 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
 use super::VariablePool;
 use crate::dwarf::types::ExtendConfig;
-
-
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 pub struct AppSession {
     pub connected: bool,
@@ -18,7 +16,6 @@ pub struct AppSession {
     pub acq_stop: Arc<AtomicBool>,
     pub active_bottom_sheet: Option<String>,
     pub bottom_sheet_drag: Option<(f32, f32)>,
-    pub selected_variables: HashSet<usize>,
     pub load_error: Option<String>,
     pub connect_error: Option<String>,
     pub extend_configs: HashMap<usize, ExtendConfig>,
@@ -57,7 +54,6 @@ impl Default for AppSession {
             acq_stop: Arc::new(AtomicBool::new(false)),
             active_bottom_sheet: None,
             bottom_sheet_drag: None,
-            selected_variables: HashSet::new(),
             load_error: None,
             connect_error: None,
             extend_configs: HashMap::new(),
@@ -82,7 +78,7 @@ pub struct Config {
     pub pool: VariablePool,
     pub probe_chip: String,
     pub probe_protocol: String,
-    pub probe_speed_khz: u32
+    pub probe_speed_khz: u32,
 }
 impl Default for Config {
     fn default() -> Self {

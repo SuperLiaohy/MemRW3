@@ -5,7 +5,9 @@ use crate::sync::Sync;
 use crate::ui;
 use crate::ui::chart_plugin::ChartPluginState;
 use crate::ui::dock::DockLayoutState;
-use crate::ui::plugin::{FrameData, MemRWPlugin, PluginAction, SavedPluginConfig, ToastLevel};
+use crate::ui::plugin::{
+    FrameData, MemRWPlugin, PluginAction, SavedPluginConfig, ToastLevel, VariableCandidate,
+};
 use crate::ui::table_plugin::TablePluginState;
 use eframe::egui;
 use egui::Ui;
@@ -400,6 +402,9 @@ impl MemRW3App {
         let mut mappings: Vec<VarSlotMapping> = Vec::new();
 
         for var in pool.iter() {
+            if var.active_readers == 0 {
+                continue;
+            }
             let addrs = ProbeSession::slot_addresses(var.address, var.size);
             let byte_offset = (var.address & 3) as usize;
             let mut slot_indices: Vec<usize> = Vec::with_capacity(addrs.len());
@@ -433,34 +438,38 @@ impl MemRW3App {
         });
     }
 
-    fn push_slot_for_new_var(&self, _var_id: usize) {
-        self.rebuild_slots();
-    }
-
-    pub fn unbind_variable(&mut self, var_id: usize) {
-        let should_remove = {
-            if let Some(var) = self.session.config.pool.get_mut(var_id) {
-                var.plugins_cnt = var.plugins_cnt.saturating_sub(1);
-                var.plugins_cnt == 0
-            } else {
-                false
-            }
-        };
-        if should_remove {
-            self.session.config.pool.remove(var_id);
-            self.session.selected_variables.remove(&var_id);
-            self.rebuild_slots();
-        }
+    pub fn unbind_variable(&mut self, var_id: usize, was_enabled: bool) {
+        self.session.config.pool.unbind(var_id, was_enabled);
     }
 
     fn handle_plugin_actions(&mut self, actions: Vec<PluginAction>) {
+        let mut rebuild_slots = false;
         for action in actions {
             match action {
                 PluginAction::OpenVariableTree { plugin_id } => {
                     self.session.active_bottom_sheet = Some(plugin_id);
                 }
-                PluginAction::RemoveVariable { var_id } => {
-                    self.unbind_variable(var_id);
+                PluginAction::RemoveVariable {
+                    var_id,
+                    was_enabled,
+                } => {
+                    self.unbind_variable(var_id, was_enabled);
+                    rebuild_slots = true;
+                }
+                PluginAction::SetVariableEnabled { var_id, enabled } => {
+                    if self
+                        .session
+                        .config
+                        .pool
+                        .set_binding_enabled(var_id, enabled)
+                    {
+                        if !enabled {
+                            if let Some(variable) = self.session.config.pool.get(var_id) {
+                                variable.incoming.discard_all();
+                            }
+                        }
+                        rebuild_slots = true;
+                    }
                 }
                 PluginAction::WriteVariable { var_id, value } => {
                     let ok = self.write_variable(var_id, value);
@@ -481,6 +490,9 @@ impl MemRW3App {
                     self.show_plugin_toast(level, message);
                 }
             }
+        }
+        if rebuild_slots {
+            self.rebuild_slots();
         }
     }
 
@@ -503,6 +515,182 @@ impl MemRW3App {
 impl Drop for MemRW3App {
     fn drop(&mut self) {
         self.session.acq_stop.store(true, Ordering::Relaxed);
+    }
+}
+
+fn variable_candidate(
+    node: &dwarf::types::TreeNode,
+    config: &dwarf::types::ExtendConfig,
+) -> Result<VariableCandidate, String> {
+    if config.ext_type != dwarf::types::ExtendType::Other {
+        return Ok(VariableCandidate {
+            label: node.name.clone(),
+            name: config.name.clone(),
+            address: config.address,
+            ext_type: config.ext_type.clone(),
+            size: config.size,
+            children: Vec::new(),
+        });
+    }
+
+    materialize_candidate_node(
+        node,
+        node.name.clone(),
+        config.name.clone(),
+        config.address,
+    )
+}
+
+fn materialize_candidate_node(
+    node: &dwarf::types::TreeNode,
+    label: String,
+    name: String,
+    address: u64,
+) -> Result<VariableCandidate, String> {
+    let mut children = Vec::new();
+    match &node.basic_type {
+        dwarf::types::BasicType::ArrayElem(_, count) => {
+            let prototype = node
+                .children
+                .first()
+                .ok_or_else(|| format!("数组 {name} 缺少元素类型信息"))?;
+            let stride = u64::from(prototype.size);
+            if *count > 1 && stride == 0 {
+                return Err(format!("数组 {name} 的元素大小为 0，无法展开"));
+            }
+            for index in 0..*count {
+                let offset = index
+                    .checked_mul(stride)
+                    .ok_or_else(|| format!("数组 {name} 的元素偏移溢出"))?;
+                let child_address = address
+                    .checked_add(offset)
+                    .ok_or_else(|| format!("数组 {name} 的元素地址溢出"))?;
+                children.push(materialize_candidate_node(
+                    prototype,
+                    format!("[{index}]"),
+                    format!("{name}[{index}]"),
+                    child_address,
+                )?);
+            }
+        }
+        _ if !node.children.is_empty() => {
+            for child in &node.children {
+                let child_address = address
+                    .checked_add(child.address)
+                    .ok_or_else(|| format!("字段 {name}.{} 的地址溢出", child.name))?;
+                let child_name = if child.name.starts_with('[') {
+                    format!("{name}{}", child.name)
+                } else {
+                    format!("{name}.{}", child.name)
+                };
+                children.push(materialize_candidate_node(
+                    child,
+                    child.name.clone(),
+                    child_name,
+                    child_address,
+                )?);
+            }
+        }
+        _ => {}
+    }
+
+    let ext_type = if children.is_empty() {
+        dwarf::types::basic_type_to_extend(&node.basic_type)
+    } else {
+        dwarf::types::ExtendType::Other
+    };
+    Ok(VariableCandidate {
+        label,
+        name,
+        address,
+        ext_type,
+        size: node.size,
+        children,
+    })
+}
+
+#[cfg(test)]
+mod variable_candidate_tests {
+    use super::variable_candidate;
+    use crate::dwarf::types::{BasicType, ExtendConfig, ExtendType, TreeNode};
+
+    fn node(
+        id: usize,
+        name: &str,
+        basic_type: BasicType,
+        address: u64,
+        size: u32,
+        children: Vec<TreeNode>,
+    ) -> TreeNode {
+        TreeNode {
+            id,
+            parent_id: None,
+            name: name.to_owned(),
+            type_name: String::new(),
+            basic_type,
+            address,
+            size,
+            children,
+        }
+    }
+
+    #[test]
+    fn materializes_every_array_element_from_the_prototype() {
+        let prototype = node(4, "[7]", BasicType::U16, 99, 2, Vec::new());
+        let array = node(
+            3,
+            "samples",
+            BasicType::ArrayElem(Box::new(BasicType::U16), 3),
+            4,
+            6,
+            vec![prototype],
+        );
+        let root = node(
+            1,
+            "state",
+            BasicType::Struct("State".to_owned()),
+            0x2000_0000,
+            10,
+            vec![node(2, "value", BasicType::U32, 0, 4, Vec::new()), array],
+        );
+        let config = ExtendConfig {
+            name: "state".to_owned(),
+            address: 0x2000_0000,
+            ext_type: ExtendType::Other,
+            size: 10,
+            array_index: None,
+            array_count: None,
+        };
+
+        let candidate = variable_candidate(&root, &config).unwrap();
+        let samples = &candidate.children[1];
+        assert_eq!(samples.children.len(), 3);
+        assert_eq!(samples.children[0].name, "state.samples[0]");
+        assert_eq!(samples.children[0].address, 0x2000_0004);
+        assert_eq!(samples.children[1].address, 0x2000_0006);
+        assert_eq!(samples.children[2].address, 0x2000_0008);
+    }
+
+    #[test]
+    fn rejects_array_address_overflow() {
+        let root = node(
+            1,
+            "samples",
+            BasicType::ArrayElem(Box::new(BasicType::U32), 2),
+            u64::MAX - 1,
+            8,
+            vec![node(2, "[0]", BasicType::U32, 0, 4, Vec::new())],
+        );
+        let config = ExtendConfig {
+            name: "samples".to_owned(),
+            address: u64::MAX - 1,
+            ext_type: ExtendType::Other,
+            size: 8,
+            array_index: None,
+            array_count: None,
+        };
+
+        assert!(variable_candidate(&root, &config).is_err());
     }
 }
 
@@ -795,20 +983,19 @@ impl eframe::App for MemRW3App {
                                                             config.address = self.dwarf_state.compute_extend_address(node_id).unwrap_or(0);
                                                         }
                                                     }
-                                                    let already_exists = self
-                                                        .session.config
-                                                        .pool
-                                                        .find_by_name_addr(&config.name, config.address);
-                                                    let (var_id, is_new_var) = if let Some(var) = already_exists {
-                                                        (var.id, false)
-                                                    } else {
-                                                        let id = self.session.config.pool.add(config);
-                                                        self.session.selected_variables.insert(id);
-                                                        (id, true)
-                                                    };
+                                                    let allow_composite = target_plugin_id
+                                                        .as_deref()
+                                                        .and_then(|plugin_id| {
+                                                            self.plugins
+                                                                .iter()
+                                                                .find(|plugin| plugin.id() == plugin_id)
+                                                        })
+                                                        .is_some_and(|plugin| {
+                                                            plugin.supports_composite_variables()
+                                                        });
                                                     let plugins = &mut self.plugins;
-                                                    let pool = &self.session.config.pool;
-                                                    let added = ui::vari_properties_ui(ui, node, config, |ui, node_name| {
+                                                    let pool = &mut self.session.config.pool;
+                                                    let added = ui::vari_properties_ui(ui, node, config, allow_composite, |ui, node_name, current_config| {
                                                         let Some(plugin_id) = target_plugin_id.as_deref() else {
                                                             ui.label("未选择目标插件");
                                                             return false;
@@ -820,24 +1007,26 @@ impl eframe::App for MemRW3App {
                                                             ui.label(format!("目标插件不存在: {plugin_id}"));
                                                             return false;
                                                         };
+                                                        let candidate = match variable_candidate(node, current_config) {
+                                                            Ok(candidate) => candidate,
+                                                            Err(error) => {
+                                                                ui.label(
+                                                                    egui::RichText::new(error)
+                                                                        .color(crate::ui::theme::danger_text(ui)),
+                                                                );
+                                                                return false;
+                                                            }
+                                                        };
                                                         plugin.add_variable_ui(
                                                             ui,
                                                             node_id,
                                                             node_name,
-                                                            var_id,
+                                                            &candidate,
                                                             pool,
                                                         )
                                                     });
                                                     if added {
-                                                        if let Some(var) = self.session.config.pool.get_mut(var_id) {
-                                                            var.plugins_cnt += 1;
-                                                        }
-                                                    } else if is_new_var {
-                                                        self.session.config.pool.remove(var_id);
-                                                        self.session.selected_variables.remove(&var_id);
-                                                    }
-                                                    if added && is_new_var {
-                                                        self.push_slot_for_new_var(var_id);
+                                                        self.rebuild_slots();
                                                     }
                                                     // Re-sync tree/selected_node after vari_properties_ui
                                                     // (DragValue may have changed array_index)

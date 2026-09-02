@@ -3,7 +3,7 @@ use super::legend::ChartLegend;
 use crate::dwarf::types::ExtendType;
 use crate::model::VariablePool;
 use crate::ui::plugin::{
-    MemRWPlugin, PluginAction, PluginRenderContext, ToastLevel, temp_text_value,
+    MemRWPlugin, PluginAction, PluginRenderContext, ToastLevel, VariableCandidate, temp_text_value,
 };
 use crate::ui::theme;
 use eframe::egui::{self, Color32, RichText, Ui};
@@ -157,6 +157,10 @@ impl ChartPluginState {
 struct SavedChartLegend {
     variable_name: String,
     variable_address: u64,
+    #[serde(default)]
+    variable_type: Option<ExtendType>,
+    #[serde(default)]
+    variable_size: Option<u32>,
     curve_name: String,
     color: [u8; 4],
     visible: bool,
@@ -189,7 +193,10 @@ impl MemRWPlugin for ChartPluginState {
         }
 
         for var_id in self.removed_var_ids.drain(..) {
-            actions.push(PluginAction::RemoveVariable { var_id });
+            actions.push(PluginAction::RemoveVariable {
+                var_id,
+                was_enabled: true,
+            });
         }
         if self.reset_timer {
             self.reset_timer = false;
@@ -218,8 +225,8 @@ impl MemRWPlugin for ChartPluginState {
         ui: &mut Ui,
         node_id: usize,
         default_name: &str,
-        variable_id: usize,
-        pool: &VariablePool,
+        candidate: &VariableCandidate,
+        pool: &mut VariablePool,
     ) -> bool {
         let color_id = ui.make_persistent_id(format!("chart_add_color_{node_id}"));
         let name_id = ui.make_persistent_id(format!("chart_add_name_{node_id}"));
@@ -237,7 +244,18 @@ impl MemRWPlugin for ChartPluginState {
         });
 
         if added {
+            let variable_id = if let Some(variable) = pool.find_compatible(
+                &candidate.name,
+                candidate.address,
+                &candidate.ext_type,
+                candidate.size,
+            ) {
+                variable.id
+            } else {
+                pool.add(&candidate.to_config())
+            };
             self.add_legend(variable_id, pool, curve_name, chart_color);
+            pool.bind(variable_id, true);
         }
         added
     }
@@ -255,6 +273,8 @@ impl MemRWPlugin for ChartPluginState {
                 SavedChartLegend {
                     variable_name: var.map(|v| v.name.clone()).unwrap_or_default(),
                     variable_address: var.map(|v| v.address).unwrap_or(0),
+                    variable_type: var.map(|v| v.ext_type.clone()),
+                    variable_size: var.map(|v| v.size),
                     curve_name: legend.curve_name.clone(),
                     color: [
                         legend.color.r(),
@@ -280,8 +300,19 @@ impl MemRWPlugin for ChartPluginState {
 
         self.legends.clear();
         for saved in legends {
-            let var_id = pool
-                .find_by_name_addr(&saved.variable_name, saved.variable_address)
+            let var_id = saved
+                .variable_type
+                .as_ref()
+                .zip(saved.variable_size)
+                .and_then(|(ext_type, size)| {
+                    pool.find_compatible(
+                        &saved.variable_name,
+                        saved.variable_address,
+                        ext_type,
+                        size,
+                    )
+                })
+                .or_else(|| pool.find_by_name_addr(&saved.variable_name, saved.variable_address))
                 .map(|v| v.id)
                 .ok_or_else(|| format!("图表变量 \"{}\" 匹配失败", saved.variable_name))?;
 
@@ -295,9 +326,7 @@ impl MemRWPlugin for ChartPluginState {
             legend.visible = saved.visible;
             legend.buffer_size = saved.buffer_size;
             self.legends.push(legend);
-            if let Some(var) = pool.get_mut(var_id) {
-                var.plugins_cnt += 1;
-            }
+            pool.bind(var_id, true);
         }
         Ok(())
     }

@@ -10,6 +10,8 @@
 - **FFT 频谱分析**: 自包含 Radix-2 FFT（零外部依赖），4 种窗函数（Rectangular/Hann/Hamming/Blackman），可配置取样点数（4~65536，从数据末尾取），多曲线频谱叠加，频率游标追踪
 - **滚轮缩放**: 时域 + 频域均支持 X / Y / Both 三模式滚轮缩放，手动模式下锚定视图中心
 - **变量读写**: Table 面板支持按 ExtendType 写入（u8~u64, i8~i64, f32, f64），带范围校验
+- **树形变量表**: Table 可递归添加结构体并完整展开数组，父子勾选独立控制实际采集
+- **SVD 寄存器浏览**: Table 右侧后台加载 CMSIS-SVD，展示外设、寄存器地址与位字段
 - **固件烧录**: Control Bar 直接烧录并校验 ELF/AXF、HEX、BIN 或 UF2，完成后自动复位目标
 - **CSV 日志**: 可选择 CSV 文件，开始采集时覆盖写入时间戳 + 所有曲线数据行
 - **插件化界面**: Chart 与 Table 均实现 `MemRWPlugin` trait，Dock、变量树添加、写入、删除、Toast、配置保存/加载统一通过动态插件池分发
@@ -58,6 +60,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 | object | 0.36 | ELF 文件解析 |
 | rfd | 0.15 | 系统文件对话框 |
 | serde / serde_json | 1 | 配置序列化 |
+| svd-parser | 0.14 | CMSIS-SVD 解析、数组与 derivedFrom 展开 |
 | anyhow | 1.0 | 错误处理 |
 
 ## 编译
@@ -114,11 +117,13 @@ cargo run --release
 - 右侧显示 **Basic** 属性（只读 DWARF 原始信息）和 **Extend** 属性（可编辑）
 - 在 **Add** 区域配置曲线名/颜色 → 点击 **添加到 Chart**
 - 或配置显示名 → 点击 **添加到 Table**
+- Table 支持直接添加结构体或数组；结构体递归显示字段，数组会物化全部元素
 
 ### 5. 开始采集
 
 - 点击控制栏 **▶ 开始** 启动实时采集
 - Chart 面板显示时域曲线，Table 面板显示最新读取值
+- Table 叶节点默认勾选；取消勾选后该绑定不再请求采集，父节点可批量切换全部后代
 - 可通过 **延迟** 滑块控制采集间隔（0=全速）
 
 ### 6. FFT 频谱分析
@@ -141,9 +146,15 @@ cargo run --release
 
 ### 8. 变量写入
 
-- Table 面板的 **Write** 列输入数值
+- Table 左侧变量树的 **写入** 列输入数值
 - 按 ExtendType 自动校验范围（如 u8: 0-255）
 - 点击 **写** 按钮执行写入
+
+### 8.1 浏览 SVD 寄存器
+
+- 在 Table 右侧点击 **加载 SVD**，选择 `.svd` 或 `.xml` 文件
+- 展开外设和寄存器查看绝对地址、位宽、访问权限、复位值与字段位范围
+- 搜索框可按外设、寄存器、字段名称或描述过滤
 
 ### 9. CSV 日志
 
@@ -171,6 +182,8 @@ src/
 ├── probe/
 │   ├── mod.rs           # ProbeCell (UnsafeCell wrapper)
 │   └── session.rs       # ProbeSession (probe-rs 连接/采集)
+├── svd/
+│   └── mod.rs           # CMSIS-SVD 解析与轻量寄存器树
 └── ui/
     ├── mod.rs           # UI 模块入口
     ├── control_bar.rs   # 控制栏
@@ -185,8 +198,9 @@ src/
     │   ├── panel.rs     # 图表插件实现 (时域+频域)
     │   └── line_dialog.rs # 曲线属性 Dialog
     └── table_plugin/
-        ├── panel.rs     # 表格插件实现
-        └── table_dialog.rs # TableEntry + 属性 Dialog
+        ├── panel.rs     # 左侧树形变量表 + 双面板布局
+        ├── tree.rs      # 结构体/数组节点、勾选和持久化
+        └── svd_panel.rs # 右侧 SVD 寄存器浏览器
 ```
 
 ## 许可证

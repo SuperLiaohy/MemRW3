@@ -16,3 +16,4 @@ egui-notify = "0.22"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+svd-parser = { version = "0.14.10", features = ["expand"] }

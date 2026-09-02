@@ -6,7 +6,8 @@ pub fn vari_properties_ui(
     ui: &mut Ui,
     node: &TreeNode,
     config: &mut ExtendConfig,
-    add_config_ui: impl FnOnce(&mut Ui, &str) -> bool,
+    allow_composite: bool,
+    add_config_ui: impl FnOnce(&mut Ui, &str, &ExtendConfig) -> bool,
 ) -> bool {
     ui.heading("属性");
     ui.separator();
@@ -131,15 +132,23 @@ pub fn vari_properties_ui(
             ui.label(RichText::new("Add").strong().size(13.0));
             ui.separator();
 
-            if config.ext_type == ExtendType::Other {
+            let composite = !node.children.is_empty();
+            if config.ext_type == ExtendType::Other && !(allow_composite && composite) {
                 ui.label(
-                    RichText::new("type 为 \"other\"，不可添加到 Chart 或 Table")
+                    RichText::new("当前类型不可添加到该插件")
                         .color(theme::danger_text(ui))
                         .size(12.0),
                 );
             } else {
                 let final_name = format!("{} @ 0x{:X}", config.name, config.address);
-                return_val = add_config_ui(ui, &final_name);
+                if config.ext_type == ExtendType::Other {
+                    ui.label(
+                        RichText::new("将递归添加所有可读取字段；数组会展开全部元素")
+                            .color(theme::muted_text(ui))
+                            .size(11.0),
+                    );
+                }
+                return_val = add_config_ui(ui, &final_name, config);
             }
         });
 

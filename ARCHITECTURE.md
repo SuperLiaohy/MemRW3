@@ -51,6 +51,8 @@ src/
 ├── probe/
 │   ├── mod.rs              # ProbeCell (UnsafeCell wrapper, Sync协议保证互斥)
 │   └── session.rs          # ProbeSession + AcqSlot (probe-rs 连接/采集/读写)
+├── svd/
+│   └── mod.rs              # CMSIS-SVD 解析、数组/继承展开、轻量寄存器树
 └── ui/
     ├── mod.rs
     ├── control_bar.rs      # 控制栏 (连接/采集/Probe配置Dialog)
@@ -65,8 +67,9 @@ src/
     │   └── line_dialog.rs  # 曲线属性 Dialog (编辑曲线属性 + 显示PooledVariable的Extend属性)
     ├── table_plugin/
     │   ├── mod.rs
-    │   ├── panel.rs        # 表格插件实现 (TableView 读写/ExtendType 格式化)
-    │   └── table_dialog.rs # TableEntry + 属性 Dialog (显示PooledVariable的Extend属性)
+    │   ├── panel.rs        # 左侧递归变量树 + 右侧 SVD 的双面板编排
+    │   ├── tree.rs         # TableNode/叶子绑定/父子勾选/递归配置
+    │   └── svd_panel.rs    # 后台加载与展示 SVD 外设/寄存器/字段
     ├── vari_tree.rs        # DWARF 变量树 (左面板, 搜索自动滚动, DefaultOpen(false) 折叠)
     └── vari_properties.rs  # 属性面板 (Basic/Extend/Add 三段竖直布局, ExtendConfig驱动)
 ```
@@ -126,13 +129,15 @@ pub struct PooledVariable {
     pub ext_type: ExtendType,  // extend_type
     pub size: u32,             // extend_size
     pub incoming: Arc<RingBuffer<(f64, [u8; 8])>>,  // 无锁环形队列, 采集线程push, UI线程drain
+    pub plugins_cnt: usize,    // 总绑定数
+    pub active_readers: usize, // 启用读取的绑定数
 }
 ```
 
 - 不再包含 `TreeNode`，只存实际用于采集和显示的数据
 - `VariablePool.add(&ExtendConfig)` 创建条目
 - `incoming` 通过 `Arc` 共享: rebuild_slots 时 clone 到 `VarSlotMapping.incoming`, 采集线程无锁写入, UI 线程无锁 drain；满载时丢弃最旧样本
-- 去重: 添加变量前检查 `Pool.find_by_name_addr(name, address)`, 同 name+address 不重复添加
+- 去重: 添加变量前检查 `Pool.find_compatible(name, address, type, size)`，避免错误共享解码类型
 - Chart/Table 面板直接使用 `var.ext_type` 进行值解码和格式化
 
 ### MemRWPlugin (动态插件分发)
@@ -150,7 +155,7 @@ pub trait MemRWPlugin {
     fn id(&self) -> &'static str;
     fn title(&self) -> &'static str;
     fn render(&mut self, ui: &mut Ui, ctx: PluginRenderContext<'_>) -> Vec<PluginAction>;
-    fn add_variable_ui(&mut self, ui: &mut Ui, node_id: usize, default_name: &str, variable_id: usize, pool: &VariablePool) -> bool;
+    fn add_variable_ui(&mut self, ui: &mut Ui, node_id: usize, default_name: &str, candidate: &VariableCandidate, pool: &mut VariablePool) -> bool;
     fn save_config(&self, pool: &VariablePool) -> serde_json::Value;
     fn load_config(&mut self, payload: &serde_json::Value, pool: &mut VariablePool) -> Result<(), String>;
 }
@@ -160,7 +165,8 @@ pub trait MemRWPlugin {
 
 ```rust
 OpenVariableTree { plugin_id }
-RemoveVariable { var_id }
+RemoveVariable { var_id, was_enabled }
+SetVariableEnabled { var_id, enabled }
 WriteVariable { var_id, value }
 ResetTimer
 Toast { level, message }
@@ -263,20 +269,18 @@ BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭]
         ├─ Extend (可编辑): Name(只读label) / Address(hex TextEdit) /
         │   Size(只读label, 随Type自动绑定) / Type(ComboBox: u8~u64, i8~i64, float, double, other)
         └─ Add:
-           ├─ type ≠ other → 根据 active plugin 显示添加配置
-           │   ├─ Chart 插件: 曲线名(TextEdit) + 颜色(自定义拾色器 + 预设色块) → 添加到 Chart
-           │   └─ Table 插件: 显示名(TextEdit) → 添加到 Table
-           └─ type = other → 红色提示 "type 为 other，不可添加到 Chart 或 Table"
+           ├─ Chart: 仅标量；曲线名 + 颜色 → 添加到 Chart
+           └─ Table: 标量、结构体或数组；复合节点递归物化全部可读叶子
 
       添加流程:
         ├─ extend_name 和 extend_address 由 DwarfState 从 DWARF 树计算得到
         ├─ 用户可在 Extend 段编辑 address/type (size 自动绑定)
         ├─ 编辑结果存入 ExtendConfig (AppSession.extend_configs HashMap)
-        ├─ App 先按 `(name, address)` 复用或创建 VariablePool 条目
+        ├─ App 构建 `VariableCandidate`；数组根据单一 DWARF 原型完整展开
         ├─ 根据 active plugin id 查找 `Box<dyn MemRWPlugin>`
         └─ 调用 `plugin.add_variable_ui(...)`
             ├─ Chart: 曲线名 + 颜色 → 存入 ChartLegend (颜色persist via egui memory)
-            └─ Table: 显示名 → 存入 TableEntry
+            └─ Table: 递归 TableNode → 标量叶子按 name/address/type/size intern 到 VariablePool
 ```
 
 ### 4. 数据采集 (多线程架构)
@@ -323,10 +327,9 @@ BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭]
 
 ```
 [变量树添加变量]
-  ├─ Pool.find_by_name_addr(name, addr) → 去重
-  │   ├─ 已存在 → 复用 var_id
-  │   └─ 新变量 → VariablePool.add(config) → rebuild_slots (sync)
-  └─ target_plugin.add_variable_ui(var_id) → PooledVariable.plugins_cnt += 1
+  ├─ 构建 VariableCandidate (结构/数组保留层级)
+  ├─ Pool.find_compatible(name, addr, type, size) → 复用或创建叶子
+  └─ plugin bind → plugins_cnt += 1; active_readers += 1
 
 [点击"开始"]
   ├─ first start 或 after clear → reset_timer() (sync)
@@ -349,10 +352,12 @@ UI 线程 (每帧开始):
 **插件删除 → 解绑**:
 
 ```
-remove_legend/entry → 插件返回 PluginAction::RemoveVariable { var_id }
+remove_legend/root → 插件为每个叶子返回 RemoveVariable { var_id, was_enabled }
 App.handle_plugin_actions:
   PooledVariable.plugins_cnt -= 1
-  if plugins_cnt == 0 → pool.remove(var_id) + rebuild_slots (sync)
+  enabled binding 同时 active_readers -= 1
+  if plugins_cnt == 0 → pool.remove(var_id)
+  批量动作处理完后只 rebuild_slots 一次
 ```
 
 #### ProbeCell (无 Mutex) + Core 缓存
@@ -486,14 +491,16 @@ Vec<PooledVariable> + HashMap<usize, usize> (id → index)
   ├─ get(id)      → O(1) id_index → Vec[index]
   └─ iter_mut()   → 直接迭代 Vec (采集循环用)
 
-PooledVariable { id, name, address, ext_type, size, incoming: Arc<RingBuffer<...>>, plugins_cnt: usize }
-                                                          ↑ Arc 共享: 采集线程 push, UI 线程 drain_into ↑ 绑定计数: 0 时自动移除
+PooledVariable { id, name, address, ext_type, size, incoming, plugins_cnt, active_readers }
+                         ↑ 原始采集共享缓冲          ↑ 总绑定数       ↑ 当前启用读取的绑定数
 ```
 
-**plugins_cnt 生命周期**:
-- `add_legend/entry` → `plugins_cnt += 1`
-- `remove_legend/entry` → `plugins_cnt -= 1`; 若为 0 → `pool.remove(id)` + `rebuild_slots`
-- `find_by_name_addr(name, addr)` 添加前去重, 已存在则复用 id
+**绑定生命周期**:
+- Chart/Table 叶子绑定 → `plugins_cnt += 1`; 默认启用时 `active_readers += 1`
+- Table 取消勾选只减少 `active_readers`，保留节点和值；重新勾选再增加
+- `rebuild_slots()` 只包含 `active_readers > 0` 的变量，不影响同一变量的其他启用绑定
+- 根删除逐叶解绑；`plugins_cnt == 0` 时才从 Pool 删除，整批动作只重建一次 slots
+- `find_compatible(name, addr, type, size)` 防止同地址不同解码类型错误复用
 
 ### 6. Chart 图表面板特性
 
@@ -531,14 +538,17 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<RingBuffer<...
 
 | 功能 | 实现 |
 |------|------|
-| 表格列 | Name / Read / Write (三列) |
-| Name | `entry.display_name`, 双击打开属性 Dialog (含删除) |
-| Read | 只读本帧统一预 drain 的 `frame_data` 最新值, 按 `var.ext_type` 格式化: u/i → hex+十进制, float/double → 小数 |
-| Write | TextEdit 输入 → `validate_write()` 校验类型范围 → 点"写" → `pending_writes.push((var_id, value))` |
+| 布局 | 可调整宽度的左侧变量树 + 右侧 SVD 寄存器浏览器 |
+| 结构体 | 递归 `TableNode`，像树一样展开/折叠；只有根节点提供删除按钮 |
+| 数组 | 根据 DWARF `[0]` 原型、count 和元素步长物化所有索引；支持多维数组和结构体数组 |
+| 勾选采集 | 叶子默认勾选；父节点动态显示全选/部分/未选，点击时递归切换后代 |
+| 共享变量 | `plugins_cnt` 保存绑定，`active_readers` 决定是否进入 slots；Table 关闭不会中断 Chart 的读取 |
+| Read | 未勾选叶子冻结显示值；勾选叶子使用 `frame_data` 最新值并按 ExtendType 格式化 |
+| Write | 叶子 TextEdit → `validate_write()` → `PluginAction::WriteVariable` |
 | 写入流程 | 主循环 drain `pending_writes` → `write_variable(var_id, value)` → `sync.send_request` 暂停采集线程 → `core.write_word_8/16/32/64` → 恢复 |
 | 写入校验 | 按 ExtendType 校验: u8(0-255), i8(-128~127), u16, i16, u32, i32, u64, i64, f32, f64; Other 类型禁止写入 |
-| 通知 | `egui-notify` toast: 成功=绿色2s, 失败=红色3s, 校验错误=红色3s |
-| 空状态 | 居中提示 + 打开变量树按钮 |
+| SVD | 后台解析 CMSIS-SVD；展开数组与 derivedFrom，展示 peripheral/register/field、绝对地址、权限和复位值 |
+| 配置 | 递归保存树、展开状态、叶子 enabled 和 SVD 路径；兼容旧版平面 Table payload |
 
 ### 7.1 FFT 频谱分析模块 (fft.rs)
 
@@ -596,7 +606,7 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<RingBuffer<...
   - Table payload: entries (variable_name+address, display_name)
 - ELF path
 
-**加载** (`load_config`): 解析 JSON → 在临时 `VariablePool` 和默认插件池中重建配置 → 按 `plugin_id` 分发 payload → 插件按 `(name, address)` 精确匹配自身子项并 `plugins_cnt += 1`。任一插件加载失败时保留当前运行状态并 toast 错误；全部成功后才替换当前 pool/plugins。
+**加载** (`load_config`): 解析 JSON → 在临时 `VariablePool` 和默认插件池中重建配置 → 按 `plugin_id` 分发 payload → 插件恢复绑定数和启用读取数。任一插件加载失败时保留当前运行状态并 toast 错误；全部成功后才替换当前 pool/plugins。
 
 当前配置格式以 `plugins` 字段为准，不做旧版 `chart_legends` / `table_entries` 字段迁移。
 
@@ -621,7 +631,6 @@ PooledVariable { id, name, address, ext_type, size, incoming: Arc<RingBuffer<...
 |--------|------|----------|
 | 变量树 BottomSheet | `Area("modal_overlay")` 遮罩 + 底部锚定 `Area("bottom_sheet")` | 点击遮罩 / [关闭] |
 | 曲线属性 line_dialog | `Modal::new("line_dialog_modal").show(ctx)` | [确定]/[取消]/[删除] |
-| 变量属性 table_dialog | `Modal::new("table_entry_modal").show(ctx)` | [确定]/[取消]/[删除] |
 | 设置 Dialog | `Modal::new("probe_settings_modal").show(ctx)` | [确定]/[取消] |
 | 固件烧录 | `Modal::new("firmware_flash_modal").show(ctx)` | 烧录线程完成后自动关闭 |
 
@@ -660,6 +669,7 @@ egui-notify = "0.22"      # Toast 通知
 rfd = "0.15"              # 系统文件对话框
 serde = "1"               # 序列化
 serde_json = "1"          # JSON
+svd-parser = "0.14.10"    # CMSIS-SVD 解析与数组/继承展开
 ```
 
 ## 关键设计决策
@@ -699,7 +709,7 @@ serde_json = "1"          # JSON
 
 6. **BottomSheet 手动模拟 Modal 覆盖**: 用 `egui::Area` 来实现
 
-7. **Modal 统一管理**: line_dialog / table_dialog / probe_settings 均使用 `egui::Modal::new().show(ctx)` 实现穿透防护，无需手动拦截
+7. **Modal 统一管理**: line_dialog / probe_settings / firmware_flash 均使用 `egui::Modal::new().show(ctx)` 实现穿透防护，无需手动拦截
 
 8. **VariablePool 用 Vec+HashMap**: 模拟链表 + 哈希对, O(1) 增删查, 比纯 HashMap 更适合频繁迭代的采集场景
 
@@ -719,7 +729,7 @@ serde_json = "1"          # JSON
     - **FrameData 预 drain**: UI 每帧用 `drain_into` 消费到跨帧复用的 HashMap/Vec，plugin render 只读 — 稳态不再为每变量分配 batch Vec
     - **Plot/FFT**: 时域 Plot 直接借用 VecDeque 切片；FFT 直接遍历历史并输出 `Vec<PlotPoint>` 供绘图借用，应用层不再复制整段点集
     - **PluginAction**: 插件只返回 OpenVariableTree/RemoveVariable/WriteVariable/ResetTimer/Toast 等意图, App 统一执行副作用
-    - **plugins_cnt**: 变量被 plugin 绑定时 +1, 解绑时 -1; 归零自动从 Pool 移除 + rebuild_slots
+    - **绑定/读取分离**: `plugins_cnt` 管生命周期，`active_readers` 管是否生成采集 slots；Table 父节点批量操作后只 rebuild 一次
     - **Hz**: `acq_cycle_count: Arc<AtomicU64>` 采集线程每轮 +1, 主线程每秒计算采集轮询频率
     - **计时**: `timer_was_started` 追踪, 首次"开始"和清空后第一次"开始"归零, 暂停再继续累积
 

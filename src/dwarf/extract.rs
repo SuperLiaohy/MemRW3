@@ -331,6 +331,9 @@ fn build_variable_node(
         }
         children.push(elem_child);
     }
+    for child in &mut children {
+        child.parent_id = Some(my_id);
+    }
 
     Ok(TreeNode {
         id: my_id,
@@ -408,6 +411,9 @@ fn build_field_node(
             );
         }
         children.push(elem_child);
+    }
+    for child in &mut children {
+        child.parent_id = Some(my_id);
     }
 
     Ok(TreeNode {

@@ -4,6 +4,7 @@ mod dwarf;
 mod model;
 mod probe;
 mod sync;
+mod svd;
 mod ui;
 
 use anyhow::{anyhow, Result};

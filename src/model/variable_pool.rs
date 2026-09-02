@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use crate::dwarf::types::{ExtendConfig, ExtendType};
 use crate::model::RingBuffer;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub struct PooledVariable {
     pub id: usize,
@@ -11,6 +11,7 @@ pub struct PooledVariable {
     pub size: u32,
     pub incoming: Arc<RingBuffer<(f64, [u8; 8])>>,
     pub plugins_cnt: usize,
+    pub active_readers: usize,
 }
 
 #[derive(Default)]
@@ -33,6 +34,7 @@ impl VariablePool {
             size: config.size,
             incoming: Arc::new(RingBuffer::new()),
             plugins_cnt: 0,
+            active_readers: 0,
         });
         self.id_index.insert(id, idx);
         id
@@ -55,7 +57,9 @@ impl VariablePool {
     }
 
     pub fn get_mut(&mut self, id: usize) -> Option<&mut PooledVariable> {
-        self.id_index.get(&id).and_then(|&i| self.variables.get_mut(i))
+        self.id_index
+            .get(&id)
+            .and_then(|&i| self.variables.get_mut(i))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &PooledVariable> {
@@ -74,5 +78,108 @@ impl VariablePool {
         self.variables
             .iter()
             .find(|v| v.name == name && v.address == address)
+    }
+
+    pub fn find_compatible(
+        &self,
+        name: &str,
+        address: u64,
+        ext_type: &ExtendType,
+        size: u32,
+    ) -> Option<&PooledVariable> {
+        self.variables.iter().find(|variable| {
+            variable.name == name
+                && variable.address == address
+                && &variable.ext_type == ext_type
+                && variable.size == size
+        })
+    }
+
+    pub fn bind(&mut self, id: usize, enabled: bool) -> bool {
+        let Some(variable) = self.get_mut(id) else {
+            return false;
+        };
+        variable.plugins_cnt += 1;
+        if enabled {
+            variable.active_readers += 1;
+        }
+        true
+    }
+
+    pub fn set_binding_enabled(&mut self, id: usize, enabled: bool) -> bool {
+        let Some(variable) = self.get_mut(id) else {
+            return false;
+        };
+        if enabled {
+            if variable.active_readers >= variable.plugins_cnt {
+                return false;
+            }
+            variable.active_readers += 1;
+        } else {
+            if variable.active_readers == 0 {
+                return false;
+            }
+            variable.active_readers -= 1;
+        }
+        true
+    }
+
+    pub fn unbind(&mut self, id: usize, was_enabled: bool) -> bool {
+        let should_remove = {
+            let Some(variable) = self.get_mut(id) else {
+                return false;
+            };
+            variable.plugins_cnt = variable.plugins_cnt.saturating_sub(1);
+            if was_enabled {
+                variable.active_readers = variable.active_readers.saturating_sub(1);
+            }
+            variable.plugins_cnt == 0
+        };
+        if should_remove {
+            self.remove(id);
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::dwarf::types::{ExtendConfig, ExtendType};
+
+    use super::VariablePool;
+
+    fn config() -> ExtendConfig {
+        ExtendConfig {
+            name: "shared".to_owned(),
+            address: 0x2000_0000,
+            ext_type: ExtendType::U32,
+            size: 4,
+            array_index: None,
+            array_count: None,
+        }
+    }
+
+    #[test]
+    fn tracks_bindings_and_active_readers_independently() {
+        let mut pool = VariablePool::default();
+        let id = pool.add(&config());
+        assert!(pool.bind(id, true));
+        assert!(pool.bind(id, true));
+        assert!(pool.set_binding_enabled(id, false));
+        assert_eq!(pool.get(id).map(|variable| variable.plugins_cnt), Some(2));
+        assert_eq!(
+            pool.get(id).map(|variable| variable.active_readers),
+            Some(1)
+        );
+
+        assert!(pool.unbind(id, false));
+        assert!(pool.contains(id));
+        assert_eq!(
+            pool.get(id).map(|variable| variable.active_readers),
+            Some(1)
+        );
+
+        assert!(pool.unbind(id, true));
+        assert!(!pool.contains(id));
     }
 }

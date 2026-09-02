@@ -4,9 +4,46 @@ use eframe::egui::{self, Ui};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::dwarf::types::{ExtendConfig, ExtendType};
 use crate::model::VariablePool;
 
 pub type FrameData = HashMap<usize, Vec<(f64, [u8; 8])>>;
+
+#[derive(Debug, Clone)]
+pub struct VariableCandidate {
+    pub label: String,
+    pub name: String,
+    pub address: u64,
+    pub ext_type: ExtendType,
+    pub size: u32,
+    pub children: Vec<VariableCandidate>,
+}
+
+impl VariableCandidate {
+    pub fn is_readable(&self) -> bool {
+        self.children.is_empty() && self.ext_type != ExtendType::Other
+    }
+
+    pub fn readable_leaf_count(&self) -> usize {
+        usize::from(self.is_readable())
+            + self
+                .children
+                .iter()
+                .map(Self::readable_leaf_count)
+                .sum::<usize>()
+    }
+
+    pub fn to_config(&self) -> ExtendConfig {
+        ExtendConfig {
+            name: self.name.clone(),
+            address: self.address,
+            ext_type: self.ext_type.clone(),
+            size: self.size,
+            array_index: None,
+            array_count: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedPluginConfig {
@@ -23,7 +60,8 @@ pub enum ToastLevel {
 #[derive(Debug)]
 pub enum PluginAction {
     OpenVariableTree { plugin_id: String },
-    RemoveVariable { var_id: usize },
+    RemoveVariable { var_id: usize, was_enabled: bool },
+    SetVariableEnabled { var_id: usize, enabled: bool },
     WriteVariable { var_id: usize, value: u64 },
     ResetTimer,
     Toast { level: ToastLevel, message: String },
@@ -47,6 +85,10 @@ pub trait MemRWPlugin {
         egui::vec2(320.0, 220.0)
     }
 
+    fn supports_composite_variables(&self) -> bool {
+        false
+    }
+
     fn render(&mut self, ui: &mut Ui, ctx: PluginRenderContext<'_>) -> Vec<PluginAction>;
 
     fn add_variable_ui(
@@ -54,8 +96,8 @@ pub trait MemRWPlugin {
         ui: &mut Ui,
         node_id: usize,
         default_name: &str,
-        variable_id: usize,
-        pool: &VariablePool,
+        candidate: &VariableCandidate,
+        pool: &mut VariablePool,
     ) -> bool;
 
     fn is_dialog_open(&self) -> bool {

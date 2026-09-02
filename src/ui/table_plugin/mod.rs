@@ -1,4 +1,5 @@
 mod panel;
-mod table_dialog;
+mod svd_panel;
+mod tree;
 
 pub use panel::*;

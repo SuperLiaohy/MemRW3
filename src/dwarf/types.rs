@@ -583,3 +583,57 @@ pub fn expand_bracket_path(path: &str) -> Vec<String> {
     }
     expanded
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{BasicType, CuInfo, DwarfState, TreeNode, expand_bracket_path};
+
+    #[test]
+    fn applies_array_index_through_nested_struct_field_parents() {
+        let field = TreeNode {
+            id: 3,
+            parent_id: Some(2),
+            name: "value".to_owned(),
+            type_name: "u32".to_owned(),
+            basic_type: BasicType::U32,
+            address: 0,
+            size: 4,
+            children: Vec::new(),
+        };
+        let prototype = TreeNode {
+            id: 2,
+            parent_id: Some(1),
+            name: "[0]".to_owned(),
+            type_name: "Sample".to_owned(),
+            basic_type: BasicType::Struct("Sample".to_owned()),
+            address: 0,
+            size: 4,
+            children: vec![field],
+        };
+        let array = TreeNode {
+            id: 1,
+            parent_id: None,
+            name: "samples".to_owned(),
+            type_name: "Sample[2]".to_owned(),
+            basic_type: BasicType::ArrayElem(
+                Box::new(BasicType::Struct("Sample".to_owned())),
+                2,
+            ),
+            address: 0x2000_0000,
+            size: 8,
+            children: vec![prototype],
+        };
+        let mut state = DwarfState::new(vec![CuInfo {
+            cu_name: "test".to_owned(),
+            variables: vec![array],
+            dir_id: 10,
+        }]);
+        let path = expand_bracket_path("samples[1].value");
+        let id = state.trace_exact(&path)[0];
+
+        state.apply_array_path(id, &path);
+
+        assert_eq!(state.compute_extend_name(id), "samples[1].value");
+        assert_eq!(state.compute_extend_address(id), Some(0x2000_0004));
+    }
+}
