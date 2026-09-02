@@ -506,15 +506,9 @@ pub fn chart_panel(
                             .selectable_label(matches!(state.x_mode, XAxisMode::Fixed(_)), "固定")
                             .clicked()
                         {
-                            let xr = state
-                                .legends
-                                .iter()
-                                .filter_map(|l| {
-                                    let front = l.data_history.front().map(|p| p.x);
-                                    let back = l.data_history.back().map(|p| p.x);
-                                    front.zip(back).map(|(f, b)| (b - f).max(6.0))
-                                })
-                                .fold(6.0f64, f64::max);
+                            let xr = visible_history_bounds(&state.legends)
+                                .map(|(x_min, x_max, _, _)| (x_max - x_min).max(6.0))
+                                .unwrap_or(6.0);
                             state.x_mode = XAxisMode::Fixed(xr.max(6.0));
                         }
                     });
@@ -550,11 +544,9 @@ pub fn chart_panel(
                             )
                             .clicked()
                         {
-                            let (lo, hi) = state
-                                .legends
-                                .iter()
-                                .flat_map(|l| l.data_history.iter().map(|p| p.y))
-                                .fold((0.0f64, 0.0f64), |(lo, hi), y| (lo.min(y), hi.max(y)));
+                            let (lo, hi) = visible_history_bounds(&state.legends)
+                                .map(|(_, _, y_min, y_max)| (y_min, y_max))
+                                .unwrap_or((0.0, 0.0));
                             let range = (hi - lo).max(10.0);
                             state.y_mode = YAxisMode::Fixed {
                                 min: lo - range * 0.1,
@@ -797,46 +789,21 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         legend.refresh_plot_bridge();
     }
 
-    let has_data = state.legends.iter().any(|l| l.data_history.len() >= 2);
     let show_y_axis = !matches!(state.y_mode, YAxisMode::None);
 
     let auto_bounds: Option<(f64, f64, f64, f64)> = {
-        let t_max = state
-            .legends
-            .iter()
-            .filter_map(|l| l.data_history.back().map(|p| p.x))
-            .fold(0.0f64, f64::max);
-        let t_min = state
-            .legends
-            .iter()
-            .filter_map(|l| l.data_history.front().map(|p| p.x))
-            .fold(f64::MAX, f64::min);
-        if has_data {
+        if let Some((t_min, t_max, g_min, g_max)) = visible_history_bounds(&state.legends) {
             let xr = (t_max - t_min).max(6.0);
             let window = state.x_mode.window(xr);
             let x_min = t_max - window;
             let x_max = t_max + window * 0.02;
             let (y_min, y_max) = match &state.y_mode {
                 YAxisMode::Auto => {
-                    let (g_min, g_max) = state
-                        .legends
-                        .iter()
-                        .flat_map(|l| l.data_history.iter().map(|p| p.y))
-                        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
-                            (lo.min(y), hi.max(y))
-                        });
                     let y_pad = (g_max - g_min).max(10.0) * 0.1;
                     (g_min - y_pad, g_max + y_pad)
                 }
                 YAxisMode::Fixed { min, max } => (*min, *max),
                 YAxisMode::None => {
-                    let (g_min, g_max) = state
-                        .legends
-                        .iter()
-                        .flat_map(|l| l.data_history.iter().map(|p| p.y))
-                        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
-                            (lo.min(y), hi.max(y))
-                        });
                     let y_pad = (g_max - g_min).max(10.0) * 0.1;
                     (g_min - y_pad, g_max + y_pad)
                 }
@@ -1292,6 +1259,33 @@ fn compute_scroll_zoom(
     }
 }
 
+fn visible_history_bounds(legends: &[ChartLegend]) -> Option<(f64, f64, f64, f64)> {
+    let mut x_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    let mut y_min = f64::INFINITY;
+    let mut y_max = f64::NEG_INFINITY;
+    let mut found = false;
+
+    for legend in legends
+        .iter()
+        .filter(|legend| legend.visible && legend.data_history.len() >= 2)
+    {
+        if let (Some(first), Some(last)) =
+            (legend.data_history.front(), legend.data_history.back())
+        {
+            x_min = x_min.min(first.x);
+            x_max = x_max.max(last.x);
+        }
+        for point in &legend.data_history {
+            y_min = y_min.min(point.y);
+            y_max = y_max.max(point.y);
+        }
+        found = true;
+    }
+
+    found.then_some((x_min, x_max, y_min, y_max))
+}
+
 fn compute_td_scroll_zoom(
     current: Option<(f64, f64, f64, f64)>,
     factor: f64,
@@ -1299,23 +1293,8 @@ fn compute_td_scroll_zoom(
     state: &ChartPluginState,
 ) -> (f64, f64, f64, f64) {
     let (x_min, x_max, y_min, y_max) = current.unwrap_or_else(|| {
-        let x_max = state
-            .legends
-            .iter()
-            .filter_map(|l| l.data_history.back().map(|p| p.x))
-            .fold(0.0f64, f64::max);
-        let x_min = state
-            .legends
-            .iter()
-            .filter_map(|l| l.data_history.front().map(|p| p.x))
-            .fold(f64::MAX, f64::min);
-        let (y_min, y_max) = state
-            .legends
-            .iter()
-            .flat_map(|l| l.data_history.iter().map(|p| p.y))
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {
-                (lo.min(y), hi.max(y))
-            });
+        let (x_min, x_max, y_min, y_max) =
+            visible_history_bounds(&state.legends).unwrap_or((0.0, 6.0, 0.0, 1.0));
         let y_pad = ((y_max - y_min).max(10.0) * 0.1).max(0.001);
         (x_min, x_max, y_min - y_pad, y_max + y_pad)
     });
@@ -1558,7 +1537,7 @@ mod tests {
     use crate::dwarf::types::{ExtendConfig, ExtendType};
     use crate::model::VariablePool;
 
-    use super::{ChartLegend, write_log_frame};
+    use super::{ChartLegend, visible_history_bounds, write_log_frame};
 
     fn add_u8(pool: &mut VariablePool, name: &str, address: u64) -> usize {
         pool.add(&ExtendConfig {
@@ -1599,6 +1578,23 @@ mod tests {
             "1.000000,1.000000,10.000000\n\
              2.000000,2.000000,\n\
              3.000000,,30.000000\n"
+        );
+    }
+
+    #[test]
+    fn hidden_curves_do_not_affect_view_bounds() {
+        let mut visible = ChartLegend::new(0, "visible".to_owned());
+        visible.push_prepared(1.0, -2.0);
+        visible.push_prepared(3.0, 4.0);
+
+        let mut hidden = ChartLegend::new(1, "hidden".to_owned());
+        hidden.push_prepared(-100.0, -1000.0);
+        hidden.push_prepared(100.0, 1000.0);
+        hidden.visible = false;
+
+        assert_eq!(
+            visible_history_bounds(&[visible, hidden]),
+            Some((1.0, 3.0, -2.0, 4.0))
         );
     }
 }
