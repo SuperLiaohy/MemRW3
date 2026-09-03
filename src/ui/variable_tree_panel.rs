@@ -6,6 +6,9 @@ use crate::dwarf;
 use crate::model::VariablePool;
 use crate::ui::plugin::{MemRWPlugin, PluginAction, ToastLevel, VariableCandidate};
 
+// Keep the sheet above normal panels while reserving Foreground for Toasts and popups.
+const VARIABLE_TREE_LAYER_ORDER: egui::Order = egui::Order::Middle;
+
 #[derive(Debug, Clone)]
 struct VariableTreeTarget {
     plugin_id: String,
@@ -77,7 +80,7 @@ impl VariableTreePanel {
 
         egui::Area::new(overlay_id)
             .fixed_pos(host_ui.ctx().viewport_rect().min)
-            .order(egui::Order::Foreground)
+            .order(VARIABLE_TREE_LAYER_ORDER)
             .show(host_ui.ctx(), |ui| {
                 ui.painter()
                     .rect_filled(ui.ctx().viewport_rect(), 0.0, colors.modal_overlay);
@@ -96,7 +99,7 @@ impl VariableTreePanel {
         egui::Area::new(sheet_id)
             .anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::ZERO)
             .fixed_pos(egui::pos2(0.0, host_ui.ctx().viewport_rect().bottom()))
-            .order(egui::Order::Tooltip)
+            .order(VARIABLE_TREE_LAYER_ORDER)
             .constrain(true)
             .show(host_ui.ctx(), |ui| {
                 ui.set_width(window_width);
@@ -523,8 +526,14 @@ fn materialize_candidate_node(
 mod tests {
     use eframe::egui;
 
-    use super::{VariableTreePanel, variable_candidate};
     use crate::dwarf::types::{BasicType, ExtendConfig, ExtendType, TreeNode};
+
+    use super::{VARIABLE_TREE_LAYER_ORDER, VariableTreePanel, variable_candidate};
+
+    #[test]
+    fn variable_tree_keeps_foreground_available_for_toasts() {
+        assert!(VARIABLE_TREE_LAYER_ORDER < egui::Order::Foreground);
+    }
 
     fn node(
         id: usize,

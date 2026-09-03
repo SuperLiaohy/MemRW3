@@ -157,6 +157,8 @@ plugins: Vec<Box<dyn MemRWPlugin>>
 
 Dock 为每个插件维护独立暂停状态。暂停按钮位于 docked 与 pop-out 标题栏；暂停后跳过该插件的 `update()`，并禁用内容区交互，但保留最后渲染数据和其他插件的运行状态。
 
+变量树的遮罩和 Bottom Sheet 使用 `Order::Middle`，高于普通 Panel，但为 `Order::Foreground` 的 Toast 和弹出控件保留顶层，避免提示消息被整屏变量树遮挡。
+
 ```rust
 pub trait MemRWPlugin {
     fn id(&self) -> &'static str;
