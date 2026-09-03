@@ -6,9 +6,10 @@ use crate::ui;
 use crate::ui::chart_plugin::ChartPluginState;
 use crate::ui::dock::DockLayoutState;
 use crate::ui::plugin::{
-    FrameData, MemRWPlugin, PluginAction, SavedPluginConfig, ToastLevel, VariableCandidate,
+    FrameData, MemRWPlugin, PluginAction, SavedPluginConfig, ToastLevel,
 };
 use crate::ui::table_plugin::TablePluginState;
+use crate::ui::variable_tree_panel::VariableTreePanel;
 use eframe::egui;
 use egui::Ui;
 use serde::{Deserialize, Serialize};
@@ -23,7 +24,7 @@ use std::{
 pub struct MemRW3App {
     dock: DockLayoutState,
     pub session: AppSession,
-    pub dwarf_state: dwarf::types::DwarfState,
+    variable_tree: VariableTreePanel,
     plugins: Vec<Box<dyn MemRWPlugin>>,
     probe: Arc<ProbeCell>,
     sync: Arc<Sync>,
@@ -91,13 +92,7 @@ impl MemRW3App {
     }
 
     pub fn new(dwarf_state: dwarf::types::DwarfState) -> Self {
-        let mut session = AppSession {
-            config: crate::model::Config {
-                bottom_sheet_height: 250.0,
-                ..crate::model::Config::default()
-            },
-            ..Default::default()
-        };
+        let mut session = AppSession::default();
         let mut chips: Vec<String> = probe_rs::config::Registry::from_builtin_families()
             .families()
             .iter()
@@ -129,7 +124,7 @@ impl MemRW3App {
         Self {
             dock: DockLayoutState::default(),
             session,
-            dwarf_state,
+            variable_tree: VariableTreePanel::new(dwarf_state),
             plugins: Self::default_plugins(),
             probe,
             sync,
@@ -140,80 +135,11 @@ impl MemRW3App {
         }
     }
 
-    fn load_elf(&mut self) {
-        self.session.load_error = None;
-        let path = self.session.config.elf_path.trim().to_string();
-        match dwarf::extract::load_elf(&path) {
-            Ok(cus) => self.dwarf_state = dwarf::types::DwarfState::new(cus),
-            Err(e) => self.session.load_error = Some(e),
-        };
-    }
-
     fn trace_variables(&mut self) {
-        self.load_elf();
-        if self.session.load_error.is_some() {
-            return;
-        }
-
-        let mut errors: Vec<String> = Vec::new();
-        let pool = &mut self.session.config.pool;
-
-        for var in pool.iter_mut() {
-            let name = var.name.clone();
-            let path = dwarf::types::expand_bracket_path(&name);
-            let node_ids = self.dwarf_state.trace_exact(&path);
-            for &node_id in &node_ids {
-                self.dwarf_state.apply_array_path(node_id, &path);
-            }
-
-            match node_ids.len() {
-                1 => {
-                    let node_id = node_ids[0];
-                    let node = self.dwarf_state.find_node_by_id(node_id);
-                    if let Some(node) = node {
-                        let new_type = dwarf::types::basic_type_to_extend(&node.basic_type);
-                        let new_size = match new_type {
-                            dwarf::types::ExtendType::U8 | dwarf::types::ExtendType::I8 => 1,
-                            dwarf::types::ExtendType::U16 | dwarf::types::ExtendType::I16 => 2,
-                            dwarf::types::ExtendType::U32
-                            | dwarf::types::ExtendType::I32
-                            | dwarf::types::ExtendType::Float => 4,
-                            dwarf::types::ExtendType::U64
-                            | dwarf::types::ExtendType::I64
-                            | dwarf::types::ExtendType::Double => 8,
-                            _ => node.size,
-                        };
-                        let new_addr = self
-                            .dwarf_state
-                            .compute_extend_address(node_id)
-                            .unwrap_or(node.address);
-                        var.address = new_addr;
-                        var.ext_type = new_type;
-                        var.size = new_size;
-                    }
-                }
-                0 => {
-                    errors.push(format!("\"{name}\": 未找到匹配"));
-                }
-                _ => {
-                    errors.push(format!("\"{name}\": 匹配到多个 ({}) 节点", node_ids.len()));
-                }
-            }
-        }
-
-        for err in &errors {
-            self.toasts
-                .error(err.clone())
-                .duration(Some(Duration::from_secs(15)))
-                .closable(true);
-        }
-        if errors.is_empty() {
-            self.toasts
-                .success("追踪完成, 所有变量已更新")
-                .duration(Some(Duration::from_secs(3)));
-        }
-
-        self.rebuild_slots();
+        let mut actions = Vec::new();
+        self.variable_tree
+            .trace_variables(&mut self.session.config.pool, &mut actions);
+        self.handle_plugin_actions(actions);
     }
 
     pub fn sync_connect(&mut self) {
@@ -446,8 +372,11 @@ impl MemRW3App {
         let mut rebuild_slots = false;
         for action in actions {
             match action {
-                PluginAction::OpenVariableTree { plugin_id } => {
-                    self.session.active_bottom_sheet = Some(plugin_id);
+                PluginAction::OpenVariableTree {
+                    plugin_id,
+                    viewport_id,
+                } => {
+                    self.variable_tree.open(plugin_id, viewport_id);
                 }
                 PluginAction::RemoveVariable {
                     var_id,
@@ -486,6 +415,9 @@ impl MemRW3App {
                 PluginAction::ResetTimer => {
                     self.clear_all_buffers();
                 }
+                PluginAction::RebuildSlots => {
+                    rebuild_slots = true;
+                }
                 PluginAction::Toast { level, message } => {
                     self.show_plugin_toast(level, message);
                 }
@@ -515,227 +447,6 @@ impl MemRW3App {
 impl Drop for MemRW3App {
     fn drop(&mut self) {
         self.session.acq_stop.store(true, Ordering::Relaxed);
-    }
-}
-
-fn variable_candidate(
-    node: &dwarf::types::TreeNode,
-    config: &dwarf::types::ExtendConfig,
-) -> Result<VariableCandidate, String> {
-    if config.ext_type != dwarf::types::ExtendType::Other {
-        return Ok(VariableCandidate {
-            label: node.name.clone(),
-            name: config.name.clone(),
-            address: config.address,
-            ext_type: config.ext_type.clone(),
-            size: config.size,
-            children: Vec::new(),
-        });
-    }
-
-    materialize_candidate_node(
-        node,
-        node.name.clone(),
-        config.name.clone(),
-        config.address,
-    )
-}
-
-fn materialize_candidate_node(
-    node: &dwarf::types::TreeNode,
-    label: String,
-    name: String,
-    address: u64,
-) -> Result<VariableCandidate, String> {
-    let mut children = Vec::new();
-    match &node.basic_type {
-        dwarf::types::BasicType::ArrayElem(_, count) => {
-            let prototype = node
-                .children
-                .first()
-                .ok_or_else(|| format!("数组 {name} 缺少元素类型信息"))?;
-            let stride = u64::from(prototype.size);
-            if *count > 1 && stride == 0 {
-                return Err(format!("数组 {name} 的元素大小为 0，无法展开"));
-            }
-            for index in 0..*count {
-                let offset = index
-                    .checked_mul(stride)
-                    .ok_or_else(|| format!("数组 {name} 的元素偏移溢出"))?;
-                let child_address = address
-                    .checked_add(offset)
-                    .ok_or_else(|| format!("数组 {name} 的元素地址溢出"))?;
-                children.push(materialize_candidate_node(
-                    prototype,
-                    format!("[{index}]"),
-                    format!("{name}[{index}]"),
-                    child_address,
-                )?);
-            }
-        }
-        _ if !node.children.is_empty() => {
-            for child in &node.children {
-                let child_address = address
-                    .checked_add(child.address)
-                    .ok_or_else(|| format!("字段 {name}.{} 的地址溢出", child.name))?;
-                let child_name = if child.name.starts_with('[') {
-                    format!("{name}{}", child.name)
-                } else {
-                    format!("{name}.{}", child.name)
-                };
-                children.push(materialize_candidate_node(
-                    child,
-                    child.name.clone(),
-                    child_name,
-                    child_address,
-                )?);
-            }
-        }
-        _ => {}
-    }
-
-    let ext_type = if children.is_empty() {
-        dwarf::types::basic_type_to_extend(&node.basic_type)
-    } else {
-        dwarf::types::ExtendType::Other
-    };
-    Ok(VariableCandidate {
-        label,
-        name,
-        address,
-        ext_type,
-        size: node.size,
-        children,
-    })
-}
-
-#[cfg(test)]
-mod variable_candidate_tests {
-    use super::variable_candidate;
-    use crate::dwarf::types::{BasicType, ExtendConfig, ExtendType, TreeNode};
-
-    fn node(
-        id: usize,
-        name: &str,
-        basic_type: BasicType,
-        address: u64,
-        size: u32,
-        children: Vec<TreeNode>,
-    ) -> TreeNode {
-        TreeNode {
-            id,
-            parent_id: None,
-            name: name.to_owned(),
-            type_name: String::new(),
-            basic_type,
-            address,
-            size,
-            children,
-        }
-    }
-
-    #[test]
-    fn materializes_every_array_element_from_the_prototype() {
-        let prototype = node(4, "[7]", BasicType::U16, 99, 2, Vec::new());
-        let array = node(
-            3,
-            "samples",
-            BasicType::ArrayElem(Box::new(BasicType::U16), 3),
-            4,
-            6,
-            vec![prototype],
-        );
-        let root = node(
-            1,
-            "state",
-            BasicType::Struct("State".to_owned()),
-            0x2000_0000,
-            10,
-            vec![node(2, "value", BasicType::U32, 0, 4, Vec::new()), array],
-        );
-        let config = ExtendConfig {
-            name: "state".to_owned(),
-            address: 0x2000_0000,
-            ext_type: ExtendType::Other,
-            size: 10,
-            array_index: None,
-            array_count: None,
-        };
-
-        let candidate = variable_candidate(&root, &config).unwrap();
-        let samples = &candidate.children[1];
-        assert_eq!(samples.children.len(), 3);
-        assert_eq!(samples.children[0].name, "state.samples[0]");
-        assert_eq!(samples.children[0].address, 0x2000_0004);
-        assert_eq!(samples.children[1].address, 0x2000_0006);
-        assert_eq!(samples.children[2].address, 0x2000_0008);
-    }
-
-    #[test]
-    fn rejects_array_address_overflow() {
-        let root = node(
-            1,
-            "samples",
-            BasicType::ArrayElem(Box::new(BasicType::U32), 2),
-            u64::MAX - 1,
-            8,
-            vec![node(2, "[0]", BasicType::U32, 0, 4, Vec::new())],
-        );
-        let config = ExtendConfig {
-            name: "samples".to_owned(),
-            address: u64::MAX - 1,
-            ext_type: ExtendType::Other,
-            size: 8,
-            array_index: None,
-            array_count: None,
-        };
-
-        assert!(variable_candidate(&root, &config).is_err());
-    }
-}
-
-fn bottom_sheet_handle(
-    ui: &mut egui::Ui,
-    drag_state: &mut Option<(f32, f32)>,
-    current_h: f32,
-) -> f32 {
-    let mut w = ui.available_width();
-    if !w.is_finite() || w <= 0.0 {
-        w = ui.ctx().screen_rect().width(); // 如果不正常，回退到屏幕宽度
-    }
-
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::drag());
-
-    if response.hovered() || response.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-    }
-
-    let colors = crate::ui::theme::palette(ui);
-    let handle_color = if response.dragged() {
-        ui.visuals().widgets.active.bg_fill
-    } else if response.hovered() {
-        ui.visuals().widgets.hovered.bg_fill
-    } else {
-        colors.border_strong
-    };
-
-    let capsule = egui::Rect::from_center_size(rect.center(), egui::vec2(40.0, 4.0));
-    ui.painter()
-        .rect_filled(capsule, egui::CornerRadius::same(2), handle_color);
-
-    if response.dragged() {
-        if let Some(pointer) = response.interact_pointer_pos() {
-            if drag_state.is_none() {
-                *drag_state = Some((pointer.y, current_h));
-            }
-            let (origin_y, initial_h) = drag_state.unwrap();
-            let displacement = origin_y - pointer.y;
-            return initial_h + displacement;
-        }
-        current_h
-    } else {
-        *drag_state = None;
-        current_h
     }
 }
 
@@ -770,7 +481,7 @@ impl eframe::App for MemRW3App {
             }
         }
 
-        let bs_open = self.session.active_bottom_sheet.is_some();
+        let bs_open = self.variable_tree.is_open_in(ui.ctx().viewport_id());
         let dialog_open = self.plugins.iter().any(|plugin| plugin.is_dialog_open());
         let running = self.session.is_running();
 
@@ -813,7 +524,7 @@ impl eframe::App for MemRW3App {
 
                     let dock_h = ui.available_height();
                     if dock_h > 0.0 {
-                        let pool = &self.session.config.pool;
+                        let pool = &mut self.session.config.pool;
                         let actions = ui::dock::show_active_plugin_content(
                             ui,
                             &mut self.dock,
@@ -821,12 +532,13 @@ impl eframe::App for MemRW3App {
                             pool,
                             &frame_data,
                             running,
+                            &mut self.variable_tree,
                         );
                         self.handle_plugin_actions(actions);
                     }
                 });
 
-                let pool = &self.session.config.pool;
+                let pool = &mut self.session.config.pool;
                 let popout_actions = ui::dock::show_plugin_popouts(
                     ui,
                     &mut self.dock,
@@ -834,225 +546,10 @@ impl eframe::App for MemRW3App {
                     pool,
                     &frame_data,
                     running,
+                    &mut self.variable_tree,
                 );
                 self.handle_plugin_actions(popout_actions);
 
-            if bs_open {
-                let bs_id = egui::Id::new("bottom_sheet");
-                let window_w = ui.ctx().viewport_rect().width();
-                let window_h = ui.ctx().viewport_rect().height();
-
-                egui::Area::new("modal_overlay".into())
-                    .fixed_pos(ui.ctx().viewport_rect().min)
-                    .show(ui.ctx(), |ui| {
-                        ui.painter().rect_filled(
-                            ui.ctx().viewport_rect(),
-                            0.0,
-                            colors.modal_overlay,
-                        );
-                        if ui.interact(ui.ctx().viewport_rect(), ui.next_auto_id(), egui::Sense::click()).clicked() {
-                            self.session.active_bottom_sheet = None;
-                        }
-                    });
-
-                egui::Area::new(bs_id)
-                    .anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::ZERO)
-                    .fixed_pos(egui::pos2(0.0, ui.viewport_rect().bottom()))
-                    .order(egui::Order::Foreground)
-                    .constrain(true)
-                    .show(ui.ctx(), |ui| {
-                        ui.set_width(window_w);
-
-                        let card_bg = colors.elevated_bg;
-                        let card_stroke = ui::theme::panel_stroke(ui);
-
-                        let target_plugin_id = self.session.active_bottom_sheet.clone();
-                        egui::Frame::NONE
-                            .fill(card_bg)
-                            .stroke(card_stroke)
-                            .corner_radius(egui::CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 })
-                            .show(ui, |ui| {
-                            let target = bottom_sheet_handle(
-                                ui,
-                                &mut self.session.bottom_sheet_drag,
-                                self.session.config.bottom_sheet_height,
-                            );
-                            self.session.config.bottom_sheet_height = target.clamp(window_h * 0.3, window_h * 0.8);
-                            ui.set_height(self.session.config.bottom_sheet_height);
-                            egui::Frame::NONE
-                                .inner_margin(egui::Margin {
-                                    left: 14,   // 左右给大一点边距，更美观
-                                    right: 14,
-                                    top: 26,     // 上面边距稍微收紧
-                                    bottom: 10,
-                                })
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label("ELF 文件:");
-                                        ui.add_sized(
-                                            [ui.available_width() - 200.0, 20.0],
-                                            egui::TextEdit::singleline(&mut self.session.config.elf_path)
-                                                .hint_text("输入 firmware.elf 路径..."),
-                                        );
-                                        if ui.button("浏览").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new()
-                                                .add_filter("ELF/AXF", &["elf", "axf"])
-                                                .add_filter("全部", &["*"])
-                                                .pick_file()
-                                            {
-                                                self.session.config.elf_path = path.display().to_string();
-                                            }
-                                        }
-                                        if ui.button("加载").clicked() {
-                                            self.load_elf();
-                                            self.session.extend_configs.clear();
-                                            self.dwarf_state.selected_node = None;
-                                        }
-                                        if ui.button("追踪").clicked() {
-                                            self.trace_variables();
-                                        }
-                                        if let Some(ref err) = self.session.load_error {
-                                            self.toasts.error(err.clone()).duration(Some(Duration::from_secs(8))).closable(true);
-                                            self.session.load_error = None;
-                                        }
-                                    });
-                                    ui.add_space(4.0);
-                                    ui.separator();
-                                    ui.add_space(2.0);
-                                    ui.horizontal(|ui| {
-                                        ui.heading("变量列表 (DWARF Tree)");
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if ui.button("关闭").clicked() { self.session.active_bottom_sheet = None; }
-                                        });
-                                    });
-                                    ui.add_space(4.0);
-                                    ui.separator();
-                                    ui.add_space(4.0);
-                                    let rem_h = ui.available_height().max(0.0);
-                                    let total_w = ui.available_width().max(0.0);
-                                    let right_w = (total_w * 0.32).clamp(220.0, 350.0);
-                                    let left_w = (total_w - right_w - 8.0).max(200.0);
-                                    ui.horizontal(|ui| {
-                                        let (left_rect, _) = ui.allocate_exact_size(egui::vec2(left_w, rem_h), egui::Sense::hover());
-                                        let mut left_ui = ui.new_child(egui::UiBuilder::new().max_rect(left_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-                                        egui::ScrollArea::both()
-                                            .id_salt("left_tree_scroll")
-                                            .auto_shrink([false, false])
-                                            .show(&mut left_ui, |ui| {
-                                                ui::vari_tree_ui(ui, &mut self.dwarf_state);
-                                            });
-                                        ui.separator();
-                                        let (right_rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), rem_h), egui::Sense::hover());
-                                        let mut right_ui = ui.new_child(egui::UiBuilder::new().max_rect(right_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-                                        egui::ScrollArea::both()
-                                            .id_salt("right_props_scroll")
-                                            .auto_shrink([false, false])
-                                            .show(&mut right_ui, |ui| {
-                                                let selected = self.dwarf_state.selected_node.clone();
-                                                if let Some(ref node) = selected {
-                                                    let node_id = node.id;
-                                                    let node_size = node.size;
-                                                    let node_basic_type = node.basic_type.clone();
-                                                    let default_type = dwarf::types::basic_type_to_extend(&node_basic_type);
-                                                    let config = self.session.extend_configs.entry(node_id).or_insert_with(|| dwarf::types::ExtendConfig {
-                                                        name: String::new(), address: 0, ext_type: default_type, size: node_size, array_index: None, array_count: None,
-                                                    });
-                                                    if let Some((count, elem_size)) = self.dwarf_state.parent_array_info(node_id) {
-                                                        config.array_count = Some(count);
-                                                        if node.name.starts_with('[') {
-                                                            if let Ok(parsed) = node.name[1..node.name.len()-1].parse::<u64>() {
-                                                                if parsed < count && config.array_index != Some(parsed) {
-                                                                    config.array_index = Some(parsed);
-                                                                }
-                                                            }
-                                                        }
-                                                        if config.array_index.is_none() { config.array_index = Some(0); }
-                                                        // let idx = config.array_index.unwrap_or(0);
-                                                        // let new_name = format!("[{}]", idx);
-                                                        // let new_addr = elem_size * idx;
-                                                        // if let Some(tree_node) = self.dwarf_state.find_node_mut(node_id) {
-                                                        //     tree_node.name = new_name.clone();
-                                                        //     tree_node.address = new_addr;
-                                                        // }
-                                                        // self.dwarf_state.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
-                                                        config.name = self.dwarf_state.compute_extend_name(node_id);
-                                                        config.address = self.dwarf_state.compute_extend_address(node_id).unwrap_or(0);
-                                                    } else {
-                                                        if config.name.is_empty() || config.name.contains('[') {
-                                                            config.name = self.dwarf_state.compute_extend_name(node_id);
-                                                            config.address = self.dwarf_state.compute_extend_address(node_id).unwrap_or(0);
-                                                        }
-                                                    }
-                                                    let allow_composite = target_plugin_id
-                                                        .as_deref()
-                                                        .and_then(|plugin_id| {
-                                                            self.plugins
-                                                                .iter()
-                                                                .find(|plugin| plugin.id() == plugin_id)
-                                                        })
-                                                        .is_some_and(|plugin| {
-                                                            plugin.supports_composite_variables()
-                                                        });
-                                                    let plugins = &mut self.plugins;
-                                                    let pool = &mut self.session.config.pool;
-                                                    let added = ui::vari_properties_ui(ui, node, config, allow_composite, |ui, node_name, current_config| {
-                                                        let Some(plugin_id) = target_plugin_id.as_deref() else {
-                                                            ui.label("未选择目标插件");
-                                                            return false;
-                                                        };
-                                                        let Some(plugin) = plugins
-                                                            .iter_mut()
-                                                            .find(|plugin| plugin.id() == plugin_id)
-                                                        else {
-                                                            ui.label(format!("目标插件不存在: {plugin_id}"));
-                                                            return false;
-                                                        };
-                                                        let candidate = match variable_candidate(node, current_config) {
-                                                            Ok(candidate) => candidate,
-                                                            Err(error) => {
-                                                                ui.label(
-                                                                    egui::RichText::new(error)
-                                                                        .color(crate::ui::theme::danger_text(ui)),
-                                                                );
-                                                                return false;
-                                                            }
-                                                        };
-                                                        plugin.add_variable_ui(
-                                                            ui,
-                                                            node_id,
-                                                            node_name,
-                                                            &candidate,
-                                                            pool,
-                                                        )
-                                                    });
-                                                    if added {
-                                                        self.rebuild_slots();
-                                                    }
-                                                    // Re-sync tree/selected_node after vari_properties_ui
-                                                    // (DragValue may have changed array_index)
-                                                    {
-                                                        let par = self.dwarf_state.parent_array_info(node_id);
-                                                        if let Some((_count, elem_size)) = par {
-                                                            let cfg = self.session.extend_configs.get(&node_id);
-                                                            if let Some(cfg) = cfg {
-                                                                let idx = cfg.array_index.unwrap_or(0);
-                                                                let new_name = format!("[{}]", idx);
-                                                                let new_addr = elem_size * idx;
-                                                                if let Some(tree_node) = self.dwarf_state.find_node_mut(node_id) {
-                                                                    tree_node.name = new_name.clone();
-                                                                    tree_node.address = new_addr;
-                                                                }
-                                                                self.dwarf_state.selected_node.as_mut().map(|sel| { sel.name = new_name; sel.address = new_addr; });
-                                                            }
-                                                        }
-                                                    }
-                                                } else { ui.label("选择节点以查看属性"); }
-                                            });
-                                    });
-                                });
-                        });
-                    });
-            }
         });
         self.frame_data = frame_data;
         if let Some(task) = self.flash_task.as_ref() {
@@ -1104,7 +601,7 @@ impl MemRW3App {
         let Some(path) = path else { return };
 
         let config = SaveConfig {
-            elf_path: self.session.config.elf_path.clone(),
+            elf_path: self.variable_tree.elf_path.clone(),
             probe_chip: self.session.config.probe_chip.clone(),
             probe_protocol: self.session.config.probe_protocol.clone(),
             probe_speed_khz: self.session.config.probe_speed_khz,
@@ -1209,7 +706,7 @@ impl MemRW3App {
         self.session.config.probe_chip = config.probe_chip;
         self.session.config.probe_protocol = config.probe_protocol;
         self.session.config.probe_speed_khz = config.probe_speed_khz;
-        self.session.config.elf_path = config.elf_path;
+        self.variable_tree.elf_path = config.elf_path;
         self.session.config.pool = new_pool;
         self.plugins = new_plugins;
 

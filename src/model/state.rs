@@ -1,6 +1,4 @@
 use super::VariablePool;
-use crate::dwarf::types::ExtendConfig;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
@@ -14,11 +12,7 @@ pub struct AppSession {
     pub hz_last_cycles: u64,
     pub hz_last_time: Instant,
     pub acq_stop: Arc<AtomicBool>,
-    pub active_bottom_sheet: Option<String>,
-    pub bottom_sheet_drag: Option<(f32, f32)>,
-    pub load_error: Option<String>,
     pub connect_error: Option<String>,
-    pub extend_configs: HashMap<usize, ExtendConfig>,
     pub all_chips: Vec<String>,
     pub probe_id: Option<String>,
     pub cached_probe_list: Option<Vec<String>>,
@@ -52,11 +46,7 @@ impl Default for AppSession {
             hz_last_cycles: 0,
             hz_last_time: Instant::now(),
             acq_stop: Arc::new(AtomicBool::new(false)),
-            active_bottom_sheet: None,
-            bottom_sheet_drag: None,
-            load_error: None,
             connect_error: None,
-            extend_configs: HashMap::new(),
             all_chips: Vec::new(),
             probe_id: None,
             cached_probe_list: None,
@@ -72,9 +62,7 @@ impl Default for AppSession {
 }
 
 pub struct Config {
-    pub elf_path: String,
     pub delay_us: Arc<AtomicU64>,
-    pub bottom_sheet_height: f32,
     pub pool: VariablePool,
     pub probe_chip: String,
     pub probe_protocol: String,
@@ -84,8 +72,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             delay_us: Arc::new(AtomicU64::new(0)),
-            elf_path: String::new(),
-            bottom_sheet_height: 250.0,
             pool: VariablePool::default(),
             probe_chip: "STM32F407VG".into(),
             probe_protocol: "SWD".into(),

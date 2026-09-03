@@ -59,18 +59,35 @@ pub enum ToastLevel {
 
 #[derive(Debug)]
 pub enum PluginAction {
-    OpenVariableTree { plugin_id: String },
-    RemoveVariable { var_id: usize, was_enabled: bool },
-    SetVariableEnabled { var_id: usize, enabled: bool },
-    WriteVariable { var_id: usize, value: u64 },
+    OpenVariableTree {
+        plugin_id: String,
+        viewport_id: egui::ViewportId,
+    },
+    RemoveVariable {
+        var_id: usize,
+        was_enabled: bool,
+    },
+    SetVariableEnabled {
+        var_id: usize,
+        enabled: bool,
+    },
+    WriteVariable {
+        var_id: usize,
+        value: u64,
+    },
     ResetTimer,
-    Toast { level: ToastLevel, message: String },
+    RebuildSlots,
+    Toast {
+        level: ToastLevel,
+        message: String,
+    },
 }
 
 pub struct PluginRenderContext<'a> {
     pub pool: &'a VariablePool,
     pub frame_data: &'a FrameData,
     pub running: bool,
+    pub viewport_id: egui::ViewportId,
 }
 
 pub trait MemRWPlugin {

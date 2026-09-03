@@ -37,7 +37,7 @@ MemRW3 是一个基于 Rust + egui + probe-rs 的嵌入式内存读写与变量�
 ```
 src/
 ├── main.rs                 # 入口: 启动空 DwarfState → eframe
-├── app.rs                  # 主 App + MemRW3App (控制栏/采集/连接/插件池/配置/BottomSheet 编排)
+├── app.rs                  # 主 App + MemRW3App (控制栏/采集/连接/插件池/配置编排)
 ├── sync.rs                 # 同步原语: Sync (两阶段握手) - 匹配 MemRW2 的 3-semaphore 模式
 ├── dwarf/
 │   ├── mod.rs              # DWARF 模块入口
@@ -45,7 +45,7 @@ src/
 │   └── extract.rs          # DWARF 解析 (gimli, 支持 DWARF 2/3/4/5), 跨编译单元类型引用, basic_type 映射
 ├── model/
 │   ├── mod.rs
-│   ├── state.rs            # AppSession (连接/采样/BottomSheet/load_error/extend_configs)
+│   ├── state.rs            # AppSession (连接/采样/Probe UI 状态)
 │   ├── variable_pool.rs    # VariablePool (Vec + HashMap, O(1) 增删查, 仅存extend数据)
 │   └── ring_buffer.rs      # 有界 lock-free 环形队列 (crossbeam ArrayQueue)
 ├── probe/
@@ -59,6 +59,7 @@ src/
     ├── dock.rs             # VS Code 风格左侧插件栏 + egui multi-viewport 原生窗口 Pop out/in
     ├── plugin.rs           # MemRWPlugin trait + PluginAction/FrameData/插件配置 payload
     ├── theme.rs            # 统一 palette + egui Visuals/WidgetVisuals 配置
+    ├── variable_tree_panel.rs # 绑定 viewport 的 DWARF 变量树覆盖组件
     ├── chart_plugin/
     │   ├── mod.rs
     │   ├── legend.rs       # ChartLegend (曲线名/颜色/可见/缓冲/data_history)
@@ -113,7 +114,7 @@ pub struct ExtendConfig {
 }
 ```
 
-- 存储在 `AppSession.extend_configs: HashMap<usize, ExtendConfig>`，按 node_id 索引
+- 存储在 `VariableTreePanel.extend_configs: HashMap<usize, ExtendConfig>`，按 node_id 索引
 - `vari_properties_ui()` 通过 `&mut ExtendConfig` 读写
 - 首次选择节点时惰性初始化
 - 数组元素时 index 从 `selected_node.name` 解析同步（含搜索后更新）
@@ -164,7 +165,7 @@ pub trait MemRWPlugin {
 `PluginAction` 是插件向 App 发起副作用的唯一通道:
 
 ```rust
-OpenVariableTree { plugin_id }
+OpenVariableTree { plugin_id, viewport_id }
 RemoveVariable { var_id, was_enabled }
 SetVariableEnabled { var_id, enabled }
 WriteVariable { var_id, value }
@@ -248,9 +249,9 @@ ProbeSession.connect()
 ### 3. 浏览变量树
 
 ```
-任一插件 dock 面板中点击 "📋 打开变量树" → 插件返回 `PluginAction::OpenVariableTree { plugin_id }` → BottomSheet 覆盖显示
+任一插件点击 "📋 打开变量树" → 动作携带 `plugin_id + viewport_id` → `VariableTreePanel` 仅在触发 viewport 内覆盖显示
 
-BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭] 按钮退出)
+BottomSheet (viewport 内模态覆盖层, 只阻止当前窗口交互)
    ├─ 顶部: ELF 文件路径输入框 + [浏览] (rfd 文件选择器, *.elf;*.axf) + [加载] + [追踪] 按钮 + 错误提示
 
    ├─ 左面板: vari_tree_ui()
@@ -275,7 +276,7 @@ BottomSheet (模态覆盖层, 打开时全界面不可交互, 只能点 [关闭]
       添加流程:
         ├─ extend_name 和 extend_address 由 DwarfState 从 DWARF 树计算得到
         ├─ 用户可在 Extend 段编辑 address/type (size 自动绑定)
-        ├─ 编辑结果存入 ExtendConfig (AppSession.extend_configs HashMap)
+        ├─ 编辑结果存入 ExtendConfig (VariableTreePanel 内部 HashMap)
         ├─ App 构建 `VariableCandidate`；数组根据单一 DWARF 原型完整展开
         ├─ 根据 active plugin id 查找 `Box<dyn MemRWPlugin>`
         └─ 调用 `plugin.add_variable_ui(...)`
@@ -625,11 +626,11 @@ PooledVariable { id, name, address, ext_type, size, incoming, plugins_cnt, activ
 
 ### 9. 模态 (Modal) 行为 + Toast 通知
 
-属性/设置对话框使用 `egui::Modal` 实现穿透防护；变量树 BottomSheet 使用手写 `egui::Area` 遮罩 + 底部锚定面板实现模态覆盖。
+属性/设置对话框使用 `egui::Modal` 实现穿透防护；变量树组件在当前 viewport 使用手写 `egui::Area` 遮罩 + 底部锚定面板。
 
 | 覆盖层 | 实现 | 退出方式 |
 |--------|------|----------|
-| 变量树 BottomSheet | `Area("modal_overlay")` 遮罩 + 底部锚定 `Area("bottom_sheet")` | 点击遮罩 / [关闭] |
+| 变量树 BottomSheet | viewport 专属 Area ID + 当前 viewport 矩形 | 点击遮罩 / [关闭] / 关闭所属 pop-out |
 | 曲线属性 line_dialog | `Modal::new("line_dialog_modal").show(ctx)` | [确定]/[取消]/[删除] |
 | 设置 Dialog | `Modal::new("probe_settings_modal").show(ctx)` | [确定]/[取消] |
 | 固件烧录 | `Modal::new("firmware_flash_modal").show(ctx)` | 烧录线程完成后自动关闭 |
@@ -677,7 +678,7 @@ svd-parser = "0.14.10"    # CMSIS-SVD 解析与数组/继承展开
 1. **TreeNode 不存 Extend，改为动态计算 + ExtendConfig 覆盖**
    - `TreeNode` 仅存 DWARF 原始数据（address 存 offset 而非绝对地址，用于树遍历计算）
    - 首次预览时 extend 值由 `compute_extend_name/address()` 和 `basic_type_to_extend()` 从 basic 计算
-   - 用户编辑存入 `AppSession.extend_configs` (`HashMap<usize, ExtendConfig>`)
+   - 用户编辑存入 `VariableTreePanel.extend_configs` (`HashMap<usize, ExtendConfig>`)
    - 添加时 ExtendConfig 被消耗到 `PooledVariable`
 
 1.5 **DWARF 跨 CU 类型引用解析**
@@ -707,7 +708,7 @@ svd-parser = "0.14.10"    # CMSIS-SVD 解析与数组/继承展开
    - 采集直接读 `var.address`、`var.size`，解码直接用 `var.ext_type`
    - 对话窗显示的是 PooledVariable 的 extend 属性，非 TreeNode 的 basic 属性
 
-6. **BottomSheet 手动模拟 Modal 覆盖**: 用 `egui::Area` 来实现
+6. **变量树 viewport 路由**: `OpenVariableTree` 携带触发 viewport，覆盖层由 docked/pop-out 各自渲染
 
 7. **Modal 统一管理**: line_dialog / probe_settings / firmware_flash 均使用 `egui::Modal::new().show(ctx)` 实现穿透防护，无需手动拦截
 
@@ -728,7 +729,7 @@ svd-parser = "0.14.10"    # CMSIS-SVD 解析与数组/继承展开
     - `delay_us: Arc<AtomicU64>`: 默认 0 (全速), 采集线程 sleep 节流, 主线程独立 vsync 刷新
     - **FrameData 预 drain**: UI 每帧用 `drain_into` 消费到跨帧复用的 HashMap/Vec，plugin render 只读 — 稳态不再为每变量分配 batch Vec
     - **Plot/FFT**: 时域 Plot 直接借用 VecDeque 切片；FFT 直接遍历历史并输出 `Vec<PlotPoint>` 供绘图借用，应用层不再复制整段点集
-    - **PluginAction**: 插件只返回 OpenVariableTree/RemoveVariable/WriteVariable/ResetTimer/Toast 等意图, App 统一执行副作用
+    - **PluginAction**: 插件返回带 viewport 的 OpenVariableTree、RemoveVariable、SetVariableEnabled、WriteVariable 等意图
     - **绑定/读取分离**: `plugins_cnt` 管生命周期，`active_readers` 管是否生成采集 slots；Table 父节点批量操作后只 rebuild 一次
     - **Hz**: `acq_cycle_count: Arc<AtomicU64>` 采集线程每轮 +1, 主线程每秒计算采集轮询频率
     - **计时**: `timer_was_started` 追踪, 首次"开始"和清空后第一次"开始"归零, 暂停再继续累积
@@ -763,4 +764,4 @@ svd-parser = "0.14.10"    # CMSIS-SVD 解析与数组/继承展开
     - `[idx]` 记号自动展开为独立层级，匹配时校验 index 是否在 `[0, count)` 范围内
     - 搜索成功后更新树节点 name/address 并同步 `config.array_index`
 
-17. **BottomSheet**: 使用手写 `egui::Area` 遮罩 + 底部锚定 `Area`，支持拖拽调整高度、点击遮罩或 [关闭] 退出
+17. **BottomSheet**: 独立 `VariableTreePanel` 在触发 viewport 内渲染，支持拖拽高度、点击遮罩或 [关闭] 退出

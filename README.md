@@ -94,7 +94,7 @@ cargo run --release
 
 ### 2. 加载 ELF 文件
 
-点击 Chart 或 Table 面板中的 **📋 打开变量树** 按钮，弹出底部面板：
+点击 Chart 或 Table 面板中的 **📋 打开变量树** 按钮，底部面板会出现在按钮所在窗口；插件 Pop out 后不会回到主窗口显示：
 - 在 **ELF 文件** 输入框中输入固件路径，或点击 **浏览** 选择文件
 - 点击 **加载** 解析 DWARF 调试信息
 - 展开左侧 DWARF 变量树，选择变量后在右侧查看/编辑属性
@@ -192,6 +192,7 @@ src/
     ├── theme.rs         # 统一 palette + egui Visuals/WidgetVisuals 配置
     ├── vari_tree.rs     # DWARF 变量树
     ├── vari_properties.rs # 属性面板
+    ├── variable_tree_panel.rs # 按 viewport 路由的变量树覆盖层
     ├── chart_plugin/
     │   ├── legend.rs    # ChartLegend
     │   ├── fft.rs        # FFT 频谱计算 (自包含)

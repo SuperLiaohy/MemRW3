@@ -5,6 +5,7 @@ use eframe::egui::{self, RichText, Ui};
 use crate::model::VariablePool;
 use crate::ui::plugin::{FrameData, MemRWPlugin, PluginAction, PluginRenderContext};
 use crate::ui::theme;
+use crate::ui::variable_tree_panel::VariableTreePanel;
 
 #[derive(Debug, Clone)]
 pub struct DockLayoutState {
@@ -55,9 +56,10 @@ pub fn show_active_plugin_content(
     ui: &mut Ui,
     dock: &mut DockLayoutState,
     plugins: &mut [Box<dyn MemRWPlugin>],
-    pool: &VariablePool,
+    pool: &mut VariablePool,
     frame_data: &FrameData,
     running: bool,
+    variable_tree: &mut VariableTreePanel,
 ) -> Vec<PluginAction> {
     let mut actions = Vec::new();
 
@@ -79,7 +81,16 @@ pub fn show_active_plugin_content(
     };
 
     let plugin = plugins[active_idx].as_mut();
-    show_plugin_docked(ui, dock, plugin, pool, frame_data, running, &mut actions);
+    show_plugin_docked(
+        ui,
+        dock,
+        plugin,
+        pool,
+        frame_data,
+        running,
+        variable_tree,
+        &mut actions,
+    );
     actions
 }
 
@@ -87,12 +98,22 @@ pub fn show_plugin_popouts(
     ui: &mut Ui,
     dock: &mut DockLayoutState,
     plugins: &mut [Box<dyn MemRWPlugin>],
-    pool: &VariablePool,
+    pool: &mut VariablePool,
     frame_data: &FrameData,
     running: bool,
+    variable_tree: &mut VariableTreePanel,
 ) -> Vec<PluginAction> {
     let mut actions = Vec::new();
-    show_popout_viewports(ui, dock, plugins, pool, frame_data, running, &mut actions);
+    show_popout_viewports(
+        ui,
+        dock,
+        plugins,
+        pool,
+        frame_data,
+        running,
+        variable_tree,
+        &mut actions,
+    );
     actions
 }
 
@@ -227,9 +248,10 @@ fn show_plugin_docked(
     ui: &mut Ui,
     dock: &mut DockLayoutState,
     plugin: &mut dyn MemRWPlugin,
-    pool: &VariablePool,
+    pool: &mut VariablePool,
     frame_data: &FrameData,
     running: bool,
+    variable_tree: &mut VariableTreePanel,
     actions: &mut Vec<PluginAction>,
 ) {
     let colors = theme::palette(ui);
@@ -238,12 +260,16 @@ fn show_plugin_docked(
         .stroke(theme::panel_stroke(ui))
         .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
-        ui.set_height(ui.available_height());
-        if dock_control_bar(ui, Some(plugin.title()), "Pop out") {
-            dock.set_popped(plugin.id(), true);
-            return;
-        }
-        render_plugin_content(ui, plugin, pool, frame_data, running, actions);
+            ui.set_height(ui.available_height());
+            let overlay_open = variable_tree.is_open_in(ui.ctx().viewport_id());
+            ui.add_enabled_ui(!overlay_open, |ui| {
+                if dock_control_bar(ui, Some(plugin.title()), "Pop out") {
+                    dock.set_popped(plugin.id(), true);
+                    return;
+                }
+                render_plugin_content(ui, plugin, pool, frame_data, running, actions);
+            });
+            variable_tree.show(ui, plugin, pool, actions);
         });
 }
 
@@ -251,9 +277,10 @@ fn show_popout_viewports(
     ui: &mut Ui,
     dock: &mut DockLayoutState,
     plugins: &mut [Box<dyn MemRWPlugin>],
-    pool: &VariablePool,
+    pool: &mut VariablePool,
     frame_data: &FrameData,
     running: bool,
+    variable_tree: &mut VariableTreePanel,
     actions: &mut Vec<PluginAction>,
 ) {
     for plugin in plugins.iter_mut() {
@@ -262,9 +289,11 @@ fn show_popout_viewports(
         }
 
         let plugin_id = plugin.id().to_owned();
+        let viewport_id =
+            egui::ViewportId::from_hash_of(format!("{plugin_id}_popout_viewport"));
         let title = native_window_title(plugin.id(), plugin.title());
         let keep_popped = ui.ctx().show_viewport_immediate(
-            egui::ViewportId::from_hash_of(format!("{plugin_id}_popout_viewport")),
+            viewport_id,
             egui::ViewportBuilder::default()
                 .with_title(title)
                 .with_inner_size(plugin.viewport_size())
@@ -276,15 +305,27 @@ fn show_popout_viewports(
                 }
                 let mut pop_in = false;
                 egui::CentralPanel::default().show_inside(viewport_ui, |ui| {
-                    if dock_control_bar(ui, Some(plugin.title()), "Pop in") {
-                        pop_in = true;
-                    }
-                    render_plugin_content(ui, plugin.as_mut(), pool, frame_data, running, actions);
+                    let overlay_open = variable_tree.is_open_in(ui.ctx().viewport_id());
+                    ui.add_enabled_ui(!overlay_open, |ui| {
+                        if dock_control_bar(ui, Some(plugin.title()), "Pop in") {
+                            pop_in = true;
+                        }
+                        render_plugin_content(
+                            ui,
+                            plugin.as_mut(),
+                            pool,
+                            frame_data,
+                            running,
+                            actions,
+                        );
+                    });
                 });
+                variable_tree.show(viewport_ui, plugin.as_mut(), pool, actions);
                 !pop_in
             },
         );
         if !keep_popped {
+            variable_tree.close_in(viewport_id);
             dock.set_popped(&plugin_id, false);
         }
     }
@@ -304,6 +345,7 @@ fn render_plugin_content(
             pool,
             frame_data,
             running,
+            viewport_id: ui.ctx().viewport_id(),
         },
     ));
 }

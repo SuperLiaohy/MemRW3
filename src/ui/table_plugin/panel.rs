@@ -88,6 +88,7 @@ impl MemRWPlugin for TablePluginState {
         if table_panel(ui, self, ctx.pool) {
             actions.push(PluginAction::OpenVariableTree {
                 plugin_id: self.id().to_owned(),
+                viewport_id: ctx.viewport_id,
             });
         }
         actions.extend(

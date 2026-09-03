@@ -189,6 +189,7 @@ impl MemRWPlugin for ChartPluginState {
         if chart_panel(ui, self, ctx.pool, ctx.frame_data, ctx.running) {
             actions.push(PluginAction::OpenVariableTree {
                 plugin_id: self.id().to_owned(),
+                viewport_id: ctx.viewport_id,
             });
         }
 

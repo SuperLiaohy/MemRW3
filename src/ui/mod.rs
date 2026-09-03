@@ -6,6 +6,7 @@ pub mod table_plugin;
 pub mod theme;
 mod vari_properties;
 mod vari_tree;
+pub mod variable_tree_panel;
 
 pub use control_bar::*;
 pub use vari_properties::*;
