@@ -215,7 +215,6 @@ impl MemRW3App {
             });
             self.session.connected = false;
             self.session.timer_was_started = false;
-            self.session.connect_error = None;
             self.toasts
                 .info("已断开连接")
                 .duration(Some(Duration::from_secs(5)))
@@ -271,7 +270,6 @@ impl MemRW3App {
                     .success("连接成功")
                     .duration(Some(Duration::from_secs(5)))
                     .closable(true);
-                self.session.connect_error = None;
             }
         }
     }
@@ -367,7 +365,6 @@ impl MemRW3App {
             self.session.set_running(false);
             self.session.connected = false;
             self.session.timer_was_started = false;
-            self.session.connect_error = Some(error.clone());
             self.toasts
                 .error(format!("Probe 物理链路已断开：{error}"))
                 .duration(Some(Duration::from_secs(8)))
