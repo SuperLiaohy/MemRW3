@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 use crate::model::VariablePool;
 use crate::ui::plugin::{FrameData, VariableCandidate};
@@ -16,6 +17,8 @@ pub struct TableLeaf {
     pub enabled: bool,
     pub current_value: String,
     pub edit_buffer: String,
+    pub refresh_hz: u32,
+    last_value_update: Option<Instant>,
 }
 
 pub struct TableNode {
@@ -63,6 +66,8 @@ impl TableNode {
                 enabled: true,
                 current_value: "--".to_owned(),
                 edit_buffer: String::new(),
+                refresh_hz: default_refresh_hz(),
+                last_value_update: None,
             }
         });
         let children = candidate
@@ -117,6 +122,8 @@ impl TableNode {
                     enabled: saved_leaf.enabled,
                     current_value: "--".to_owned(),
                     edit_buffer: String::new(),
+                    refresh_hz: saved_leaf.refresh_hz.clamp(1, 60),
+                    last_value_update: None,
                 })
             }
             None => None,
@@ -146,6 +153,7 @@ impl TableNode {
                 variable_type: Some(variable.ext_type.clone()),
                 variable_size: Some(variable.size),
                 enabled: leaf.enabled,
+                refresh_hz: leaf.refresh_hz,
             })
         });
         SavedTableNode {
@@ -219,12 +227,19 @@ impl TableNode {
     ) {
         if let Some(leaf) = &mut self.leaf {
             if leaf.enabled {
+                let interval = Duration::from_secs_f64(1.0 / f64::from(leaf.refresh_hz.max(1)));
+                let due = leaf
+                    .last_value_update
+                    .is_none_or(|last_update| last_update.elapsed() >= interval);
                 if let Some((_, raw)) = frame_data
                     .get(&leaf.variable_id)
                     .and_then(|samples| samples.last())
                 {
-                    if let Some(variable) = pool.get(leaf.variable_id) {
-                        formatter(raw, &variable.ext_type, &mut leaf.current_value);
+                    if due {
+                        if let Some(variable) = pool.get(leaf.variable_id) {
+                            formatter(raw, &variable.ext_type, &mut leaf.current_value);
+                            leaf.last_value_update = Some(Instant::now());
+                        }
                     }
                 }
             }
@@ -238,6 +253,7 @@ impl TableNode {
         if let Some(leaf) = &mut self.leaf {
             leaf.current_value.clear();
             leaf.current_value.push_str("--");
+            leaf.last_value_update = None;
         }
         for child in &mut self.children {
             child.reset_values();
@@ -271,6 +287,8 @@ pub struct SavedTableLeaf {
     pub variable_size: Option<u32>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_refresh_hz")]
+    pub refresh_hz: u32,
 }
 
 fn default_enabled() -> bool {
@@ -281,8 +299,14 @@ fn default_expanded() -> bool {
     true
 }
 
+fn default_refresh_hz() -> u32 {
+    10
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use crate::dwarf::types::ExtendType;
     use crate::model::VariablePool;
     use crate::ui::plugin::{FrameData, VariableCandidate};
@@ -353,6 +377,33 @@ mod tests {
     }
 
     #[test]
+    fn refresh_rate_throttles_only_the_display_value() {
+        let candidate = leaf("value", 0x2000_0000);
+        let mut pool = VariablePool::default();
+        let mut next_id = 0;
+        let mut root =
+            TableNode::from_candidate(&candidate, "value".to_owned(), &mut pool, &mut next_id)
+                .unwrap();
+        let variable_id = root.leaf.as_ref().unwrap().variable_id;
+        root.leaf.as_mut().unwrap().refresh_hz = 10;
+        let mut frame_data = FrameData::default();
+        frame_data.insert(variable_id, vec![(1.0, [1; 8])]);
+        let formatter = |raw: &[u8], _: &ExtendType, output: &mut String| {
+            *output = raw[0].to_string();
+        };
+
+        root.update_values(&pool, &frame_data, formatter);
+        frame_data.insert(variable_id, vec![(2.0, [2; 8])]);
+        root.update_values(&pool, &frame_data, formatter);
+        assert_eq!(root.leaf.as_ref().unwrap().current_value, "1");
+
+        root.leaf.as_mut().unwrap().last_value_update =
+            Some(Instant::now() - Duration::from_secs(1));
+        root.update_values(&pool, &frame_data, formatter);
+        assert_eq!(root.leaf.as_ref().unwrap().current_value, "2");
+    }
+
+    #[test]
     fn restores_individual_enabled_states() {
         let first = leaf("root.a", 0x2000_0000);
         let second = leaf("root.b", 0x2000_0004);
@@ -370,6 +421,7 @@ mod tests {
             TableNode::from_candidate(&candidate, "root".to_owned(), &mut pool, &mut next_id)
                 .unwrap();
         root.children[0].leaf.as_mut().unwrap().enabled = false;
+        root.children[0].leaf.as_mut().unwrap().refresh_hz = 25;
         let saved = root.to_saved(&pool);
 
         let mut restored_pool = VariablePool::default();
@@ -380,6 +432,7 @@ mod tests {
 
         assert_eq!(restored.check_state(), CheckState::Partial);
         assert!(!restored.children[0].leaf.as_ref().unwrap().enabled);
+        assert_eq!(restored.children[0].leaf.as_ref().unwrap().refresh_hz, 25);
         assert!(restored.children[1].leaf.as_ref().unwrap().enabled);
         assert_eq!(
             restored_pool

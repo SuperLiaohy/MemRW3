@@ -524,11 +524,12 @@ PooledVariable { id, name, address, ext_type, size, incoming, plugins_cnt, activ
 | 勾选采集 | 叶子默认勾选；父节点动态显示全选/部分/未选，点击时递归切换后代 |
 | 共享变量 | `plugins_cnt` 保存绑定，`active_readers` 决定是否进入 slots；Table 关闭不会中断 Chart 的读取 |
 | Read | 未勾选叶子冻结显示值；勾选叶子使用 `frame_data` 最新值并按 ExtendType 格式化 |
+| 刷新频率 | 每个叶子保存 1–60 Hz 的显示刷新率；仅节流当前值格式化，不改变采集 slots |
 | Write | 叶子 TextEdit → `validate_write()` → `PluginAction::WriteVariable` |
 | 写入流程 | 主循环 drain `pending_writes` → `write_variable(var_id, value)` → `sync.send_request` 暂停采集线程 → `core.write_word_8/16/32/64` → 恢复 |
 | 写入校验 | 按 ExtendType 校验: u8(0-255), i8(-128~127), u16, i16, u32, i32, u64, i64, f32, f64; Other 类型禁止写入 |
 | SVD | 后台解析 CMSIS-SVD；展开数组与 derivedFrom，展示 peripheral/register/field、绝对地址、权限和复位值 |
-| 配置 | 递归保存树、展开状态、叶子 enabled 和 SVD 路径；兼容旧版平面 Table payload |
+| 配置 | 递归保存树、展开状态、叶子 enabled/refresh_hz 和 SVD 路径；兼容旧版平面 Table payload |
 
 ### 7.1 FFT 频谱分析模块 (fft.rs)
 

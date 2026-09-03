@@ -192,6 +192,7 @@ impl MemRWPlugin for TablePluginState {
                             variable_type: None,
                             variable_size: None,
                             enabled: true,
+                            refresh_hz: 10,
                         }),
                         children: Vec::new(),
                     })
@@ -253,6 +254,10 @@ fn render_variable_panel(ui: &mut Ui, state: &mut TablePluginState, pool: &Varia
         ui.add_sized(
             [135.0, 18.0],
             egui::Label::new(RichText::new("当前值").strong()),
+        );
+        ui.add_sized(
+            [75.0, 18.0],
+            egui::Label::new(RichText::new("刷新频率").strong()),
         );
         ui.label(RichText::new("写入").strong());
     });
@@ -355,6 +360,14 @@ fn render_node(
                 egui::Label::new(RichText::new(&leaf.current_value).monospace().size(11.0))
                     .truncate(),
             );
+            ui.add_sized(
+                [75.0, 20.0],
+                egui::DragValue::new(&mut leaf.refresh_hz)
+                    .range(1..=60)
+                    .speed(1)
+                    .suffix(" Hz"),
+            )
+            .on_hover_text("仅控制 Table 当前值文本的刷新频率，不改变底层采集率");
             ui.add(
                 egui::TextEdit::singleline(&mut leaf.edit_buffer)
                     .id(egui::Id::new(("table_write", node.id)))
@@ -378,6 +391,7 @@ fn render_node(
                         .color(theme::muted_text(ui)),
                 ),
             );
+            ui.add_space(75.0);
         }
 
         if is_root
