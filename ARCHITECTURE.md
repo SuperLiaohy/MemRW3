@@ -159,7 +159,7 @@ Dock 为每个插件维护独立暂停状态。暂停按钮位于 docked 与 pop
 
 变量树的遮罩和 Bottom Sheet 使用 `Order::Middle`，高于普通 Panel，但为 `Order::Foreground` 的 Toast 和弹出控件保留顶层，避免提示消息被整屏变量树遮挡。
 
-变量树目标保存请求插件、宿主 viewport 和 pop-out 状态。弹出后由 App 统一定位对应 `MemRWPlugin` 并在固定的独立 viewport 渲染，因此切换或暂停插件不会关闭变量树；新的打开请求在已弹出时仅更新目标插件并保持 Pop out，未弹出时才在请求 viewport 底部显示。Pop in 会聚焦对应插件并恢复为主窗口 Bottom Sheet。
+变量树目标保存请求插件、宿主 viewport 和 pop-out 状态。弹出后由 App 统一定位对应 `MemRWPlugin` 并在固定的独立 viewport 渲染，因此切换或暂停插件不会关闭变量树；原生系统标题栏仅使用 ASCII 标题，避免缺少 CJK 字体的平台显示乱码。新的打开请求在已弹出时仅更新目标插件并保持 Pop out，未弹出时才在请求 viewport 底部显示。Pop in 会聚焦对应插件并恢复为主窗口 Bottom Sheet。
 
 ```rust
 pub trait MemRWPlugin {

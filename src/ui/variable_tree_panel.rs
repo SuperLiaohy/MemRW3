@@ -153,7 +153,7 @@ impl VariableTreePanel {
         };
         let viewport_id = egui::ViewportId::from_hash_of("variable_tree_popout");
         let host_viewport_id = host_ui.ctx().viewport_id();
-        let title = format!("Variable Tree — {}", plugin.title());
+        let title = variable_tree_window_title(plugin.id());
         let mut close_requested = false;
         host_ui.ctx().show_viewport_immediate(
             viewport_id,
@@ -442,6 +442,27 @@ impl VariableTreePanel {
     }
 }
 
+fn variable_tree_window_title(plugin_id: &str) -> String {
+    let owner = match plugin_id {
+        "chart" => "Chart".to_owned(),
+        "table" => "Table".to_owned(),
+        _ => {
+            let owner = plugin_id
+                .chars()
+                .filter(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+                })
+                .collect::<String>();
+            if owner.is_empty() {
+                "Plugin".to_owned()
+            } else {
+                owner
+            }
+        }
+    };
+    format!("Variable Tree - {owner}")
+}
+
 fn load_dwarf_state(path: &str) -> Result<dwarf::types::DwarfState, String> {
     let path = path.trim().to_owned();
     let cus = dwarf::extract::load_elf(&path).map_err(|error| error.to_string())?;
@@ -607,7 +628,18 @@ mod tests {
 
     use crate::dwarf::types::{BasicType, ExtendConfig, ExtendType, TreeNode};
 
-    use super::{VARIABLE_TREE_LAYER_ORDER, VariableTreePanel, variable_candidate};
+    use super::{
+        VARIABLE_TREE_LAYER_ORDER, VariableTreePanel, variable_candidate,
+        variable_tree_window_title,
+    };
+
+    #[test]
+    fn native_variable_tree_titles_are_ascii_only() {
+        assert_eq!(variable_tree_window_title("chart"), "Variable Tree - Chart");
+        assert_eq!(variable_tree_window_title("table"), "Variable Tree - Table");
+        assert_eq!(variable_tree_window_title("插件-x"), "Variable Tree - -x");
+        assert!(variable_tree_window_title("插件").is_ascii());
+    }
 
     #[test]
     fn variable_tree_keeps_foreground_available_for_toasts() {
