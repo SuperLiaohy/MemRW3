@@ -15,8 +15,8 @@
 - **固件烧录**: Control Bar 直接烧录并校验 ELF/AXF、HEX、BIN 或 UF2，完成后自动复位目标
 - **CSV 日志**: 可选择 CSV 文件，开始采集时覆盖写入时间戳 + 所有曲线数据行
 - **插件化界面**: Chart 与 Table 均实现 `MemRWPlugin` trait，Dock、变量树添加、写入、删除、Toast、配置保存/加载统一通过动态插件池分发
-- **插件独立暂停**: 每个插件标题栏可单独暂停更新和交互，当前画面保持不变，不影响其他插件
-- **变量树独立窗口**: DWARF 变量树可从 Bottom Sheet 弹出为原生窗口，并可一键 Pop in 回对应插件
+- **插件独立暂停**: 每个插件标题栏可单独暂停更新和交互，当前画面和已打开的变量树保持不变，不影响其他插件
+- **变量树独立窗口**: DWARF 变量树可从 Bottom Sheet 弹出为原生窗口，并可一键 Pop in 回对应插件；再次点击打开时保持当前 Pop out 状态
 - **统一主题**: App 背景、Activity Bar、控制栏、Dock、BottomSheet、状态提示和 Dialog 使用统一 palette，并可在 Control Bar 一键切换深色/浅色
 - **采集状态提示**: Control Bar 的底色、描边和开始/暂停按钮随未连接、已暂停、采集中状态联动
 - **断开数据保留**: 断开 Probe 只停止采集并释放连接，Chart、Table 与 SVD 保留最后一次显示值

@@ -286,9 +286,6 @@ fn show_plugin_docked(
             let controls = dock_control_bar(ui, Some(plugin.title()), "Pop out", paused);
             if controls.toggle_paused {
                 dock.toggle_plugin_paused(plugin.id());
-                if dock.is_plugin_paused(plugin.id()) {
-                    variable_tree.close_in(ui.ctx().viewport_id());
-                }
             }
             if controls.move_viewport {
                 dock.set_popped(plugin.id(), true);
@@ -338,9 +335,6 @@ fn show_popout_viewports(
                     let controls = dock_control_bar(ui, Some(plugin.title()), "Pop in", paused);
                     if controls.toggle_paused {
                         dock.toggle_plugin_paused(plugin.id());
-                        if dock.is_plugin_paused(plugin.id()) {
-                            variable_tree.close_in(ui.ctx().viewport_id());
-                        }
                     }
                     if controls.move_viewport {
                         pop_in = true;

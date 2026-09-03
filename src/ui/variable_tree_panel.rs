@@ -38,12 +38,15 @@ impl VariableTreePanel {
     }
 
     pub fn open(&mut self, plugin_id: impl Into<String>, viewport_id: egui::ViewportId) {
+        let popped = self.target.as_ref().is_some_and(|target| target.popped);
         self.target = Some(VariableTreeTarget {
             plugin_id: plugin_id.into(),
             viewport_id,
-            popped: false,
+            popped,
         });
-        self.drag_state = None;
+        if !popped {
+            self.drag_state = None;
+        }
     }
 
     pub fn is_open_in(&self, viewport_id: egui::ViewportId) -> bool {
@@ -53,11 +56,7 @@ impl VariableTreePanel {
     }
 
     pub fn close_in(&mut self, viewport_id: egui::ViewportId) {
-        if self
-            .target
-            .as_ref()
-            .is_some_and(|target| target.viewport_id == viewport_id)
-        {
+        if self.is_open_in(viewport_id) {
             self.target = None;
             self.drag_state = None;
         }
@@ -152,8 +151,7 @@ impl VariableTreePanel {
             self.target = None;
             return None;
         };
-        let viewport_id =
-            egui::ViewportId::from_hash_of(format!("{}_variable_tree_popout", target.plugin_id));
+        let viewport_id = egui::ViewportId::from_hash_of("variable_tree_popout");
         let host_viewport_id = host_ui.ctx().viewport_id();
         let title = format!("Variable Tree — {}", plugin.title());
         let mut close_requested = false;
@@ -617,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn popped_tree_no_longer_blocks_its_host_viewport() {
+    fn popped_tree_no_longer_blocks_or_closes_with_its_host_viewport() {
         let mut panel = VariableTreePanel::new(crate::dwarf::types::DwarfState::new(Vec::new()));
         let viewport_id = egui::ViewportId::ROOT;
         panel.open("chart", viewport_id);
@@ -627,7 +625,22 @@ mod tests {
         assert!(!panel.is_open_in(viewport_id));
 
         panel.close_in(viewport_id);
-        assert!(panel.target.is_none());
+        assert!(panel.target.is_some());
+    }
+
+    #[test]
+    fn opening_tree_preserves_popout_and_retargets_the_requesting_plugin() {
+        let mut panel = VariableTreePanel::new(crate::dwarf::types::DwarfState::new(Vec::new()));
+        panel.open("chart", egui::ViewportId::ROOT);
+        panel.target.as_mut().unwrap().popped = true;
+        let table_viewport = egui::ViewportId::from_hash_of("table_viewport");
+
+        panel.open("table", table_viewport);
+
+        let target = panel.target.as_ref().unwrap();
+        assert!(target.popped);
+        assert_eq!(target.plugin_id, "table");
+        assert_eq!(target.viewport_id, table_viewport);
     }
 
     fn node(
