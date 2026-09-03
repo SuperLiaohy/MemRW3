@@ -318,6 +318,14 @@ impl MemRW3App {
         }
     }
 
+    fn reset_active_plugin_data(&mut self) {
+        for plugin in &mut self.plugins {
+            if !self.dock.is_plugin_paused(plugin.id()) {
+                plugin.reset_data();
+            }
+        }
+    }
+
     pub fn set_acquisition_running(&mut self, running: bool) {
         if !running {
             self.session.set_running(false);
@@ -332,7 +340,7 @@ impl MemRW3App {
             for variable in self.session.config.pool.iter() {
                 variable.incoming.discard_all();
             }
-            self.reset_plugin_data();
+            self.reset_active_plugin_data();
             self.reset_timer();
             self.session.timer_was_started = true;
         }
@@ -599,6 +607,9 @@ impl eframe::App for MemRW3App {
         let hardware_busy = self.is_flashing();
         let mut update_actions = Vec::new();
         for plugin in &mut self.plugins {
+            if self.dock.is_plugin_paused(plugin.id()) {
+                continue;
+            }
             update_actions.extend(plugin.update(PluginUpdateContext {
                 pool: &self.session.config.pool,
                 frame_data: &frame_data,

@@ -10,6 +10,7 @@ use crate::ui::variable_tree_panel::VariableTreePanel;
 #[derive(Debug, Clone)]
 pub struct DockLayoutState {
     popped: HashMap<String, bool>,
+    paused: HashMap<String, bool>,
     active_plugin: Option<String>,
 }
 
@@ -17,6 +18,7 @@ impl Default for DockLayoutState {
     fn default() -> Self {
         Self {
             popped: HashMap::new(),
+            paused: HashMap::new(),
             active_plugin: None,
         }
     }
@@ -29,6 +31,15 @@ impl DockLayoutState {
 
     fn set_popped(&mut self, plugin_id: &str, popped: bool) {
         self.popped.insert(plugin_id.to_owned(), popped);
+    }
+
+    pub fn is_plugin_paused(&self, plugin_id: &str) -> bool {
+        self.paused.get(plugin_id).copied().unwrap_or(false)
+    }
+
+    fn toggle_plugin_paused(&mut self, plugin_id: &str) {
+        let paused = !self.is_plugin_paused(plugin_id);
+        self.paused.insert(plugin_id.to_owned(), paused);
     }
 
     fn active_plugin_id(&self) -> Option<&str> {
@@ -154,7 +165,9 @@ fn show_activity_bar(ui: &mut Ui, dock: &mut DockLayoutState, plugins: &[Box<dyn
                 let plugin_id = plugin.id();
                 let is_active = dock.active_plugin_id() == Some(plugin_id);
                 let is_popped = dock.is_popped(plugin_id);
-                let response = activity_button(ui, plugin.as_ref(), is_active, is_popped);
+                let is_paused = dock.is_plugin_paused(plugin_id);
+                let response =
+                    activity_button(ui, plugin.as_ref(), is_active, is_popped, is_paused);
                 let button_rect = response.rect;
 
                 if response.clicked() {
@@ -183,6 +196,7 @@ fn activity_button(
     plugin: &dyn MemRWPlugin,
     is_active: bool,
     is_popped: bool,
+    is_paused: bool,
 ) -> egui::Response {
     let colors = theme::palette(ui);
     let fill = if is_active {
@@ -190,7 +204,9 @@ fn activity_button(
     } else {
         egui::Color32::TRANSPARENT
     };
-    let text_color = if is_active {
+    let text_color = if is_paused {
+        colors.text_muted
+    } else if is_active {
         colors.accent_hover
     } else if is_popped {
         colors.text_muted
@@ -208,7 +224,9 @@ fn activity_button(
         .fill(fill)
         .frame(is_active),
     )
-    .on_hover_text(if is_popped {
+    .on_hover_text(if is_paused {
+        format!("{} 已暂停，点击打开", plugin.title())
+    } else if is_popped {
         format!("{} 已弹出，点击返回主区域", plugin.title())
     } else {
         plugin.title().to_owned()
@@ -259,13 +277,22 @@ fn show_plugin_docked(
         .show(ui, |ui| {
             ui.set_height(ui.available_height());
             let overlay_open = variable_tree.is_open_in(ui.ctx().viewport_id());
-            ui.add_enabled_ui(interaction_enabled && !overlay_open, |ui| {
-                if dock_control_bar(ui, Some(plugin.title()), "Pop out") {
-                    dock.set_popped(plugin.id(), true);
-                    return;
+            let paused = dock.is_plugin_paused(plugin.id());
+            let controls = dock_control_bar(ui, Some(plugin.title()), "Pop out", paused);
+            if controls.toggle_paused {
+                dock.toggle_plugin_paused(plugin.id());
+                if dock.is_plugin_paused(plugin.id()) {
+                    variable_tree.close_in(ui.ctx().viewport_id());
                 }
-                render_plugin_content(ui, plugin, pool, running, actions);
-            });
+            }
+            if controls.move_viewport {
+                dock.set_popped(plugin.id(), true);
+            } else {
+                let paused = dock.is_plugin_paused(plugin.id());
+                ui.add_enabled_ui(interaction_enabled && !overlay_open && !paused, |ui| {
+                    render_plugin_content(ui, plugin, pool, running, actions);
+                });
+            }
             variable_tree.show(ui, plugin, pool, actions);
         });
 }
@@ -302,10 +329,19 @@ fn show_popout_viewports(
                 let mut pop_in = false;
                 egui::CentralPanel::default().show_inside(viewport_ui, |ui| {
                     let overlay_open = variable_tree.is_open_in(ui.ctx().viewport_id());
-                    ui.add_enabled_ui(interaction_enabled && !overlay_open, |ui| {
-                        if dock_control_bar(ui, Some(plugin.title()), "Pop in") {
-                            pop_in = true;
+                    let paused = dock.is_plugin_paused(plugin.id());
+                    let controls = dock_control_bar(ui, Some(plugin.title()), "Pop in", paused);
+                    if controls.toggle_paused {
+                        dock.toggle_plugin_paused(plugin.id());
+                        if dock.is_plugin_paused(plugin.id()) {
+                            variable_tree.close_in(ui.ctx().viewport_id());
                         }
+                    }
+                    if controls.move_viewport {
+                        pop_in = true;
+                    }
+                    let paused = dock.is_plugin_paused(plugin.id());
+                    ui.add_enabled_ui(interaction_enabled && !overlay_open && !paused, |ui| {
                         render_plugin_content(ui, plugin.as_mut(), pool, running, actions);
                     });
                 });
@@ -337,17 +373,63 @@ fn render_plugin_content(
     ));
 }
 
-fn dock_control_bar(ui: &mut Ui, title: Option<&str>, button: &str) -> bool {
+#[derive(Default)]
+struct DockControlAction {
+    move_viewport: bool,
+    toggle_paused: bool,
+}
+
+fn dock_control_bar(
+    ui: &mut Ui,
+    title: Option<&str>,
+    button: &str,
+    paused: bool,
+) -> DockControlAction {
     let colors = theme::palette(ui);
-    let mut clicked = false;
+    let mut action = DockControlAction::default();
     ui.horizontal(|ui| {
         if let Some(title) = title {
             ui.label(RichText::new(title).strong().color(colors.text));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            clicked = ui.button(button).clicked();
+            action.move_viewport = ui.button(button).clicked();
+            let pause_label = if paused {
+                "启用插件"
+            } else {
+                "暂停插件"
+            };
+            action.toggle_paused = ui
+                .add_sized([72.0, 22.0], egui::Button::new(pause_label))
+                .on_hover_text(if paused {
+                    "恢复此插件的数据更新和交互"
+                } else {
+                    "暂停此插件的数据更新和交互，保留当前画面"
+                })
+                .clicked();
+            if paused {
+                ui.label(RichText::new("已暂停").color(colors.warning));
+            }
         });
     });
     ui.separator();
-    clicked
+    action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DockLayoutState;
+
+    #[test]
+    fn plugins_are_active_by_default_and_pause_independently() {
+        let mut dock = DockLayoutState::default();
+        assert!(!dock.is_plugin_paused("chart"));
+        assert!(!dock.is_plugin_paused("table"));
+
+        dock.toggle_plugin_paused("chart");
+        assert!(dock.is_plugin_paused("chart"));
+        assert!(!dock.is_plugin_paused("table"));
+
+        dock.toggle_plugin_paused("chart");
+        assert!(!dock.is_plugin_paused("chart"));
+    }
 }

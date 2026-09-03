@@ -155,6 +155,8 @@ plugins: Vec<Box<dyn MemRWPlugin>>
 
 内置插件按顺序创建为 Chart、Table。App shell 左侧 Activity Bar 从窗口顶部贯穿到底部，负责按插件 id 切换当前插件；右侧区域承载控制栏和当前插件内容。Dock、BottomSheet、变量添加、删除、写入、Toast、配置保存/加载都通过 trait object 统一分发，不再通过 `DockTab` enum 或 Chart/Table 专用分支判断。
 
+Dock 为每个插件维护独立暂停状态。暂停按钮位于 docked 与 pop-out 标题栏；暂停后跳过该插件的 `update()`，并禁用内容区交互，但保留最后渲染数据和其他插件的运行状态。
+
 ```rust
 pub trait MemRWPlugin {
     fn id(&self) -> &'static str;
