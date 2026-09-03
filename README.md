@@ -45,7 +45,7 @@ brew install cmake pkg-config libusb
 
 ### Rust 工具链
 
-Rust 1.80+ (edition 2024):
+Rust 1.85+ (edition 2024):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
