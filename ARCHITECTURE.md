@@ -526,6 +526,7 @@ PooledVariable { id, name, address, ext_type, size, incoming, plugins_cnt, activ
 | 滚轮缩放 | Both 模式原生双轴缩放; X/Y 模式手动单轴缩放 (锚定视图中心, 缩放因子 1/1.15) |
 | 时域缩放模式 | 工具栏 `缩放: X Y Both` 按钮, 独立于 FFT 缩放; 缩放时自动关闭 auto-scroll |
 | FFT 缩放模式 | FFT 图表头顶部独立 `缩放: X Y Both` 按钮 |
+| 工具栏稳定性 | FFT 开关及 X/Y/Both 使用固定尺寸、始终保留 frame 的按钮，悬浮和选中不会改变工具栏布局 |
 
 ### 7. Table 读写面板特性
 

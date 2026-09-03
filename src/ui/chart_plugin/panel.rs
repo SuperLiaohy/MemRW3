@@ -15,6 +15,7 @@ use std::io::{BufWriter, Write};
 use std::time::Instant;
 
 const ZOOM_MODE_BUTTON_SIZE: [f32; 2] = [42.0, 22.0];
+const FFT_TOGGLE_BUTTON_SIZE: [f32; 2] = [80.0, 22.0];
 
 #[derive(Clone, PartialEq)]
 pub enum YAxisMode {
@@ -526,15 +527,7 @@ pub fn chart_panel(
                     state.td_plot_bounds = None;
                 }
                 ui.separator();
-                let fft_label = if state.show_fft {
-                    "📊 FFT 关"
-                } else {
-                    "📊 FFT"
-                };
-                if ui
-                    .selectable_label(state.show_fft, RichText::new(fft_label).size(12.0))
-                    .clicked()
-                {
+                if fft_toggle_button(ui, state.show_fft).clicked() {
                     state.show_fft = !state.show_fft;
                 }
                 ui.separator();
@@ -1269,6 +1262,17 @@ fn zoom_mode_button(ui: &mut Ui, selected: bool, mode: FftScrollMode) -> egui::R
     )
 }
 
+fn fft_toggle_button(ui: &mut Ui, enabled: bool) -> egui::Response {
+    let label = if enabled { "📊 FFT 关" } else { "📊 FFT" };
+    ui.add_sized(
+        FFT_TOGGLE_BUTTON_SIZE,
+        egui::Button::new(RichText::new(label).size(12.0))
+            .selected(enabled)
+            .frame(true)
+            .frame_when_inactive(true),
+    )
+}
+
 fn compute_scroll_zoom(
     current: Option<(f64, f64, f64, f64)>,
     factor: f64,
@@ -1598,8 +1602,9 @@ mod tests {
     use crate::ui::plugin::MemRWPlugin;
 
     use super::{
-        ChartLegend, ChartPluginState, FftScrollMode, ZOOM_MODE_BUTTON_SIZE, update_chart_data,
-        visible_history_bounds, write_log_frame, zoom_mode_button,
+        ChartLegend, ChartPluginState, FFT_TOGGLE_BUTTON_SIZE, FftScrollMode,
+        ZOOM_MODE_BUTTON_SIZE, fft_toggle_button, update_chart_data, visible_history_bounds,
+        write_log_frame, zoom_mode_button,
     };
 
     fn add_u8(pool: &mut VariablePool, name: &str, address: u64) -> usize {
@@ -1696,6 +1701,20 @@ mod tests {
             assert_eq!(
                 inactive.rect.size(),
                 egui::Vec2::from(ZOOM_MODE_BUTTON_SIZE)
+            );
+        });
+    }
+
+    #[test]
+    fn fft_toggle_keeps_the_same_allocated_size_in_every_state() {
+        egui::__run_test_ui(|ui| {
+            let inactive = fft_toggle_button(ui, false);
+            let active = fft_toggle_button(ui, true);
+
+            assert_eq!(inactive.rect.size(), active.rect.size());
+            assert_eq!(
+                inactive.rect.size(),
+                egui::Vec2::from(FFT_TOGGLE_BUTTON_SIZE)
             );
         });
     }
