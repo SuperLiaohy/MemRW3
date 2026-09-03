@@ -518,11 +518,11 @@ PooledVariable { id, name, address, ext_type, size, incoming, plugins_cnt, activ
 | 空状态 | 居中提示"暂无监控变量" + 打开变量树按钮 |
 | Log CSV | 可选择 CSV 文件, 开始采集时覆盖写入 header+数据行, 暂停时关闭; 使用 FIFO 多路归并直接输出，不复制/排序时间戳; logging 期间禁用添加/删除/改选项 |
 | 保存/加载 | JSON 格式保存 Probe/pool/plugin payload/ELF 配置; 加载后自动 trace 更新地址 |
-| 游标 (Cursor) | 鼠标悬停时显示竖线 + 浮层: 逐曲线显示时间戳和当前值 |
+| 游标 (Cursor) | 鼠标悬停时显示竖线 + 浮层: 逐曲线显示时间戳和当前值；浮层使用 Plot 实际 frame 定位并裁剪，不越出图表 |
 | FFT 频谱图 | 工具栏 `📊 FFT` 按钮切换; 开启后视图上下分屏: 时域(55%) + 频域(45%) |
 | FFT 配置 | 窗函数选择 (Rectangular/Hann/Hamming/Blackman) + 取样点数 (4~65536, 从数据末尾取) |
 | FFT 多曲线 | 所有可见曲线各自计算 FFT, 叠加在同一频谱图上, 颜色与图例一致 |
-| FFT 游标 | 鼠标悬停频谱图显示竖线 + 浮层: 逐曲线显示 "频率 Hz → 幅值" |
+| FFT 游标 | 鼠标悬停频谱图显示竖线 + 浮层: 逐曲线显示 "频率 Hz → 幅值"；浮层限制在 FFT Plot 内 |
 | 滚轮缩放 | Both 模式原生双轴缩放; X/Y 模式手动单轴缩放 (锚定视图中心, 缩放因子 1/1.15) |
 | 时域缩放模式 | 工具栏 `缩放: X Y Both` 按钮, 独立于 FFT 缩放; 缩放时自动关闭 auto-scroll |
 | FFT 缩放模式 | FFT 图表头顶部独立 `缩放: X Y Both` 按钮 |

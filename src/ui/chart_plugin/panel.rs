@@ -897,7 +897,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
     let mut cursor_labels: Option<CursorOverlay> = None;
     let cursor_line = theme::palette(ui).border_strong.linear_multiply(0.8);
 
-    Plot::new("chart_plot")
+    let plot_response = Plot::new("chart_plot")
         .height(plot_height)
         .show_axes([true, show_y_axis])
         .show_grid([true, true])
@@ -997,6 +997,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 state.td_plot_bounds = Some((pb.min()[0], pb.max()[0], pb.min()[1], pb.max()[1]));
             }
         });
+    let plot_frame = *plot_response.transform.frame();
 
     if let Some((sx, sy, cursor_data)) = &cursor_labels {
         let font_id = egui::FontId::proportional(11.0);
@@ -1012,13 +1013,9 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         }
         let w = max_w + 8.0;
         let h = total_h + 4.0;
-        let x = (*sx + 16.0).min(plot_rect.right() - w);
-        let mut y = *sy + 8.0;
-        if y + h > plot_rect.bottom() {
-            y = plot_rect.bottom() - h;
-        }
-        let r = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
-        ui.painter().rect_filled(
+        let r = confined_overlay_rect(plot_frame, egui::pos2(*sx, *sy), egui::vec2(w, h));
+        let painter = ui.painter().with_clip_rect(plot_frame);
+        painter.rect_filled(
             r,
             egui::CornerRadius::same(3),
             theme::palette(ui).tooltip_bg,
@@ -1026,10 +1023,9 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         let mut ty = r.top() + 2.0;
         for (name, dt, dv, color) in cursor_data {
             let line = format!("{}: {} @ {:.3}", name, fmt_time(*dt), dv);
-            let g = ui.painter().layout_no_wrap(line, font_id.clone(), *color);
+            let g = painter.layout_no_wrap(line, font_id.clone(), *color);
             let gh = g.size().y;
-            ui.painter()
-                .galley(egui::pos2(r.left() + 4.0, ty), g, *color);
+            painter.galley(egui::pos2(r.left() + 4.0, ty), g, *color);
             ty += gh + 1.0;
         }
     }
@@ -1037,7 +1033,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
     legend_overlay(
         ui,
         state,
-        egui::pos2(plot_rect.right() - 5.0, plot_rect.top() + 5.0),
+        egui::pos2(plot_frame.right() - 5.0, plot_frame.top() + 5.0),
     );
 }
 
@@ -1171,7 +1167,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
     let mut cursor_labels: Option<CursorOverlay> = None;
     let cursor_line = theme::palette(ui).border_strong.linear_multiply(0.8);
 
-    Plot::new("fft_plot")
+    let plot_response = Plot::new("fft_plot")
         .height(plot_height)
         .show_axes([true, true])
         .show_grid([true, true])
@@ -1225,6 +1221,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 state.fft_plot_bounds = Some((pb.min()[0], pb.max()[0], pb.min()[1], pb.max()[1]));
             }
         });
+    let plot_frame = *plot_response.transform.frame();
 
     if let Some((sx, sy, cursor_data)) = &cursor_labels {
         let font_id = egui::FontId::proportional(11.0);
@@ -1240,13 +1237,9 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         }
         let w = max_w + 8.0;
         let h = total_h + 4.0;
-        let x = (*sx + 16.0).min(plot_rect.right() - w);
-        let mut y = *sy + 8.0;
-        if y + h > plot_rect.bottom() {
-            y = plot_rect.bottom() - h;
-        }
-        let r = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
-        ui.painter().rect_filled(
+        let r = confined_overlay_rect(plot_frame, egui::pos2(*sx, *sy), egui::vec2(w, h));
+        let painter = ui.painter().with_clip_rect(plot_frame);
+        painter.rect_filled(
             r,
             egui::CornerRadius::same(3),
             theme::palette(ui).tooltip_bg,
@@ -1254,13 +1247,40 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         let mut ty = r.top() + 2.0;
         for (name, freq, mag, color) in cursor_data {
             let line = format!("{}: {:.1} Hz → {:.3}", name, freq, mag);
-            let g = ui.painter().layout_no_wrap(line, font_id.clone(), *color);
+            let g = painter.layout_no_wrap(line, font_id.clone(), *color);
             let gh = g.size().y;
-            ui.painter()
-                .galley(egui::pos2(r.left() + 4.0, ty), g, *color);
+            painter.galley(egui::pos2(r.left() + 4.0, ty), g, *color);
             ty += gh + 1.0;
         }
     }
+}
+
+fn confined_overlay_rect(
+    plot_rect: egui::Rect,
+    anchor: egui::Pos2,
+    desired_size: egui::Vec2,
+) -> egui::Rect {
+    let size = egui::vec2(
+        desired_size.x.min(plot_rect.width()).max(0.0),
+        desired_size.y.min(plot_rect.height()).max(0.0),
+    );
+    let mut x = anchor.x + 16.0;
+    if x + size.x > plot_rect.right() {
+        x = anchor.x - 16.0 - size.x;
+    }
+    let mut y = anchor.y + 8.0;
+    if y + size.y > plot_rect.bottom() {
+        y = anchor.y - 8.0 - size.y;
+    }
+    let max_x = plot_rect.right() - size.x;
+    let max_y = plot_rect.bottom() - size.y;
+    egui::Rect::from_min_size(
+        egui::pos2(
+            x.clamp(plot_rect.left(), max_x),
+            y.clamp(plot_rect.top(), max_y),
+        ),
+        size,
+    )
 }
 
 fn zoom_mode_button(ui: &mut Ui, selected: bool, mode: FftScrollMode) -> egui::Response {
@@ -1614,8 +1634,8 @@ mod tests {
 
     use super::{
         ChartLegend, ChartPluginState, FFT_TOGGLE_BUTTON_SIZE, FftScrollMode,
-        ZOOM_MODE_BUTTON_SIZE, fft_toggle_button, update_chart_data, visible_history_bounds,
-        write_log_frame, zoom_mode_button,
+        ZOOM_MODE_BUTTON_SIZE, confined_overlay_rect, fft_toggle_button, update_chart_data,
+        visible_history_bounds, write_log_frame, zoom_mode_button,
     };
 
     fn add_u8(pool: &mut VariablePool, name: &str, address: u64) -> usize {
@@ -1728,5 +1748,23 @@ mod tests {
                 egui::Vec2::from(FFT_TOGGLE_BUTTON_SIZE)
             );
         });
+    }
+
+    #[test]
+    fn cursor_overlays_are_confined_to_their_plot_rect() {
+        let plot = egui::Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(210.0, 140.0));
+        for anchor in [
+            plot.left_top(),
+            plot.right_top(),
+            plot.left_bottom(),
+            plot.right_bottom(),
+            plot.center(),
+        ] {
+            let overlay = confined_overlay_rect(plot, anchor, egui::vec2(90.0, 50.0));
+            assert!(plot.contains_rect(overlay));
+        }
+
+        let oversized = confined_overlay_rect(plot, plot.center(), egui::vec2(500.0, 300.0));
+        assert_eq!(oversized, plot);
     }
 }
