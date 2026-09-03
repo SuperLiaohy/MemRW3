@@ -167,11 +167,8 @@ fn show_activity_bar(ui: &mut Ui, dock: &mut DockLayoutState, plugins: &[Box<dyn
                         button_rect.left_center() - egui::vec2(0.0, 14.0),
                         egui::vec2(3.0, 28.0),
                     );
-                    ui.painter().rect_filled(
-                        indicator,
-                        egui::CornerRadius::same(2),
-                        colors.accent,
-                    );
+                    ui.painter()
+                        .rect_filled(indicator, egui::CornerRadius::same(2), colors.accent);
                 }
             }
 
@@ -289,8 +286,7 @@ fn show_popout_viewports(
         }
 
         let plugin_id = plugin.id().to_owned();
-        let viewport_id =
-            egui::ViewportId::from_hash_of(format!("{plugin_id}_popout_viewport"));
+        let viewport_id = egui::ViewportId::from_hash_of(format!("{plugin_id}_popout_viewport"));
         let title = native_window_title(plugin.id(), plugin.title());
         let keep_popped = ui.ctx().show_viewport_immediate(
             viewport_id,
@@ -310,13 +306,7 @@ fn show_popout_viewports(
                         if dock_control_bar(ui, Some(plugin.title()), "Pop in") {
                             pop_in = true;
                         }
-                        render_plugin_content(
-                            ui,
-                            plugin.as_mut(),
-                            pool,
-                            running,
-                            actions,
-                        );
+                        render_plugin_content(ui, plugin.as_mut(), pool, running, actions);
                     });
                 });
                 variable_tree.show(viewport_ui, plugin.as_mut(), pool, actions);

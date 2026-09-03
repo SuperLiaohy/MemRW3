@@ -29,13 +29,11 @@ pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
                     app.save_config();
                 }
                 ui.add_enabled_ui(
-                    !app.session.is_running()
-                        && !app.session.connected
-                        && !app.is_flashing(),
+                    !app.session.is_running() && !app.session.connected && !app.is_flashing(),
                     |ui| {
-                    if ui.button(RichText::new("加载").size(12.0)).clicked() {
-                        app.load_config();
-                    }
+                        if ui.button(RichText::new("加载").size(12.0)).clicked() {
+                            app.load_config();
+                        }
                     },
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -61,11 +59,19 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
         app.session.edit_speed = app.session.config.probe_speed_khz;
     }
     if app.session.cached_probe_list.is_none() {
-         app.session.cached_probe_list = Some(probe_rs::probe::list::Lister::new()
-            .list_all()
-            .iter()
-            .map(|p| format!("{},SN:{}", p.identifier, p.serial_number.as_deref().unwrap_or("N/A")))
-            .collect());
+        app.session.cached_probe_list = Some(
+            probe_rs::probe::list::Lister::new()
+                .list_all()
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{},SN:{}",
+                        p.identifier,
+                        p.serial_number.as_deref().unwrap_or("N/A")
+                    )
+                })
+                .collect(),
+        );
     }
     if app.session.edit_id.is_none() {
         app.session.edit_id = app.session.probe_id.clone();
@@ -73,10 +79,20 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
     let probe_text = match &app.session.edit_id {
         Some(id) => id.clone(),
         None => {
-            if app.session.cached_probe_list.as_ref().unwrap_or(&Vec::new()).is_empty() {
+            if app
+                .session
+                .cached_probe_list
+                .as_ref()
+                .unwrap_or(&Vec::new())
+                .is_empty()
+            {
                 "未检测到 Probe".to_string()
             } else {
-                app.session.cached_probe_list.as_ref().and_then(|list| list.first().cloned()).unwrap_or_else(|| "".to_string())
+                app.session
+                    .cached_probe_list
+                    .as_ref()
+                    .and_then(|list| list.first().cloned())
+                    .unwrap_or_else(|| "".to_string())
             }
         }
     };
@@ -120,7 +136,11 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
                     app.session.all_chips.iter().collect()
                 } else {
                     let s = search.to_lowercase();
-                    app.session.all_chips.iter().filter(|n| n.to_lowercase().contains(&s)).collect()
+                    app.session
+                        .all_chips
+                        .iter()
+                        .filter(|n| n.to_lowercase().contains(&s))
+                        .collect()
                 };
 
                 ui.add_space(4.0);
@@ -138,7 +158,13 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
                             .show(ui, |ui| {
                                 ui.set_min_width(ui.available_width()); // 让可选项填满整行
                                 for name in filtered {
-                                    if ui.selectable_label(app.session.edit_chip == *name, name.as_str()).clicked() {
+                                    if ui
+                                        .selectable_label(
+                                            app.session.edit_chip == *name,
+                                            name.as_str(),
+                                        )
+                                        .clicked()
+                                    {
                                         app.session.edit_chip = name.clone();
                                     }
                                 }
@@ -154,7 +180,7 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
                 egui::Grid::new("probe_settings_grid")
                     .num_columns(2)
                     .spacing([16.0, 10.0]) // 增加一点行列间距
-                    .min_col_width(70.0)   // 保证左侧 Label 宽度一致
+                    .min_col_width(70.0) // 保证左侧 Label 宽度一致
                     .show(ui, |ui| {
                         ui.label("协议:");
                         egui::ComboBox::from_id_salt("protocol_combo")
@@ -162,7 +188,11 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
                             .width(ui.available_width()) // 下拉框占满右侧剩余宽度
                             .show_ui(ui, |ui| {
                                 for p in &["SWD".to_string(), "JTAG".to_string()] {
-                                    ui.selectable_value(&mut app.session.edit_protocol, p.clone(), p.as_str());
+                                    ui.selectable_value(
+                                        &mut app.session.edit_protocol,
+                                        p.clone(),
+                                        p.as_str(),
+                                    );
                                 }
                             });
                         ui.end_row();
@@ -171,37 +201,54 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
                         ui.add(
                             egui::Slider::new(&mut app.session.edit_speed, 100..=20000)
                                 .text("kHz")
-                                .trailing_fill(true) // 进度条填充效果
+                                .trailing_fill(true), // 进度条填充效果
                         );
                         ui.end_row();
 
                         ui.label("Probe 设备:");
-                        egui::Frame::NONE
-                            .inner_margin(2.0)
-                            .show(ui, |ui| {
-                                if ui.button("🔄 刷新").clicked() {
-                                    app.session.cached_probe_list = Some(probe_rs::probe::list::Lister::new()
+                        egui::Frame::NONE.inner_margin(2.0).show(ui, |ui| {
+                            if ui.button("🔄 刷新").clicked() {
+                                app.session.cached_probe_list = Some(
+                                    probe_rs::probe::list::Lister::new()
                                         .list_all()
                                         .into_iter()
-                                        .map(|p| format!("{},SN:{}", p.identifier, p.serial_number.as_deref().unwrap_or("N/A")))
-                                        .collect());
-                                }
-                                egui::ComboBox::from_id_salt("probe_combo")
-                                    .selected_text(&probe_text)
-                                    // .width(ui.available_width())
-                                    .show_ui(ui, |ui| {
-                                        if app.session.cached_probe_list.as_ref().unwrap_or(&Vec::new()).is_empty() {
-                                            ui.label("(无可用设备, 请插入调试器)");
-                                        } else {
-                                            for name in app.session.cached_probe_list.as_ref().unwrap_or(&Vec::new()) {
-                                                ui.selectable_value(
-                                                    &mut app.session.edit_id,
-                                                    Some(name.clone()),
-                                                    name.as_str()
-                                                );
-                                            }
+                                        .map(|p| {
+                                            format!(
+                                                "{},SN:{}",
+                                                p.identifier,
+                                                p.serial_number.as_deref().unwrap_or("N/A")
+                                            )
+                                        })
+                                        .collect(),
+                                );
+                            }
+                            egui::ComboBox::from_id_salt("probe_combo")
+                                .selected_text(&probe_text)
+                                // .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    if app
+                                        .session
+                                        .cached_probe_list
+                                        .as_ref()
+                                        .unwrap_or(&Vec::new())
+                                        .is_empty()
+                                    {
+                                        ui.label("(无可用设备, 请插入调试器)");
+                                    } else {
+                                        for name in app
+                                            .session
+                                            .cached_probe_list
+                                            .as_ref()
+                                            .unwrap_or(&Vec::new())
+                                        {
+                                            ui.selectable_value(
+                                                &mut app.session.edit_id,
+                                                Some(name.clone()),
+                                                name.as_str(),
+                                            );
                                         }
-                                    });
+                                    }
+                                });
                         });
                         ui.end_row();
                     });
@@ -213,17 +260,17 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
                 // --- 底部按钮部分 ---
                 // 4. 使用从右向左的布局，让“确定/取消”按钮靠右对齐
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("确定").clicked() { 
-                        confirm = true; 
-                        app.session.show_probe_settings = false; 
+                    if ui.button("确定").clicked() {
+                        confirm = true;
+                        app.session.show_probe_settings = false;
                     }
                     ui.add_space(8.0); // 两个按钮之间的间距
-                    if ui.button("取消").clicked() { 
-                        app.session.show_probe_settings = false; 
+                    if ui.button("取消").clicked() {
+                        app.session.show_probe_settings = false;
                     }
                 });
             });
-        });
+    });
 
     if confirm {
         app.session.config.probe_chip = std::mem::take(&mut app.session.edit_chip);
@@ -241,15 +288,25 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
 }
 
 fn connect_button(ui: &mut Ui, app: &mut MemRW3App) {
-    let label = if app.session.connected { "断开" } else { "连接" };
-    if ui.add(egui::Button::new(RichText::new(label).size(13.0))).clicked() {
+    let label = if app.session.connected {
+        "断开"
+    } else {
+        "连接"
+    };
+    if ui
+        .add(egui::Button::new(RichText::new(label).size(13.0)))
+        .clicked()
+    {
         app.sync_connect();
     }
 }
 
 fn settings_button(ui: &mut Ui, app: &mut MemRW3App) {
     ui.add_enabled_ui(!app.session.connected, |ui| {
-        if ui.add(egui::Button::new(RichText::new("⚙ 设置").size(13.0))).clicked() {
+        if ui
+            .add(egui::Button::new(RichText::new("⚙ 设置").size(13.0)))
+            .clicked()
+        {
             app.session.show_probe_settings = true;
         }
     });
@@ -257,7 +314,13 @@ fn settings_button(ui: &mut Ui, app: &mut MemRW3App) {
 
 fn run_control(ui: &mut Ui, app: &mut MemRW3App) {
     let enabled = app.session.connected;
-    let label = if !enabled { "开始" } else if app.session.is_running() { "暂停" } else { "开始" };
+    let label = if !enabled {
+        "开始"
+    } else if app.session.is_running() {
+        "暂停"
+    } else {
+        "开始"
+    };
     let resp = if enabled {
         ui.add(egui::Button::new(RichText::new(label).size(13.0)))
     } else {
@@ -273,15 +336,28 @@ fn delay_slider(ui: &mut Ui, app: &mut MemRW3App) {
     ui.add_enabled_ui(!app.session.is_running(), |ui| {
         ui.label(RichText::new("延迟:").size(12.0));
         let mut val = app.session.config.delay_us.load(Ordering::Acquire) as f64;
-        if ui.add(egui::Slider::new(&mut val, 0.0..=10000.0).step_by(50.0).text("μs")).changed() {
-            app.session.config.delay_us.store(val as u64, Ordering::Release);
+        if ui
+            .add(
+                egui::Slider::new(&mut val, 0.0..=10000.0)
+                    .step_by(50.0)
+                    .text("μs"),
+            )
+            .changed()
+        {
+            app.session
+                .config
+                .delay_us
+                .store(val as u64, Ordering::Release);
         }
     });
 }
 
 fn reset_button(ui: &mut Ui, app: &mut MemRW3App) {
     ui.add_enabled_ui(app.session.connected, |ui| {
-        if ui.add(egui::Button::new(RichText::new("Reset").size(13.0))).clicked() {
+        if ui
+            .add(egui::Button::new(RichText::new("Reset").size(13.0)))
+            .clicked()
+        {
             app.sync_reset();
         }
     });

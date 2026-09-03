@@ -1,8 +1,8 @@
-use std::cell::RefCell;
-use std::collections::HashSet;
 use egui_ltreeview::TreeViewState;
 use gimli::{UnitOffset, UnitSectionOffset};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub struct TypeRef {
@@ -247,8 +247,10 @@ impl DwarfState {
             if let BasicType::ArrayElem(_, count) = parent.basic_type {
                 if let Some(&idx) = idx_iter.next() {
                     if idx < count {
-                        let elem_size =
-                            self.find_node_by_id(cur).map(|n| n.size as u64).unwrap_or(0);
+                        let elem_size = self
+                            .find_node_by_id(cur)
+                            .map(|n| n.size as u64)
+                            .unwrap_or(0);
                         if let Some(tn) = self.find_node_mut(cur) {
                             tn.name = format!("[{}]", idx);
                             tn.address = elem_size * idx;
@@ -337,7 +339,8 @@ impl DwarfState {
                 } else {
                     let mut child_path = path.clone();
                     child_path.push(child.id);
-                    let child_results = self.search_level(child, levels, level_idx + 1, &mut child_path);
+                    let child_results =
+                        self.search_level(child, levels, level_idx + 1, &mut child_path);
                     results.extend(child_results);
                 }
             }
@@ -452,8 +455,12 @@ impl DwarfState {
         let mut count = 0;
         let tree_state = self.tree_state.borrow();
         for cu in &self.cus {
-            if cu.variables.is_empty() { continue; }
-            if self.search_mode && !self.cu_has_result(cu) { continue; }
+            if cu.variables.is_empty() {
+                continue;
+            }
+            if self.search_mode && !self.cu_has_result(cu) {
+                continue;
+            }
             count += 1; // CU dir node
             for var in &cu.variables {
                 if Self::count_in_tree_before_static(var, target_id, &mut count, &tree_state) {
@@ -524,7 +531,12 @@ fn find_path_to_node(node: &TreeNode, target_id: usize, current_path: &str) -> O
     None
 }
 
-fn compute_addr_in_tree(node: &TreeNode, target_id: usize, current_addr: u64, is_root: bool) -> Option<u64> {
+fn compute_addr_in_tree(
+    node: &TreeNode,
+    target_id: usize,
+    current_addr: u64,
+    is_root: bool,
+) -> Option<u64> {
     let addr = if is_root {
         node.address
     } else {
@@ -599,10 +611,7 @@ mod tests {
             parent_id: None,
             name: "samples".to_owned(),
             type_name: "Sample[2]".to_owned(),
-            basic_type: BasicType::ArrayElem(
-                Box::new(BasicType::Struct("Sample".to_owned())),
-                2,
-            ),
+            basic_type: BasicType::ArrayElem(Box::new(BasicType::Struct("Sample".to_owned())), 2),
             address: 0x2000_0000,
             size: 8,
             children: vec![prototype],

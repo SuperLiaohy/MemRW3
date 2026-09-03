@@ -276,13 +276,7 @@ impl VariableTreePanel {
             plugin.supports_composite_variables(),
             |ui, default_name, current_config| {
                 let mut candidate = || variable_candidate(node, current_config);
-                match plugin.add_variable_ui(
-                    ui,
-                    node_id,
-                    default_name,
-                    &mut candidate,
-                    pool,
-                ) {
+                match plugin.add_variable_ui(ui, node_id, default_name, &mut candidate, pool) {
                     Ok(added) => added,
                     Err(error) => {
                         ui.label(

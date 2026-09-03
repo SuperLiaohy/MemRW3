@@ -1,5 +1,5 @@
 use super::types::*;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use gimli::{
     AttributeValue, DebugInfoOffset, DebuggingInformationEntry, Dwarf, EndianSlice,
     EntriesTreeNode, RunTimeEndian, SectionId, Unit, UnitOffset, UnitSectionOffset,
@@ -8,7 +8,7 @@ use object::{Object, ObjectSection};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 
-pub fn load_elf(path: &String) -> Result<Vec<CuInfo>,String> {
+pub fn load_elf(path: &String) -> Result<Vec<CuInfo>, String> {
     if path.is_empty() {
         return Err("请输入 ELF 文件路径".into());
     }
@@ -52,8 +52,7 @@ fn load_dwarf<'a>(
     let dwarf = Dwarf::load(|id: SectionId| -> Result<EndianSlice<'a, RunTimeEndian>> {
         let section = object.section_by_name(id.name());
         let data = if let Some(s) = section {
-            s
-                .data()
+            s.data()
                 .with_context(|| format!("Failed to read section {}", id.name()))?
         } else {
             &[][..]
@@ -199,8 +198,13 @@ fn collect_cus(dwarf: &Dwarf<EndianSlice<RunTimeEndian>>) -> Result<Vec<CuInfo>>
                     AttributeValue::DebugInfoRef(di_offset) => {
                         match find_unit_for_debug_info_ref(dwarf, di_offset)? {
                             Some((target_unit, uo)) => resolve_type(
-                                dwarf, &target_unit, uo, target_unit.header.offset(), &type_defs,
-                            ).unwrap_or_else(|_| TypeRef {
+                                dwarf,
+                                &target_unit,
+                                uo,
+                                target_unit.header.offset(),
+                                &type_defs,
+                            )
+                            .unwrap_or_else(|_| TypeRef {
                                 name: None,
                                 size: None,
                                 kind: TypeKind::Other,
@@ -213,13 +217,25 @@ fn collect_cus(dwarf: &Dwarf<EndianSlice<RunTimeEndian>>) -> Result<Vec<CuInfo>>
                     }
                     _ => continue,
                 };
-                let node = build_variable_node(dwarf, &unit, &full_name, &type_ref, address, &type_defs, &mut next_id)?;
+                let node = build_variable_node(
+                    dwarf,
+                    &unit,
+                    &full_name,
+                    &type_ref,
+                    address,
+                    &type_defs,
+                    &mut next_id,
+                )?;
                 variables.push(node);
             }
         }
 
         if !variables.is_empty() {
-            cus.push(CuInfo { cu_name, variables, dir_id });
+            cus.push(CuInfo {
+                cu_name,
+                variables,
+                dir_id,
+            });
         }
     }
 
@@ -260,9 +276,7 @@ fn follow_type_attr_or_resolve(
     type_defs: &HashMap<String, TypeDefInfo>,
 ) -> Result<Option<(UnitOffset, UnitSectionOffset, Option<TypeRef>)>> {
     match attr {
-        AttributeValue::UnitRef(offset) => {
-            Ok(Some((offset, unit_header_offset, None)))
-        }
+        AttributeValue::UnitRef(offset) => Ok(Some((offset, unit_header_offset, None))),
         AttributeValue::DebugInfoRef(di_offset) => {
             match find_unit_for_debug_info_ref(dwarf, di_offset)? {
                 Some((target_unit, uo)) => {
@@ -294,7 +308,8 @@ fn build_variable_node(
         .clone()
         .unwrap_or_else(|| "<unnamed-type>".to_string());
     let size = type_ref.size.unwrap_or(0) as u32;
-    let mut basic_type = type_name_to_basic_type(&type_name, type_ref.size.unwrap_or(0), type_ref.kind);
+    let mut basic_type =
+        type_name_to_basic_type(&type_name, type_ref.size.unwrap_or(0), type_ref.kind);
 
     let mut children = Vec::new();
     if matches!(
@@ -318,8 +333,7 @@ fn build_variable_node(
         }
     }
     if let Some(elem) = type_ref.element_type.as_deref() {
-        let mut elem_child =
-            build_variable_node(dwarf, unit, "[0]", elem, 0, type_defs, next_id)?;
+        let mut elem_child = build_variable_node(dwarf, unit, "[0]", elem, 0, type_defs, next_id)?;
         elem_child.parent_id = Some(my_id);
         let elem_size_u64 = elem.size.unwrap_or(0);
         let total = type_ref.size.unwrap_or(0);
@@ -369,8 +383,11 @@ fn build_field_node(
         .unwrap_or_else(|| "<unnamed-type>".to_string());
     let address = field.offset;
     let size = field.type_ref.size.unwrap_or(0) as u32;
-    let mut basic_type =
-        type_name_to_basic_type(&type_name, field.type_ref.size.unwrap_or(0), field.type_ref.kind);
+    let mut basic_type = type_name_to_basic_type(
+        &type_name,
+        field.type_ref.size.unwrap_or(0),
+        field.type_ref.kind,
+    );
 
     let mut children = Vec::new();
     if matches!(
@@ -399,8 +416,7 @@ fn build_field_node(
         }
     }
     if let Some(elem) = field.type_ref.element_type.as_deref() {
-        let mut elem_child =
-            build_variable_node(dwarf, unit, "[0]", elem, 0, type_defs, next_id)?;
+        let mut elem_child = build_variable_node(dwarf, unit, "[0]", elem, 0, type_defs, next_id)?;
         elem_child.parent_id = Some(my_id);
         let elem_size_u64 = elem.size.unwrap_or(0);
         let total = field.type_ref.size.unwrap_or(0);
@@ -458,16 +474,18 @@ fn resolve_type_impl(
             // Prefer the outermost typedef name
             let effective_name = typedef_name.or(outer_name);
             if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(dwarf, unit, unit_header_offset, attr, effective_name.clone(), type_defs)? {
-                    if let Some(typeref) = pre { return Ok(typeref); }
-                    return resolve_type_impl(
-                        dwarf,
-                        unit,
-                        next,
-                        uho,
-                        effective_name,
-                        type_defs,
-                    );
+                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(
+                    dwarf,
+                    unit,
+                    unit_header_offset,
+                    attr,
+                    effective_name.clone(),
+                    type_defs,
+                )? {
+                    if let Some(typeref) = pre {
+                        return Ok(typeref);
+                    }
+                    return resolve_type_impl(dwarf, unit, next, uho, effective_name, type_defs);
                 }
             }
             return Ok(TypeRef {
@@ -487,7 +505,14 @@ fn resolve_type_impl(
                 .and_then(|a| attr_value_to_u64(a))
                 .or(Some(u64::from(unit.header.address_size())));
             let pointed_name = if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(dwarf, unit, unit_header_offset, attr, None, type_defs)? {
+                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(
+                    dwarf,
+                    unit,
+                    unit_header_offset,
+                    attr,
+                    None,
+                    type_defs,
+                )? {
                     let inner = if let Some(typeref) = pre {
                         typeref
                     } else {
@@ -513,16 +538,18 @@ fn resolve_type_impl(
         // Const / volatile: transparent pass-through
         gimli::DW_TAG_const_type | gimli::DW_TAG_volatile_type => {
             if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(dwarf, unit, unit_header_offset, attr, outer_name.clone(), type_defs)? {
-                    if let Some(typeref) = pre { return Ok(typeref); }
-                    return resolve_type_impl(
-                        dwarf,
-                        unit,
-                        next,
-                        uho,
-                        outer_name,
-                        type_defs,
-                    );
+                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(
+                    dwarf,
+                    unit,
+                    unit_header_offset,
+                    attr,
+                    outer_name.clone(),
+                    type_defs,
+                )? {
+                    if let Some(typeref) = pre {
+                        return Ok(typeref);
+                    }
+                    return resolve_type_impl(dwarf, unit, next, uho, outer_name, type_defs);
                 }
             }
             Ok(TypeRef {
@@ -538,9 +565,19 @@ fn resolve_type_impl(
         // Reference type: "T &"
         gimli::DW_TAG_reference_type => {
             let inner = if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(dwarf, unit, unit_header_offset, attr, outer_name.clone(), type_defs)? {
-                    if let Some(typeref) = pre { typeref }
-                    else { resolve_type_impl(dwarf, unit, next, uho, outer_name, type_defs)? }
+                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(
+                    dwarf,
+                    unit,
+                    unit_header_offset,
+                    attr,
+                    outer_name.clone(),
+                    type_defs,
+                )? {
+                    if let Some(typeref) = pre {
+                        typeref
+                    } else {
+                        resolve_type_impl(dwarf, unit, next, uho, outer_name, type_defs)?
+                    }
                 } else {
                     TypeRef {
                         name: outer_name.or_else(|| Some("<unnamed>".to_string())),
@@ -578,9 +615,19 @@ fn resolve_type_impl(
         // Rvalue reference type: "T &&"
         gimli::DW_TAG_rvalue_reference_type => {
             let inner = if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(dwarf, unit, unit_header_offset, attr, outer_name.clone(), type_defs)? {
-                    if let Some(typeref) = pre { typeref }
-                    else { resolve_type_impl(dwarf, unit, next, uho, outer_name, type_defs)? }
+                if let Some((next, uho, pre)) = follow_type_attr_or_resolve(
+                    dwarf,
+                    unit,
+                    unit_header_offset,
+                    attr,
+                    outer_name.clone(),
+                    type_defs,
+                )? {
+                    if let Some(typeref) = pre {
+                        typeref
+                    } else {
+                        resolve_type_impl(dwarf, unit, next, uho, outer_name, type_defs)?
+                    }
                 } else {
                     TypeRef {
                         name: outer_name.or_else(|| Some("<unnamed>".to_string())),
@@ -619,7 +666,14 @@ fn resolve_type_impl(
         gimli::DW_TAG_array_type => {
             let (element_type_ref, elem_name, elem_size) =
                 if let Some(attr) = entry.attr_value(gimli::DW_AT_type)? {
-                    if let Some((next, uho, pre)) = follow_type_attr_or_resolve(dwarf, unit, unit_header_offset, attr, None, type_defs)? {
+                    if let Some((next, uho, pre)) = follow_type_attr_or_resolve(
+                        dwarf,
+                        unit,
+                        unit_header_offset,
+                        attr,
+                        None,
+                        type_defs,
+                    )? {
                         let inner = if let Some(typeref) = pre {
                             typeref
                         } else {
@@ -766,10 +820,16 @@ fn resolve_type_impl(
 
         // Base type (int, float, char, ...) or anything else
         _ => {
-            let name = entry.attr_value(gimli::DW_AT_name).ok().flatten()
+            let name = entry
+                .attr_value(gimli::DW_AT_name)
+                .ok()
+                .flatten()
                 .and_then(|attr| attr_to_string(dwarf, unit, attr).ok().flatten())
                 .or(outer_name);
-            let size = entry.attr_value(gimli::DW_AT_byte_size).ok().flatten()
+            let size = entry
+                .attr_value(gimli::DW_AT_byte_size)
+                .ok()
+                .flatten()
                 .and_then(attr_value_to_u64);
             let kind = match entry.tag() {
                 gimli::DW_TAG_structure_type => TypeKind::Struct,
@@ -826,13 +886,10 @@ fn location_address(
     };
     let address = match op {
         gimli::Operation::Address { address } => Some(address),
-        gimli::Operation::AddressIndex { index } => {
-            dwarf.debug_addr.get_address(
-                unit.encoding().address_size,
-                unit.addr_base,
-                index,
-            ).ok()
-        }
+        gimli::Operation::AddressIndex { index } => dwarf
+            .debug_addr
+            .get_address(unit.encoding().address_size, unit.addr_base, index)
+            .ok(),
         _ => None,
     };
 
@@ -893,8 +950,13 @@ fn collect_fields(
                         AttributeValue::DebugInfoRef(di_offset) => {
                             match find_unit_for_debug_info_ref(dwarf, di_offset)? {
                                 Some((target_unit, uo)) => resolve_type(
-                                    dwarf, &target_unit, uo, target_unit.header.offset(), type_defs,
-                                ).unwrap_or_else(|_| TypeRef {
+                                    dwarf,
+                                    &target_unit,
+                                    uo,
+                                    target_unit.header.offset(),
+                                    type_defs,
+                                )
+                                .unwrap_or_else(|_| TypeRef {
                                     name: None,
                                     size: None,
                                     kind: TypeKind::Other,
@@ -944,25 +1006,17 @@ fn collect_fields(
                 };
                 let base_type = match attr {
                     AttributeValue::UnitRef(unit_offset) => {
-                        resolve_type(
-                            dwarf,
-                            unit,
-                            unit_offset,
-                            unit.header.offset(),
-                            type_defs,
-                        )?
+                        resolve_type(dwarf, unit, unit_offset, unit.header.offset(), type_defs)?
                     }
                     AttributeValue::DebugInfoRef(di_offset) => {
                         match find_unit_for_debug_info_ref(dwarf, di_offset)? {
-                            Some((target_unit, uo)) => {
-                                resolve_type(
-                                    dwarf,
-                                    &target_unit,
-                                    uo,
-                                    target_unit.header.offset(),
-                                    type_defs,
-                                )?
-                            }
+                            Some((target_unit, uo)) => resolve_type(
+                                dwarf,
+                                &target_unit,
+                                uo,
+                                target_unit.header.offset(),
+                                type_defs,
+                            )?,
 
                             None => continue,
                         }
@@ -970,11 +1024,7 @@ fn collect_fields(
                     _ => continue,
                 };
 
-                let mut base_fields = struct_fields(
-                    dwarf,
-                    &base_type,
-                    type_defs,
-                )?;
+                let mut base_fields = struct_fields(dwarf, &base_type, type_defs)?;
 
                 for field in &mut base_fields {
                     field.offset += base_offset;
@@ -1011,9 +1061,7 @@ fn member_offset(
     }
 }
 
-fn parse_data_member_expr<R: gimli::Reader>(
-    mut ops: gimli::OperationIter<R>,
-) -> Result<u64> {
+fn parse_data_member_expr<R: gimli::Reader>(mut ops: gimli::OperationIter<R>) -> Result<u64> {
     let Some(op) = ops.next()? else {
         return Ok(0);
     };
@@ -1040,27 +1088,29 @@ fn type_name_to_basic_type(name: &str, size: u64, kind: TypeKind) -> BasicType {
         // Unsigned 8-bit
         "unsigned char" | "u8" | "uint8_t" | "uint8" | "byte" | "unsigned __int8" => BasicType::U8,
         // Unsigned 16-bit
-        "unsigned short"
-        | "u16"
-        | "uint16_t"
-        | "uint16"
-        | "short unsigned int"
+        "unsigned short" | "u16" | "uint16_t" | "uint16" | "short unsigned int"
         | "unsigned short int" => BasicType::U16,
         // Unsigned 32-bit
-        "unsigned int" | "u32" | "uint32_t" | "uint32" | "unsigned" | "unsigned long"
-        | "dword" => BasicType::U32,
+        "unsigned int" | "u32" | "uint32_t" | "uint32" | "unsigned" | "unsigned long" | "dword" => {
+            BasicType::U32
+        }
         // Unsigned 64-bit
-        "unsigned long long" | "u64" | "uint64_t" | "uint64" | "unsigned __int64"
-        | "qword" => BasicType::U64,
+        "unsigned long long" | "u64" | "uint64_t" | "uint64" | "unsigned __int64" | "qword" => {
+            BasicType::U64
+        }
         // Signed 8-bit
         "signed char" | "i8" | "int8_t" | "int8" | "__int8" => BasicType::I8,
         // Signed 16-bit
         "short" | "short int" | "i16" | "int16_t" | "int16" | "signed short"
         | "signed short int" => BasicType::I16,
         // Signed 32-bit
-        "int" | "signed int" | "i32" | "int32_t" | "int32" | "long" | "signed long" => BasicType::I32,
+        "int" | "signed int" | "i32" | "int32_t" | "int32" | "long" | "signed long" => {
+            BasicType::I32
+        }
         // Signed 64-bit
-        "long long" | "signed long long" | "i64" | "int64_t" | "int64" | "__int64" => BasicType::I64,
+        "long long" | "signed long long" | "i64" | "int64_t" | "int64" | "__int64" => {
+            BasicType::I64
+        }
         // Float
         "float" | "f32" => BasicType::Float,
         // Double

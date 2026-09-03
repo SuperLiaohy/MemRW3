@@ -3,11 +3,11 @@ mod app;
 mod dwarf;
 mod model;
 mod probe;
-mod sync;
 mod svd;
+mod sync;
 mod ui;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use crate::app::MemRW3App;
 

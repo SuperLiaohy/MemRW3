@@ -1327,8 +1327,7 @@ fn visible_history_bounds(legends: &[ChartLegend]) -> Option<(f64, f64, f64, f64
         .iter()
         .filter(|legend| legend.visible && legend.data_history.len() >= 2)
     {
-        if let (Some(first), Some(last)) =
-            (legend.data_history.front(), legend.data_history.back())
+        if let (Some(first), Some(last)) = (legend.data_history.front(), legend.data_history.back())
         {
             x_min = x_min.min(first.x);
             x_max = x_max.max(last.x);
@@ -1627,13 +1626,7 @@ mod tests {
 
         let mut output = Vec::new();
         let mut positions = Vec::new();
-        write_log_frame(
-            &mut output,
-            &mut positions,
-            &legends,
-            &pool,
-            &frame_data,
-        );
+        write_log_frame(&mut output, &mut positions, &legends, &pool, &frame_data);
 
         assert_eq!(
             String::from_utf8(output).unwrap(),

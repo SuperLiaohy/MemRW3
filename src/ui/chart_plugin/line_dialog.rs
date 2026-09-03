@@ -1,7 +1,7 @@
-use eframe::egui::{self, Color32, RichText, Ui};
+use super::legend::preset_colors;
 use crate::dwarf::types::ExtendType;
 use crate::ui::theme;
-use super::legend::preset_colors;
+use eframe::egui::{self, Color32, RichText, Ui};
 
 pub enum DialogAction {
     Confirm,
@@ -23,7 +23,8 @@ pub fn line_dialog_ui(
     logging_active: bool,
 ) -> Option<DialogAction> {
     egui::Grid::new("line_dialog_grid")
-        .num_columns(2).spacing([8.0, 4.0])
+        .num_columns(2)
+        .spacing([8.0, 4.0])
         .show(ui, |ui| {
             ui.label("曲线名称:");
             ui.text_edit_singleline(curve_name);
@@ -33,7 +34,11 @@ pub fn line_dialog_ui(
             ui.end_row();
             ui.label("缓冲区:");
             ui.add_enabled_ui(!running, |ui| {
-                ui.add(egui::Slider::new(buffer_size, 1000..=50000).step_by(1000.0).text("points"));
+                ui.add(
+                    egui::Slider::new(buffer_size, 1000..=50000)
+                        .step_by(1000.0)
+                        .text("points"),
+                );
             });
             ui.end_row();
             ui.label("可见:");
@@ -66,7 +71,10 @@ pub fn line_dialog_ui(
     let mut result = None;
     ui.horizontal(|ui| {
         ui.add_enabled_ui(!logging_active, |ui| {
-            if ui.button(RichText::new("删除").color(theme::danger_text(ui))).clicked() {
+            if ui
+                .button(RichText::new("删除").color(theme::danger_text(ui)))
+                .clicked()
+            {
                 result = Some(DialogAction::Delete);
             }
         });
@@ -104,8 +112,15 @@ fn color_pick(ui: &mut Ui, current: &mut Color32) {
         let colors = preset_colors();
         egui::Grid::new("dialog_color_grid").show(ui, |ui| {
             for (i, &c) in colors.iter().enumerate() {
-                let fill = if *current == c { c } else { c.linear_multiply(0.5) };
-                if ui.add_sized([18.0, 18.0], egui::Button::new("").fill(fill)).clicked() {
+                let fill = if *current == c {
+                    c
+                } else {
+                    c.linear_multiply(0.5)
+                };
+                if ui
+                    .add_sized([18.0, 18.0], egui::Button::new("").fill(fill))
+                    .clicked()
+                {
                     *current = c;
                 }
                 if (i + 1) % 6 == 0 {
