@@ -28,11 +28,16 @@ pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
                 if ui.button(RichText::new("保存").size(12.0)).clicked() {
                     app.save_config();
                 }
-                ui.add_enabled_ui(!app.session.is_running(), |ui| {
+                ui.add_enabled_ui(
+                    !app.session.is_running()
+                        && !app.session.connected
+                        && !app.is_flashing(),
+                    |ui| {
                     if ui.button(RichText::new("加载").size(12.0)).clicked() {
                         app.load_config();
                     }
-                });
+                    },
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     sampling_status(ui, app);
                 });

@@ -306,11 +306,33 @@ impl VariableTreePanel {
     }
 
     fn load_elf(&mut self) -> Result<(), String> {
-        let path = self.elf_path.trim().to_owned();
-        let cus = dwarf::extract::load_elf(&path).map_err(|error| error.to_string())?;
-        self.dwarf_state = dwarf::types::DwarfState::new(cus);
+        self.dwarf_state = load_dwarf_state(&self.elf_path)?;
         self.extend_configs.clear();
         Ok(())
+    }
+
+    pub fn prepare_config(
+        elf_path: &str,
+        pool: &mut VariablePool,
+    ) -> Result<dwarf::types::DwarfState, String> {
+        if elf_path.trim().is_empty() && pool.iter().next().is_none() {
+            return Ok(dwarf::types::DwarfState::new(Vec::new()));
+        }
+        let mut dwarf_state = load_dwarf_state(elf_path)?;
+        let errors = trace_pool(&mut dwarf_state, pool);
+        if errors.is_empty() {
+            Ok(dwarf_state)
+        } else {
+            Err(format!("配置中的变量追踪失败:\n{}", errors.join("\n")))
+        }
+    }
+
+    pub fn apply_config_source(&mut self, elf_path: String, dwarf_state: dwarf::types::DwarfState) {
+        self.elf_path = elf_path;
+        self.dwarf_state = dwarf_state;
+        self.extend_configs.clear();
+        self.target = None;
+        self.drag_state = None;
     }
 
     pub fn trace_variables(&mut self, pool: &mut VariablePool, actions: &mut Vec<PluginAction>) {
@@ -322,30 +344,7 @@ impl VariableTreePanel {
             return;
         }
 
-        let mut errors = Vec::new();
-        for variable in pool.iter_mut() {
-            let name = variable.name.clone();
-            let path = dwarf::types::expand_bracket_path(&name);
-            let node_ids = self.dwarf_state.trace_exact(&path);
-            for &node_id in &node_ids {
-                self.dwarf_state.apply_array_path(node_id, &path);
-            }
-            match node_ids.as_slice() {
-                [node_id] => {
-                    if let Some(node) = self.dwarf_state.find_node_by_id(*node_id) {
-                        let ext_type = dwarf::types::basic_type_to_extend(&node.basic_type);
-                        variable.size = extend_type_size(&ext_type).unwrap_or(node.size);
-                        variable.address = self
-                            .dwarf_state
-                            .compute_extend_address(*node_id)
-                            .unwrap_or(node.address);
-                        variable.ext_type = ext_type;
-                    }
-                }
-                [] => errors.push(format!("\"{name}\": 未找到匹配")),
-                matches => errors.push(format!("\"{name}\": 匹配到多个 ({}) 节点", matches.len())),
-            }
-        }
+        let errors = trace_pool(&mut self.dwarf_state, pool);
 
         if errors.is_empty() {
             actions.push(PluginAction::Toast {
@@ -360,6 +359,39 @@ impl VariableTreePanel {
         }
         actions.push(PluginAction::RebuildSlots);
     }
+}
+
+fn load_dwarf_state(path: &str) -> Result<dwarf::types::DwarfState, String> {
+    let path = path.trim().to_owned();
+    let cus = dwarf::extract::load_elf(&path).map_err(|error| error.to_string())?;
+    Ok(dwarf::types::DwarfState::new(cus))
+}
+
+fn trace_pool(dwarf_state: &mut dwarf::types::DwarfState, pool: &mut VariablePool) -> Vec<String> {
+    let mut errors = Vec::new();
+    for variable in pool.iter_mut() {
+        let name = variable.name.clone();
+        let path = dwarf::types::expand_bracket_path(&name);
+        let node_ids = dwarf_state.trace_exact(&path);
+        for &node_id in &node_ids {
+            dwarf_state.apply_array_path(node_id, &path);
+        }
+        match node_ids.as_slice() {
+            [node_id] => {
+                if let Some(node) = dwarf_state.find_node_by_id(*node_id) {
+                    let ext_type = dwarf::types::basic_type_to_extend(&node.basic_type);
+                    variable.size = extend_type_size(&ext_type).unwrap_or(node.size);
+                    variable.address = dwarf_state
+                        .compute_extend_address(*node_id)
+                        .unwrap_or(node.address);
+                    variable.ext_type = ext_type;
+                }
+            }
+            [] => errors.push(format!("\"{name}\": 未找到匹配")),
+            matches => errors.push(format!("\"{name}\": 匹配到多个 ({}) 节点", matches.len())),
+        }
+    }
+    errors
 }
 
 fn extend_type_size(ext_type: &dwarf::types::ExtendType) -> Option<u32> {

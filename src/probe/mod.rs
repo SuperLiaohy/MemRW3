@@ -1,30 +1,36 @@
 mod session;
 pub use session::*;
 
-use std::cell::UnsafeCell;
+use std::sync::Mutex;
 
-/// Mutable reference to ProbeSession shared between threads.
+/// Thread-safe owner of the probe session.
 ///
-/// # Safety
-/// Access is serialized by the `Sync` handshake:
-/// - acq_thread during normal acquisition
-/// - main thread during `Sync::send_request` closures (acq_thread paused)
-/// Never accessed concurrently — Mutex overhead is unnecessary.
-pub struct ProbeCell(UnsafeCell<ProbeSession>);
-
-unsafe impl Send for ProbeCell {}
-unsafe impl Sync for ProbeCell {}
+/// The acquisition handshake keeps this lock uncontended in normal operation;
+/// the mutex also makes accidental overlapping control requests memory-safe.
+pub struct ProbeCell(Mutex<ProbeSession>);
 
 impl ProbeCell {
     pub fn new(session: ProbeSession) -> Self {
-        Self(UnsafeCell::new(session))
+        Self(Mutex::new(session))
     }
 
-    pub unsafe fn get_mut(&self) -> &mut ProbeSession {
-        unsafe { &mut *self.0.get() }
+    pub fn with_mut<R>(&self, f: impl FnOnce(&mut ProbeSession) -> R) -> R {
+        let mut session = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut session)
     }
+}
 
-    pub fn get(&self) -> &ProbeSession {
-        unsafe { &*self.0.get() }
+#[cfg(test)]
+mod tests {
+    use super::ProbeSession;
+
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn probe_session_is_send_without_a_cached_core() {
+        assert_send::<ProbeSession>();
     }
 }

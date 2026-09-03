@@ -59,6 +59,7 @@ pub fn show_active_plugin_content(
     pool: &mut VariablePool,
     frame_data: &FrameData,
     running: bool,
+    interaction_enabled: bool,
     variable_tree: &mut VariableTreePanel,
 ) -> Vec<PluginAction> {
     let mut actions = Vec::new();
@@ -88,6 +89,7 @@ pub fn show_active_plugin_content(
         pool,
         frame_data,
         running,
+        interaction_enabled,
         variable_tree,
         &mut actions,
     );
@@ -101,6 +103,7 @@ pub fn show_plugin_popouts(
     pool: &mut VariablePool,
     frame_data: &FrameData,
     running: bool,
+    interaction_enabled: bool,
     variable_tree: &mut VariableTreePanel,
 ) -> Vec<PluginAction> {
     let mut actions = Vec::new();
@@ -111,6 +114,7 @@ pub fn show_plugin_popouts(
         pool,
         frame_data,
         running,
+        interaction_enabled,
         variable_tree,
         &mut actions,
     );
@@ -251,6 +255,7 @@ fn show_plugin_docked(
     pool: &mut VariablePool,
     frame_data: &FrameData,
     running: bool,
+    interaction_enabled: bool,
     variable_tree: &mut VariableTreePanel,
     actions: &mut Vec<PluginAction>,
 ) {
@@ -262,7 +267,7 @@ fn show_plugin_docked(
         .show(ui, |ui| {
             ui.set_height(ui.available_height());
             let overlay_open = variable_tree.is_open_in(ui.ctx().viewport_id());
-            ui.add_enabled_ui(!overlay_open, |ui| {
+            ui.add_enabled_ui(interaction_enabled && !overlay_open, |ui| {
                 if dock_control_bar(ui, Some(plugin.title()), "Pop out") {
                     dock.set_popped(plugin.id(), true);
                     return;
@@ -280,6 +285,7 @@ fn show_popout_viewports(
     pool: &mut VariablePool,
     frame_data: &FrameData,
     running: bool,
+    interaction_enabled: bool,
     variable_tree: &mut VariableTreePanel,
     actions: &mut Vec<PluginAction>,
 ) {
@@ -306,7 +312,7 @@ fn show_popout_viewports(
                 let mut pop_in = false;
                 egui::CentralPanel::default().show_inside(viewport_ui, |ui| {
                     let overlay_open = variable_tree.is_open_in(ui.ctx().viewport_id());
-                    ui.add_enabled_ui(!overlay_open, |ui| {
+                    ui.add_enabled_ui(interaction_enabled && !overlay_open, |ui| {
                         if dock_control_bar(ui, Some(plugin.title()), "Pop in") {
                             pop_in = true;
                         }

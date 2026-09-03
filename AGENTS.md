@@ -16,7 +16,7 @@ Use a stable toolchain supporting edition 2024 (Rust 1.85 or newer). Linux syste
 
 ## Coding Style & Naming Conventions
 
-Follow rustfmt defaults and four-space indentation. Name files, modules, functions, and variables in `snake_case`; types and traits in `PascalCase`; constants in `SCREAMING_SNAKE_CASE`. Keep UI concerns under `src/ui/` and hardware side effects in the application/probe layers. Plugins should communicate outward through `PluginAction`. Every `unsafe` block or implementation must retain a precise `// SAFETY:` justification, especially around acquisition buffers and cached probe cores.
+Follow rustfmt defaults and four-space indentation. Name files, modules, functions, and variables in `snake_case`; types and traits in `PascalCase`; constants in `SCREAMING_SNAKE_CASE`. Keep UI concerns under `src/ui/` and hardware side effects in the application/probe layers. Plugins should communicate outward through `PluginAction`. Every `unsafe` block or implementation must retain a precise `// SAFETY:` justification, especially around acquisition buffers and probe access.
 
 ## Testing Guidelines
 

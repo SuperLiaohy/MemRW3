@@ -1,8 +1,7 @@
+use probe_rs::{MemoryInterface, Session};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
-use probe_rs::probe::list::Lister;
-use probe_rs::{MemoryInterface, Session};
 
 use crate::model::RingBuffer;
 
@@ -48,12 +47,9 @@ pub struct VarSlotMapping {
 }
 
 pub struct ProbeSession {
-    /// Declared before `session` — dropped first (while session alive).
-    cached_core: Option<probe_rs::Core<'static>>,
     session: Option<Session>,
     pub connected: bool,
     pub chip_name: String,
-    pub available_chips: Vec<String>,
     pub protocol: String,
     pub speed_khz: u32,
     pub selected_probe_id: Option<String>,
@@ -70,15 +66,9 @@ pub struct ProbeSession {
 impl Default for ProbeSession {
     fn default() -> Self {
         Self {
-            cached_core: None,
             session: None,
             connected: false,
             chip_name: "STM32F407VG".into(),
-            available_chips: vec![
-                "STM32F407VG".into(), "STM32F429ZI".into(), "STM32H743ZI".into(),
-                "nRF52840_xxAA".into(), "STM32F103C8".into(), "RP2040".into(),
-                "STM32G474RE".into(), "STM32L476RG".into(), "ATSAMD51P19A".into(),
-            ],
             protocol: "SWD".into(),
             speed_khz: 10000,
             selected_probe_id: None,
@@ -93,14 +83,12 @@ impl Default for ProbeSession {
 
 impl ProbeSession {
     pub fn connect(&mut self) -> bool {
-        self.cached_core = None;
         self.last_error = None;
         let protocol = match self.protocol.as_str() {
             "SWD" => Some(probe_rs::probe::WireProtocol::Swd),
             "JTAG" => Some(probe_rs::probe::WireProtocol::Jtag),
             _ => None,
         };
-
 
         // 1. 枚举当前所有连入的调试器
         let lister = probe_rs::probe::list::Lister::new();
@@ -112,14 +100,24 @@ impl ProbeSession {
         }
 
         let target_probe_info = if let Some(target_id) = &self.selected_probe_id {
-            match probes.into_iter().find(|p| format!("{},SN:{}", p.identifier, p.serial_number.as_deref().unwrap_or("N/A")) == target_id.to_string()) {
+            match probes.into_iter().find(|p| {
+                format!(
+                    "{},SN:{}",
+                    p.identifier,
+                    p.serial_number.as_deref().unwrap_or("N/A")
+                ) == target_id.to_string()
+            }) {
                 Some(probe) => Some(probe),
-                None =>  {self.last_error = Some("连接失败: 找不到指定的调试器（可能已被拔出）".to_string());return false;},
+                None => {
+                    self.last_error =
+                        Some("连接失败: 找不到指定的调试器（可能已被拔出）".to_string());
+                    return false;
+                }
             }
         } else {
             None
         };
-        
+
         if let Some(probe_info) = target_probe_info {
             match probe_info.open() {
                 Ok(mut probe) => {
@@ -135,7 +133,7 @@ impl ProbeSession {
                         self.last_error = Some(format!("速率设置失败: {e}"));
                         return false;
                     }
-                    
+
                     // 5. 将配置好的 Probe Attach 到指定芯片
                     match probe.attach(self.chip_name.clone(), Default::default()) {
                         Ok(session) => {
@@ -150,7 +148,7 @@ impl ProbeSession {
                     }
                 }
                 Err(e) => {
-                    self.last_error = Some(format!("打开调试器失败: {e}, 请多次尝试或检查连接")) ;
+                    self.last_error = Some(format!("打开调试器失败: {e}, 请多次尝试或检查连接"));
                     false
                 }
             }
@@ -175,13 +173,11 @@ impl ProbeSession {
     }
 
     pub fn disconnect(&mut self) {
-        self.cached_core = None;
         self.session = None;
         self.connected = false;
     }
 
     pub fn reset_target(&mut self) -> bool {
-        self.cached_core = None;
         self.last_error = None;
         if let Some(ref mut session) = self.session {
             match session.core(0).and_then(|mut core| core.reset()) {
@@ -202,7 +198,6 @@ impl ProbeSession {
         }
 
         let image_kind = FirmwareImageKind::from_path(path)?;
-        self.cached_core = None;
         self.last_error = None;
 
         let result: Result<(), String> = (|| {
@@ -230,7 +225,9 @@ impl ProbeSession {
                                 .find(|region| !region.is_alias)
                         })
                         .map(|region| region.range.start)
-                        .ok_or_else(|| "目标芯片没有可用的 NVM 区域，无法确定 BIN 基址".to_owned())?;
+                        .ok_or_else(|| {
+                            "目标芯片没有可用的 NVM 区域，无法确定 BIN 基址".to_owned()
+                        })?;
                     probe_rs::flashing::Format::Bin(probe_rs::flashing::BinOptions {
                         base_address: Some(base_address),
                         skip: 0,
@@ -250,19 +247,10 @@ impl ProbeSession {
             Ok(())
         })();
 
-        self.cached_core = None;
         if let Err(error) = &result {
             self.last_error = Some(error.clone());
         }
         result
-    }
-
-    pub fn list_probes(&mut self) -> Vec<String> {
-        Lister::new()
-            .list_all()
-            .iter()
-            .map(|p| p.identifier.clone())
-            .collect()
     }
 
     /// Calculate the set of 32-bit aligned addresses covering [address, address+size).
@@ -279,28 +267,6 @@ impl ProbeSession {
         addrs
     }
 
-    fn ensure_core(&mut self) -> bool {
-        if self.cached_core.is_some() {
-            return true;
-        }
-        let session = match self.session.as_mut() {
-            Some(s) => s,
-            None => return false,
-        };
-        match session.core(0) {
-            Ok(core) => {
-                self.cached_core = Some(unsafe {
-                    std::mem::transmute::<probe_rs::Core<'_>, probe_rs::Core<'static>>(core)
-                });
-                true
-            }
-            Err(e) => {
-                self.last_error = Some(format!("获取核心失败: {e}"));
-                false
-            }
-        }
-    }
-
     /// Two-phase acquisition:
     /// 1. Read all 32-bit slots into the reusable `slot_values` array
     /// 2. Assemble per-variable values from slots → push to the ring buffer
@@ -308,12 +274,16 @@ impl ProbeSession {
         if !self.connected || self.slots.is_empty() {
             return;
         }
-        if !self.ensure_core() {
-            return;
-        }
         let ts = self.timer.elapsed().as_secs_f64();
-        let core = unsafe {
-            &mut *(self.cached_core.as_mut().unwrap() as *mut probe_rs::Core<'static>)
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let mut core = match session.core(0) {
+            Ok(core) => core,
+            Err(error) => {
+                self.last_error = Some(format!("获取核心失败: {error}"));
+                return;
+            }
         };
 
         self.slot_values.resize(self.slots.len(), [0; 4]);
@@ -323,11 +293,7 @@ impl ProbeSession {
                     self.slot_values[index] = v.to_le_bytes();
                 }
                 Err(e) => {
-                    self.last_error = Some(format!(
-                        "读取 {:#010x} 失败: {e}",
-                        slot.address
-                    ));
-                    self.cached_core = None;
+                    self.last_error = Some(format!("读取 {:#010x} 失败: {e}", slot.address));
                     return;
                 }
             }
@@ -342,8 +308,7 @@ impl ProbeSession {
                 if i == 0 {
                     let start = mapping.byte_offset.min(3);
                     let copy_len = (4 - start).min(size - pos);
-                    val[pos..pos + copy_len]
-                        .copy_from_slice(&sv[start..start + copy_len]);
+                    val[pos..pos + copy_len].copy_from_slice(&sv[start..start + copy_len]);
                     pos += copy_len;
                 } else {
                     let copy_len = 4.min(size - pos);
@@ -359,7 +324,6 @@ impl ProbeSession {
     }
 
     pub fn write_value(&mut self, addr: u64, size: u32, value: u64) -> bool {
-        self.cached_core = None;
         if let Some(ref mut session) = self.session {
             if let Ok(mut core) = session.core(0) {
                 return match size {

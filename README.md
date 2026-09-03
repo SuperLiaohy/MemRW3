@@ -5,7 +5,7 @@
 ## 特性
 
 - **DWARF 变量树**: 解析 ELF 文件中的 DWARF 2/3/4/5 调试信息，自动构建变量树（结构体、数组、嵌套类型），支持跨编译单元类型引用
-- **实时数据采集**: 独立采集线程，双 Condvar 握手同步协议，有界 lock-free ring buffer 数据传递，Core 缓存优化，最高 ~7KHz 采集速率
+- **实时数据采集**: 独立采集线程，串行化控制握手，有界 lock-free ring buffer 数据传递，采集槽位数组跨轮复用
 - **时域图表**: 多曲线叠加，自动/固定坐标轴，图例浮动覆层（单击开关可见/右键属性编辑），鼠标游标跨曲线数值追踪
 - **FFT 频谱分析**: 自包含 Radix-2 FFT（零外部依赖），4 种窗函数（Rectangular/Hann/Hamming/Blackman），可配置取样点数（4~65536，从数据末尾取），多曲线频谱叠加，频率游标追踪
 - **滚轮缩放**: 时域 + 频域均支持 X / Y / Both 三模式滚轮缩放，手动模式下锚定视图中心
@@ -180,7 +180,7 @@ src/
 │   ├── variable_pool.rs # VariablePool (Vec + HashMap)
 │   └── ring_buffer.rs   # 有界 lock-free 环形队列
 ├── probe/
-│   ├── mod.rs           # ProbeCell (UnsafeCell wrapper)
+│   ├── mod.rs           # ProbeCell (线程安全 Session owner)
 │   └── session.rs       # ProbeSession (probe-rs 连接/采集)
 ├── svd/
 │   └── mod.rs           # CMSIS-SVD 解析与轻量寄存器树

@@ -253,10 +253,10 @@ fn find_unit_for_debug_info_ref<'a>(
 /// For cross-unit refs, restarts resolution with the target unit.
 fn follow_type_attr_or_resolve(
     dwarf: &Dwarf<EndianSlice<RunTimeEndian>>,
-    unit: &Unit<EndianSlice<RunTimeEndian>>,
+    _unit: &Unit<EndianSlice<RunTimeEndian>>,
     unit_header_offset: UnitSectionOffset,
     attr: AttributeValue<EndianSlice<RunTimeEndian>>,
-    outer_name: Option<String>,
+    _outer_name: Option<String>,
     type_defs: &HashMap<String, TypeDefInfo>,
 ) -> Result<Option<(UnitOffset, UnitSectionOffset, Option<TypeRef>)>> {
     match attr {

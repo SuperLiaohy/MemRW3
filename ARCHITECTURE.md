@@ -49,7 +49,7 @@ src/
 │   ├── variable_pool.rs    # VariablePool (Vec + HashMap, O(1) 增删查, 仅存extend数据)
 │   └── ring_buffer.rs      # 有界 lock-free 环形队列 (crossbeam ArrayQueue)
 ├── probe/
-│   ├── mod.rs              # ProbeCell (UnsafeCell wrapper, Sync协议保证互斥)
+│   ├── mod.rs              # ProbeCell (Mutex 保护的 ProbeSession owner)
 │   └── session.rs          # ProbeSession + AcqSlot (probe-rs 连接/采集/读写)
 ├── svd/
 │   └── mod.rs              # CMSIS-SVD 解析、数组/继承展开、轻量寄存器树
@@ -361,49 +361,22 @@ App.handle_plugin_actions:
   批量动作处理完后只 rebuild_slots 一次
 ```
 
-#### ProbeCell (无 Mutex) + Core 缓存
+#### ProbeCell + 编译器约束的 Core 生命周期
 
-`ProbeSession` 通过 `Arc<ProbeCell>` 共享, `ProbeCell` 是 `UnsafeCell` 包装:
-
-```rust
-pub struct ProbeCell(UnsafeCell<ProbeSession>);
-// 安全性: Sync 握手协议保证不会并发访问
-// - 采集线程: 仅正常运行时访问
-// - 主线程: 仅在 send_request 闭包内访问 (采集线程已暂停)
-```
-
-**Core 缓存** (性能关键):
-
-`probe_rs::Session::core(0)` 是昂贵的操作 (~200-500µs, 包含 halt 核心、读 CPUID、DAP 寄存器初始化)。Demo 中只调用一次, 我们原先每帧调用一次 → 这是 7K vs 1K Hz 差距的根源。
-
-修复: 首次 `core(0)` 后通过 `unsafe transmute` 缓存为 `Core<'static>`, 后续采集直接复用。
+`ProbeSession` 由 `Arc<ProbeCell>` 共享，`ProbeCell` 内部使用 `Mutex<ProbeSession>`。正常采集时 `Sync` 握手令锁保持无竞争；Mutex 同时为意外重叠的控制请求提供内存安全兜底。
 
 ```rust
-pub struct ProbeSession {
-    cached_core: Option<probe_rs::Core<'static>>,  // 声明先于 session, 先 drop
-    session: Option<Session>,
-    // ...
-}
+pub struct ProbeCell(Mutex<ProbeSession>);
 
-fn ensure_core(&mut self) -> bool {
-    if self.cached_core.is_some() { return true; }
-    // 首次: 获取 core, transmute 为 'static (两者同属 self, 同生命周期)
-    self.cached_core = Some(unsafe { std::mem::transmute(session.core(0)?) });
-}
-
-fn acquire_from_slots(&mut self) {
-    self.ensure_core();
-    // raw pointer 避免 &mut self 与 &self.slots 的借用冲突
-    let core = unsafe { &mut *(self.cached_core.as_mut().unwrap() as *mut _) };
-    for (index, slot) in self.slots.iter().enumerate() {
-        self.slot_values[index] = core.read_word_32(slot.address).to_le_bytes();
-    }
+pub fn with_mut<R>(&self, f: impl FnOnce(&mut ProbeSession) -> R) -> R {
+    let mut session = self.0.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut session)
 }
 ```
 
-- 读错误时 `self.cached_core = None` → 下帧自动重建
-- 连接/断开/复位时 `self.cached_core = None` → 强制重建
-- `cached_core` 声明先于 `session` (Rust 按声明序 drop) → drop 时 session 仍存活
+每次 probe 操作在局部作用域调用 `session.core(0)`，`Core<'_>` 在同一线程、同一借用作用域内析构。不再使用 `transmute` 构造 `'static` Core，也不存在可移动自引用或跨线程析构。
+
+`Sync::send_request` 使用 request mutex 串行化多个请求，并在请求闭包 panic 时先唤醒采集线程再恢复 panic，避免采集线程永久等待。
 
 `AcqSlot` 缓存变量地址/大小/类型, 采集线程无需持有 `VariablePool` 锁:
 
@@ -469,7 +442,7 @@ pub struct RingBuffer<T> {
 
 `delay_us: Arc<AtomicU64>` 共享: 主线程 slider 写入, 采集线程读取 → `thread::sleep(delay_us)` 控制采集频率。
 
-- **默认 0** (全速采集, 仅受 probe USB 延迟限制, STM32H7 SWD 10M 可达 ~7KHz)
+- **默认 0** (全速采集, 仅受 probe/USB 和每轮 Core 获取开销限制)
 - 主线程仅 `request_repaint()` 以 vsync 刷新 UI, 不受 delay 影响
 
 **计时规则** (`timer_was_started`):
@@ -721,8 +694,8 @@ svd-parser = "0.14.10"    # CMSIS-SVD 解析与数组/继承展开
 11. **多线程采集架构 (参考 MemRW2)**:
     - `acq_thread`: 独立采集线程, 非阻塞 `try_acquire` 检查同步请求, 正常运行时全速采集
     - `Sync`: **双 Condvar** 握手 (`cv_main` + `cv_worker`), 消除共享单 Condvar 死锁
-    - `ProbeCell` (UnsafeCell): 无 Mutex 开销, Sync 协议保证互斥
-    - **Core 缓存**: `session.core(0)` 首次调用后通过 `unsafe transmute` 缓存为 `Core<'static>`, 避免每帧重复初始化 (性能关键: 200-500µs → ~0µs)
+    - `ProbeCell`: `Mutex<ProbeSession>` 提供安全所有权；Sync 令正常采集路径保持无竞争
+    - **Core 生命周期**: 每次操作局部获取并析构 `Core<'_>`，无 `transmute`、自引用或跨线程 drop
     - `AcqSlot`: 纯 32-bit 地址标记；`VarSlotMapping` 保存连续 slot 索引，不在采集热路径中使用 HashMap/Arc 查找
     - **两阶段采集**: Phase1 read32 到跨轮复用的 `slot_values: Vec<[u8; 4]>` → Phase2 按索引和 byte_offset 组装变量值
     - `RingBuffer`: 基于 `crossbeam_queue::ArrayQueue` 的有界 lock-free 环形队列，容量 2560，满载时丢弃最旧样本

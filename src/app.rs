@@ -31,12 +31,14 @@ pub struct MemRW3App {
     pub toasts: egui_notify::Toasts,
     frame_data: FrameData,
     flash_task: Option<FlashTask>,
+    rebuild_after_flash: bool,
     _acq_handle: Option<JoinHandle<()>>,
 }
 
 struct FlashTask {
     receiver: std::sync::mpsc::Receiver<Result<(), String>>,
     file_name: String,
+    handle: Option<JoinHandle<()>>,
 }
 
 fn acq_thread(
@@ -62,15 +64,19 @@ fn acq_thread(
                 return;
             }
 
-            let probe_ref = unsafe { probe.get_mut() };
-            if !probe_ref.connected {
+            let (connected, slots_empty) = probe.with_mut(|probe_ref| {
+                if !probe_ref.connected {
+                    return (false, true);
+                }
+                probe_ref.acquire_from_slots();
+                (true, probe_ref.slots.is_empty())
+            });
+            if !connected {
                 break;
             }
-
-            probe_ref.acquire_from_slots();
             cycle_count.fetch_add(1, Ordering::Relaxed);
 
-            if probe_ref.slots.is_empty() {
+            if slots_empty {
                 thread::sleep(Duration::from_millis(100));
                 continue;
             }
@@ -131,15 +137,9 @@ impl MemRW3App {
             toasts: egui_notify::Toasts::default().with_anchor(egui_notify::Anchor::BottomRight),
             frame_data: FrameData::default(),
             flash_task: None,
+            rebuild_after_flash: false,
             _acq_handle,
         }
-    }
-
-    fn trace_variables(&mut self) {
-        let mut actions = Vec::new();
-        self.variable_tree
-            .trace_variables(&mut self.session.config.pool, &mut actions);
-        self.handle_plugin_actions(actions);
     }
 
     pub fn sync_connect(&mut self) {
@@ -153,7 +153,7 @@ impl MemRW3App {
         if connected {
             self.session.set_running(false);
             self.sync.send_request(move || {
-                unsafe { probe.get_mut() }.disconnect();
+                probe.with_mut(ProbeSession::disconnect);
             });
             self.session.connected = false;
             self.session.connect_error = None;
@@ -167,30 +167,41 @@ impl MemRW3App {
             }
             let sync = self.sync.clone();
             let running = self.session.running.clone();
-            sync.send_request(move || {
-                let p = unsafe { probe.get_mut() };
-                p.chip_name = chip;
-                p.protocol = protocol;
-                p.speed_khz = speed;
-                p.selected_probe_id = probe_id;
-                if !p.connect() {
-                    running.store(false, Ordering::Release);
-                }
+            let connection_result = sync.send_request(move || {
+                probe.with_mut(|probe| {
+                    probe.chip_name = chip;
+                    probe.protocol = protocol;
+                    probe.speed_khz = speed;
+                    probe.selected_probe_id = probe_id;
+                    let connected = probe.connect();
+                    if !connected {
+                        running.store(false, Ordering::Release);
+                    }
+                    (
+                        connected,
+                        probe.chip_name.clone(),
+                        probe.speed_khz,
+                        probe.protocol.clone(),
+                        probe.selected_probe_id.clone(),
+                        probe.last_error.clone(),
+                    )
+                })
             });
-            let p = self.probe.get();
-            self.session.connected = p.connected;
+            let (connected, chip_name, speed_khz, protocol, selected_probe_id, last_error) =
+                connection_result;
+            self.session.connected = connected;
             self.toasts
                 .info(format!(
                     "连接配置: chip:{},freq:{},protocol:{},id:{}",
-                    p.chip_name,
-                    p.speed_khz,
-                    p.protocol,
-                    p.selected_probe_id.as_ref().unwrap_or(&"auto".into())
+                    chip_name,
+                    speed_khz,
+                    protocol,
+                    selected_probe_id.as_deref().unwrap_or("auto")
                 ))
                 .duration(Some(Duration::from_secs(5)))
                 .closable(true);
             if !self.session.connected {
-                let err = p.last_error.clone().unwrap_or_default();
+                let err = last_error.unwrap_or_default();
                 self.toasts
                     .error(err)
                     .duration(Some(Duration::from_secs(5)))
@@ -209,7 +220,7 @@ impl MemRW3App {
     pub fn sync_reset(&mut self) {
         let probe = self.probe.clone();
         self.sync.send_request(move || {
-            unsafe { probe.get_mut() }.reset_target();
+            probe.with_mut(ProbeSession::reset_target);
         });
     }
 
@@ -239,17 +250,16 @@ impl MemRW3App {
         let probe = self.probe.clone();
         let sync = self.sync.clone();
         let (sender, receiver) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            let mut outcome = Err("烧录任务未执行".to_owned());
-            sync.send_request(|| {
-                outcome = unsafe { probe.get_mut() }.flash_firmware(&path);
-            });
+        let handle = thread::spawn(move || {
+            let outcome = sync
+                .send_request(|| probe.with_mut(|probe| probe.flash_firmware(&path)));
             let _ = sender.send(outcome);
         });
 
         self.flash_task = Some(FlashTask {
             receiver,
             file_name,
+            handle: Some(handle),
         });
         Ok(())
     }
@@ -265,7 +275,10 @@ impl MemRW3App {
                 Err("烧录线程意外结束".to_owned())
             }
         };
-        let task = self.flash_task.take().unwrap();
+        let mut task = self.flash_task.take().unwrap();
+        if let Some(handle) = task.handle.take() {
+            let _ = handle.join();
+        }
 
         for variable in self.session.config.pool.iter() {
             variable.incoming.discard_all();
@@ -283,12 +296,16 @@ impl MemRW3App {
                     .closable(true);
             }
         }
+        if self.rebuild_after_flash {
+            self.rebuild_after_flash = false;
+            self.rebuild_slots();
+        }
     }
 
     pub fn reset_timer(&self) {
         let probe = self.probe.clone();
         self.sync.send_request(move || {
-            unsafe { probe.get_mut() }.timer = Instant::now();
+            probe.with_mut(|probe| probe.timer = Instant::now());
         });
     }
 
@@ -297,7 +314,7 @@ impl MemRW3App {
         let pool = &self.session.config.pool;
         let probe = self.probe.clone();
         self.sync.send_request(move || {
-            unsafe { probe.get_mut() }.timer = Instant::now();
+            probe.with_mut(|probe| probe.timer = Instant::now());
             for var in pool.iter() {
                 var.incoming.discard_all();
             }
@@ -312,11 +329,8 @@ impl MemRW3App {
         let addr = var.address;
         let size = var.size;
         let probe = self.probe.clone();
-        let mut ok = false;
-        self.sync.send_request(|| {
-            ok = unsafe { probe.get_mut() }.write_value(addr, size, value);
-        });
-        ok
+        self.sync
+            .send_request(|| probe.with_mut(|probe| probe.write_value(addr, size, value)))
     }
 
     pub fn rebuild_slots(&self) {
@@ -356,10 +370,11 @@ impl MemRW3App {
         let slot_n = slots.len() as u64;
         let sc = self.session.slot_count.clone();
         self.sync.send_request(move || {
-            let p = unsafe { probe.get_mut() };
-            p.slots = slots;
-            p.slot_values.resize(p.slots.len(), [0; 4]);
-            p.var_mappings = mappings;
+            probe.with_mut(|probe| {
+                probe.slots = slots;
+                probe.slot_values.resize(probe.slots.len(), [0; 4]);
+                probe.var_mappings = mappings;
+            });
             sc.store(slot_n, Ordering::Relaxed);
         });
     }
@@ -394,13 +409,21 @@ impl MemRW3App {
                     {
                         if !enabled {
                             if let Some(variable) = self.session.config.pool.get(var_id) {
-                                variable.incoming.discard_all();
+                                if variable.active_readers == 0 {
+                                    variable.incoming.discard_all();
+                                }
                             }
                         }
                         rebuild_slots = true;
                     }
                 }
                 PluginAction::WriteVariable { var_id, value } => {
+                    if self.is_flashing() {
+                        self.toasts
+                            .error("固件烧录期间不能写变量")
+                            .duration(Some(Duration::from_secs(3)));
+                        continue;
+                    }
                     let ok = self.write_variable(var_id, value);
                     if ok {
                         self.toasts
@@ -413,7 +436,9 @@ impl MemRW3App {
                     }
                 }
                 PluginAction::ResetTimer => {
-                    self.clear_all_buffers();
+                    if !self.is_flashing() {
+                        self.clear_all_buffers();
+                    }
                 }
                 PluginAction::RebuildSlots => {
                     rebuild_slots = true;
@@ -424,7 +449,11 @@ impl MemRW3App {
             }
         }
         if rebuild_slots {
-            self.rebuild_slots();
+            if self.is_flashing() {
+                self.rebuild_after_flash = true;
+            } else {
+                self.rebuild_slots();
+            }
         }
     }
 
@@ -446,7 +475,15 @@ impl MemRW3App {
 
 impl Drop for MemRW3App {
     fn drop(&mut self) {
+        if let Some(mut task) = self.flash_task.take() {
+            if let Some(handle) = task.handle.take() {
+                let _ = handle.join();
+            }
+        }
         self.session.acq_stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self._acq_handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -484,6 +521,7 @@ impl eframe::App for MemRW3App {
         let bs_open = self.variable_tree.is_open_in(ui.ctx().viewport_id());
         let dialog_open = self.plugins.iter().any(|plugin| plugin.is_dialog_open());
         let running = self.session.is_running();
+        let interaction_enabled = !self.is_flashing();
 
         let colors = ui::theme::palette(ui);
         egui::Frame::NONE.fill(colors.app_bg).show(ui, |ui| {
@@ -532,6 +570,7 @@ impl eframe::App for MemRW3App {
                             pool,
                             &frame_data,
                             running,
+                            interaction_enabled,
                             &mut self.variable_tree,
                         );
                         self.handle_plugin_actions(actions);
@@ -546,6 +585,7 @@ impl eframe::App for MemRW3App {
                     pool,
                     &frame_data,
                     running,
+                    interaction_enabled,
                     &mut self.variable_tree,
                 );
                 self.handle_plugin_actions(popout_actions);
@@ -649,6 +689,12 @@ impl MemRW3App {
     }
 
     pub fn load_config(&mut self) {
+        if self.session.connected || self.session.is_running() || self.is_flashing() {
+            self.toasts
+                .error("请先停止采集并断开目标设备，再加载配置")
+                .duration(Some(Duration::from_secs(5)));
+            return;
+        }
         let path = rfd::FileDialog::new()
             .add_filter("JSON", &["json"])
             .pick_file();
@@ -685,7 +731,17 @@ impl MemRW3App {
 
         let mut new_plugins = Self::default_plugins();
         let mut skipped_plugins = Vec::new();
+        let mut seen_plugin_ids = std::collections::HashSet::new();
         for saved_plugin in &config.plugins {
+            if !seen_plugin_ids.insert(saved_plugin.plugin_id.as_str()) {
+                self.toasts
+                    .error(format!(
+                        "配置包含重复插件项: {}",
+                        saved_plugin.plugin_id
+                    ))
+                    .duration(Some(Duration::from_secs(8)));
+                return;
+            }
             match new_plugins
                 .iter_mut()
                 .find(|plugin| plugin.id() == saved_plugin.plugin_id)
@@ -703,12 +759,27 @@ impl MemRW3App {
             }
         }
 
+        let new_dwarf_state = match VariableTreePanel::prepare_config(
+            &config.elf_path,
+            &mut new_pool,
+        ) {
+            Ok(dwarf_state) => dwarf_state,
+            Err(error) => {
+                self.toasts
+                    .error(error)
+                    .duration(Some(Duration::from_secs(10)))
+                    .closable(true);
+                return;
+            }
+        };
+
         self.session.config.probe_chip = config.probe_chip;
         self.session.config.probe_protocol = config.probe_protocol;
         self.session.config.probe_speed_khz = config.probe_speed_khz;
-        self.variable_tree.elf_path = config.elf_path;
         self.session.config.pool = new_pool;
         self.plugins = new_plugins;
+        self.variable_tree
+            .apply_config_source(config.elf_path, new_dwarf_state);
 
         for plugin_id in skipped_plugins {
             self.toasts
@@ -719,7 +790,7 @@ impl MemRW3App {
         self.toasts
             .success("配置已加载")
             .duration(Some(Duration::from_secs(2)));
-        self.trace_variables();
+        self.rebuild_slots();
     }
 }
 
