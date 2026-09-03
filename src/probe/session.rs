@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::model::RingBuffer;
+use crate::model::{RegisterReadRequest, RingBuffer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FirmwareImageKind {
@@ -336,6 +336,49 @@ impl ProbeSession {
             }
         }
         false
+    }
+
+    /// Read a group of SVD registers while holding one probe core handle.
+    /// Individual failures are returned without cancelling the remaining reads.
+    pub fn read_registers(
+        &mut self,
+        requests: &[RegisterReadRequest],
+    ) -> Vec<(u64, Result<u64, String>)> {
+        let Some(session) = self.session.as_mut() else {
+            return requests
+                .iter()
+                .map(|request| (request.id, Err("Probe 会话不可用，请重新连接".to_owned())))
+                .collect();
+        };
+        let mut core = match session.core(0) {
+            Ok(core) => core,
+            Err(error) => {
+                let error = format!("获取核心失败: {error}");
+                return requests
+                    .iter()
+                    .map(|request| (request.id, Err(error.clone())))
+                    .collect();
+            }
+        };
+
+        requests
+            .iter()
+            .map(|request| {
+                let result = match request.size_bytes {
+                    1 => core.read_word_8(request.address).map(u64::from),
+                    2 => core.read_word_16(request.address).map(u64::from),
+                    4 => core.read_word_32(request.address).map(u64::from),
+                    8 => core.read_word_64(request.address),
+                    size => {
+                        return (request.id, Err(format!("不支持 {size} 字节寄存器读取")));
+                    }
+                };
+                (
+                    request.id,
+                    result.map_err(|error| format!("读取 0x{:08X} 失败: {error}", request.address)),
+                )
+            })
+            .collect()
     }
 }
 

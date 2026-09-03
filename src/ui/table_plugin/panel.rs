@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use eframe::egui::{self, RichText, Ui};
 use serde::{Deserialize, Serialize};
 
-use super::svd_panel::{SvdPanelState, render_svd_panel};
+use super::svd_panel::{SavedSvdRegister, SvdPanelState, render_svd_panel};
 use super::tree::{CheckState, SavedTableLeaf, SavedTableNode, TableNode};
 use crate::dwarf::types::ExtendType;
 use crate::model::VariablePool;
@@ -20,6 +20,7 @@ pub struct TablePluginState {
     pending_removals: Vec<(usize, bool)>,
     pending_enabled: Vec<(usize, bool)>,
     pending_writes: Vec<(usize, u64)>,
+    pending_svd_actions: Vec<PluginAction>,
     errors: Vec<String>,
     svd: SvdPanelState,
 }
@@ -32,6 +33,7 @@ impl Default for TablePluginState {
             pending_removals: Vec::new(),
             pending_enabled: Vec::new(),
             pending_writes: Vec::new(),
+            pending_svd_actions: Vec::new(),
             errors: Vec::new(),
             svd: SvdPanelState::default(),
         }
@@ -43,6 +45,8 @@ struct SavedTableConfig {
     roots: Vec<SavedTableNode>,
     #[serde(default)]
     svd_path: Option<String>,
+    #[serde(default)]
+    svd_registers: Vec<SavedSvdRegister>,
 }
 
 #[derive(Deserialize)]
@@ -80,16 +84,23 @@ impl MemRWPlugin for TablePluginState {
         true
     }
 
-    fn update(&mut self, ctx: PluginUpdateContext<'_>) {
+    fn update(&mut self, ctx: PluginUpdateContext<'_>) -> Vec<PluginAction> {
         for root in &mut self.roots {
             root.update_values(ctx.pool, ctx.frame_data, format_value_into);
         }
+        self.svd.update(
+            ctx.register_data,
+            ctx.connected,
+            ctx.hardware_busy,
+            ctx.egui_ctx,
+        )
     }
 
     fn reset_data(&mut self) {
         for root in &mut self.roots {
             root.reset_values();
         }
+        self.svd.reset_values();
     }
 
     fn render(&mut self, ui: &mut Ui, ctx: PluginRenderContext<'_>) -> Vec<PluginAction> {
@@ -122,6 +133,7 @@ impl MemRWPlugin for TablePluginState {
             level: ToastLevel::Error,
             message,
         }));
+        actions.append(&mut self.pending_svd_actions);
         actions
     }
 
@@ -165,6 +177,7 @@ impl MemRWPlugin for TablePluginState {
         let config = SavedTableConfig {
             roots: self.roots.iter().map(|root| root.to_saved(pool)).collect(),
             svd_path: self.svd.path().map(|path| path.display().to_string()),
+            svd_registers: self.svd.saved_registers(),
         };
         serde_json::to_value(config).unwrap_or(serde_json::Value::Null)
     }
@@ -176,8 +189,10 @@ impl MemRWPlugin for TablePluginState {
     ) -> Result<(), String> {
         let payload: SavedTablePayload =
             serde_json::from_value(payload.clone()).map_err(|error| error.to_string())?;
-        let (saved_roots, svd_path) = match payload {
-            SavedTablePayload::Current(config) => (config.roots, config.svd_path),
+        let (saved_roots, svd_path, svd_registers) = match payload {
+            SavedTablePayload::Current(config) => {
+                (config.roots, config.svd_path, config.svd_registers)
+            }
             SavedTablePayload::Legacy(entries) => (
                 entries
                     .into_iter()
@@ -198,6 +213,7 @@ impl MemRWPlugin for TablePluginState {
                     })
                     .collect(),
                 None,
+                Vec::new(),
             ),
         };
 
@@ -207,6 +223,7 @@ impl MemRWPlugin for TablePluginState {
             self.roots
                 .push(TableNode::from_saved(saved, pool, &mut self.next_node_id)?);
         }
+        self.svd.set_saved_registers(svd_registers);
         if let Some(path) = svd_path.filter(|path| !path.is_empty()) {
             self.svd.load_path(PathBuf::from(path));
         }
@@ -224,7 +241,9 @@ fn table_panel(ui: &mut Ui, state: &mut TablePluginState, pool: &VariablePool) -
             open_tree = render_variable_panel(ui, state, pool);
         });
     egui::CentralPanel::default().show_inside(ui, |ui| {
-        render_svd_panel(ui, &mut state.svd);
+        state
+            .pending_svd_actions
+            .extend(render_svd_panel(ui, &mut state.svd));
     });
     open_tree
 }

@@ -45,6 +45,7 @@ src/
 │   └── extract.rs          # DWARF 解析 (gimli, 支持 DWARF 2/3/4/5), 跨编译单元类型引用, basic_type 映射
 ├── model/
 │   ├── mod.rs
+│   ├── register_io.rs      # 独立 SVD 寄存器批量读请求、结果与写请求
 │   ├── state.rs            # AppSession (连接/采样/Probe UI 状态)
 │   ├── variable_pool.rs    # VariablePool (Vec + HashMap, O(1) 增删查, 仅存extend数据)
 │   └── ring_buffer.rs      # 有界 lock-free 环形队列 (crossbeam ArrayQueue)
@@ -157,7 +158,7 @@ pub trait MemRWPlugin {
     fn id(&self) -> &'static str;
     fn title(&self) -> &'static str;
     fn render(&mut self, ui: &mut Ui, ctx: PluginRenderContext<'_>) -> Vec<PluginAction>;
-    fn update(&mut self, ctx: PluginUpdateContext<'_>);
+    fn update(&mut self, ctx: PluginUpdateContext<'_>) -> Vec<PluginAction>;
     fn reset_data(&mut self);
     fn add_variable_ui(&mut self, ui: &mut Ui, node_id: usize, default_name: &str, candidate: &mut dyn FnMut() -> Result<VariableCandidate, String>, pool: &mut VariablePool) -> Result<bool, String>;
     fn save_config(&self, pool: &VariablePool) -> serde_json::Value;
@@ -172,11 +173,13 @@ OpenVariableTree { plugin_id, viewport_id }
 RemoveVariable { var_id, was_enabled }
 SetVariableEnabled { var_id, enabled }
 WriteVariable { var_id, value }
+ReadRegisters { requests }
+WriteRegister { request }
 ResetTimer
 Toast { level, message }
 ```
 
-App 仍然是唯一执行硬件写入、变量池解绑、timer reset 和 toast 的编排层。插件只声明意图并管理自身 UI 状态。
+App 仍然是唯一执行硬件读写、变量池解绑、timer reset 和 toast 的编排层。插件只声明意图并管理自身 UI 状态。SVD 寄存器不进入 `VariablePool` 或采集 slots；Table 插件按每个寄存器的 1–30 Hz 周期汇总到期项，App 将整批请求串行交给一个 probe core handle，并把独立结果表回传给插件。
 
 ### BasicType vs ExtendType
 
@@ -529,7 +532,8 @@ PooledVariable { id, name, address, ext_type, size, incoming, plugins_cnt, activ
 | 写入流程 | 主循环 drain `pending_writes` → `write_variable(var_id, value)` → `sync.send_request` 暂停采集线程 → `core.write_word_8/16/32/64` → 恢复 |
 | 写入校验 | 按 ExtendType 校验: u8(0-255), i8(-128~127), u16, i16, u32, i32, u64, i64, f32, f64; Other 类型禁止写入 |
 | SVD | 后台解析 CMSIS-SVD；Enter 提交且只过滤顶层 peripheral，搜索不自动展开，并提供全部折叠 |
-| 配置 | 递归保存树、展开状态、叶子 enabled/refresh_hz 和 SVD 路径；兼容旧版平面 Table payload |
+| SVD 读写 | 寄存器默认未勾选；可读项独立设置 1–30 Hz，同一调度周期合并为一次 Probe 请求；只读项隐藏写入控件 |
+| 配置 | 递归保存树、展开状态、叶子 enabled/refresh_hz、SVD 路径及寄存器 enabled/read_hz；兼容旧版平面 Table payload |
 
 ### 7.1 FFT 频谱分析模块 (fft.rs)
 

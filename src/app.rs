@@ -1,5 +1,5 @@
 use crate::dwarf;
-use crate::model::{AppSession, VariablePool};
+use crate::model::{AppSession, RegisterData, RegisterReadResult, VariablePool};
 use crate::probe::{AcqSlot, ProbeCell, ProbeSession, VarSlotMapping};
 use crate::sync::Sync;
 use crate::ui;
@@ -30,6 +30,8 @@ pub struct MemRW3App {
     sync: Arc<Sync>,
     pub toasts: egui_notify::Toasts,
     frame_data: FrameData,
+    register_data: RegisterData,
+    register_sequence: u64,
     flash_task: Option<FlashTask>,
     rebuild_after_flash: bool,
     _acq_handle: Option<JoinHandle<()>>,
@@ -136,6 +138,8 @@ impl MemRW3App {
             sync,
             toasts: egui_notify::Toasts::default().with_anchor(egui_notify::Anchor::BottomRight),
             frame_data: FrameData::default(),
+            register_data: RegisterData::default(),
+            register_sequence: 0,
             flash_task: None,
             rebuild_after_flash: false,
             _acq_handle,
@@ -462,6 +466,54 @@ impl MemRW3App {
                             .duration(Some(Duration::from_secs(3)));
                     }
                 }
+                PluginAction::ReadRegisters { requests } => {
+                    if requests.is_empty() || !self.session.connected || self.is_flashing() {
+                        continue;
+                    }
+                    let probe = self.probe.clone();
+                    let results = self.sync.send_request(move || {
+                        probe.with_mut(|probe| probe.read_registers(&requests))
+                    });
+                    self.register_sequence = self.register_sequence.wrapping_add(1);
+                    let sequence = self.register_sequence;
+                    for (id, value) in results {
+                        self.register_data
+                            .insert(id, RegisterReadResult { sequence, value });
+                    }
+                }
+                PluginAction::WriteRegister { request } => {
+                    if !self.session.connected {
+                        self.toasts
+                            .error("请先连接目标设备")
+                            .duration(Some(Duration::from_secs(3)));
+                        continue;
+                    }
+                    if self.is_flashing() {
+                        self.toasts
+                            .error("固件烧录期间不能写寄存器")
+                            .duration(Some(Duration::from_secs(3)));
+                        continue;
+                    }
+                    let probe = self.probe.clone();
+                    let ok = self.sync.send_request(move || {
+                        probe.with_mut(|probe| {
+                            probe.write_value(
+                                request.address,
+                                u32::from(request.size_bytes),
+                                request.value,
+                            )
+                        })
+                    });
+                    if ok {
+                        self.toasts
+                            .success("寄存器写入成功")
+                            .duration(Some(Duration::from_secs(2)));
+                    } else {
+                        self.toasts
+                            .error("寄存器写入失败")
+                            .duration(Some(Duration::from_secs(3)));
+                    }
+                }
                 PluginAction::ResetTimer => {
                     if !self.is_flashing() {
                         self.clear_all_buffers();
@@ -544,13 +596,21 @@ impl eframe::App for MemRW3App {
                 var.incoming.drain_into(samples);
             }
         }
+        let connected = self.session.connected;
+        let hardware_busy = self.is_flashing();
+        let mut update_actions = Vec::new();
         for plugin in &mut self.plugins {
-            plugin.update(PluginUpdateContext {
+            update_actions.extend(plugin.update(PluginUpdateContext {
                 pool: &self.session.config.pool,
                 frame_data: &frame_data,
+                register_data: &self.register_data,
                 running,
-            });
+                connected,
+                hardware_busy,
+                egui_ctx: ui.ctx(),
+            }));
         }
+        self.handle_plugin_actions(update_actions);
 
         let bs_open = self.variable_tree.is_open_in(ui.ctx().viewport_id());
         let dialog_open = self.plugins.iter().any(|plugin| plugin.is_dialog_open());

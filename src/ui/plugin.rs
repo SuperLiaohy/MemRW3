@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::dwarf::types::{ExtendConfig, ExtendType};
-use crate::model::VariablePool;
+use crate::model::{RegisterData, RegisterReadRequest, RegisterWriteRequest, VariablePool};
 
 pub type FrameData = HashMap<usize, Vec<(f64, [u8; 8])>>;
 
@@ -66,6 +66,12 @@ pub enum PluginAction {
         var_id: usize,
         value: u64,
     },
+    ReadRegisters {
+        requests: Vec<RegisterReadRequest>,
+    },
+    WriteRegister {
+        request: RegisterWriteRequest,
+    },
     ResetTimer,
     RebuildSlots,
     Toast {
@@ -83,7 +89,11 @@ pub struct PluginRenderContext<'a> {
 pub struct PluginUpdateContext<'a> {
     pub pool: &'a VariablePool,
     pub frame_data: &'a FrameData,
+    pub register_data: &'a RegisterData,
     pub running: bool,
+    pub connected: bool,
+    pub hardware_busy: bool,
+    pub egui_ctx: &'a egui::Context,
 }
 
 pub trait MemRWPlugin {
@@ -102,7 +112,9 @@ pub trait MemRWPlugin {
         false
     }
 
-    fn update(&mut self, _ctx: PluginUpdateContext<'_>) {}
+    fn update(&mut self, _ctx: PluginUpdateContext<'_>) -> Vec<PluginAction> {
+        Vec::new()
+    }
 
     fn reset_data(&mut self) {}
 

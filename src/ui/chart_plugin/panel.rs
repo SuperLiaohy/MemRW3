@@ -185,8 +185,9 @@ impl MemRWPlugin for ChartPluginState {
         egui::vec2(360.0, 240.0)
     }
 
-    fn update(&mut self, ctx: PluginUpdateContext<'_>) {
+    fn update(&mut self, ctx: PluginUpdateContext<'_>) -> Vec<PluginAction> {
         update_chart_data(self, ctx.pool, ctx.frame_data, ctx.running);
+        Vec::new()
     }
 
     fn reset_data(&mut self) {
