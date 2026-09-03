@@ -5,9 +5,11 @@ use std::sync::atomic::Ordering;
 
 pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
     let colors = theme::palette(ui);
+    let (bar_fill, bar_stroke) =
+        control_bar_appearance(colors, app.session.connected, app.session.is_running());
     egui::Frame::NONE
-        .fill(colors.surface_bg)
-        .stroke(theme::panel_stroke(ui))
+        .fill(bar_fill)
+        .stroke(bar_stroke)
         .corner_radius(3)
         .inner_margin(egui::Margin::symmetric(12, 4))
         .show(ui, |ui| {
@@ -333,21 +335,76 @@ fn settings_button(ui: &mut Ui, app: &mut MemRW3App) {
 
 fn run_control(ui: &mut Ui, app: &mut MemRW3App) {
     let enabled = app.session.connected;
+    let running = app.session.is_running();
     let label = if !enabled {
         "开始"
-    } else if app.session.is_running() {
+    } else if running {
         "暂停"
     } else {
         "开始"
     };
     let resp = if enabled {
-        ui.add(egui::Button::new(RichText::new(label).size(13.0)))
+        let colors = theme::palette(ui);
+        let status_color = if running {
+            colors.success
+        } else {
+            colors.warning
+        };
+        ui.add(
+            egui::Button::new(RichText::new(label).size(13.0).color(egui::Color32::WHITE))
+                .fill(status_color)
+                .stroke(egui::Stroke::new(1.0, status_color)),
+        )
     } else {
         ui.add_enabled(false, egui::Button::new(RichText::new(label).size(13.0)))
     };
     if resp.clicked() {
         let new_running = !app.session.is_running();
         app.set_acquisition_running(new_running);
+    }
+}
+
+fn control_bar_appearance(
+    colors: theme::Palette,
+    connected: bool,
+    running: bool,
+) -> (egui::Color32, egui::Stroke) {
+    if running {
+        (
+            colors.surface_bg.lerp_to_gamma(colors.success, 0.18),
+            egui::Stroke::new(1.5, colors.success),
+        )
+    } else if connected {
+        (
+            colors.surface_bg.lerp_to_gamma(colors.warning, 0.10),
+            egui::Stroke::new(1.0, colors.warning),
+        )
+    } else {
+        (colors.surface_bg, egui::Stroke::new(1.0, colors.border))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui;
+
+    use crate::ui::theme;
+
+    use super::control_bar_appearance;
+
+    #[test]
+    fn control_bar_uses_distinct_disconnected_paused_and_running_styles() {
+        egui::__run_test_ui(|ui| {
+            let colors = theme::palette(ui);
+            let disconnected = control_bar_appearance(colors, false, false);
+            let paused = control_bar_appearance(colors, true, false);
+            let running = control_bar_appearance(colors, true, true);
+
+            assert_ne!(disconnected, paused);
+            assert_ne!(paused, running);
+            assert_eq!(running.1.color, colors.success);
+            assert_eq!(paused.1.color, colors.warning);
+        });
     }
 }
 
