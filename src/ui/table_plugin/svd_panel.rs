@@ -120,6 +120,13 @@ impl SvdPanelState {
         self.collapse_generation = self.collapse_generation.wrapping_add(1);
     }
 
+    fn selected_register_count(&self) -> usize {
+        self.registers
+            .values()
+            .filter(|runtime| runtime.enabled)
+            .count()
+    }
+
     pub fn update(
         &mut self,
         register_data: &RegisterData,
@@ -247,6 +254,11 @@ pub fn render_svd_panel(ui: &mut Ui, state: &mut SvdPanelState) -> Vec<PluginAct
 
     ui.horizontal(|ui| {
         ui.heading(RichText::new("SVD 寄存器").size(15.0));
+        ui.label(
+            RichText::new(format!("已勾选 {}", state.selected_register_count()))
+                .size(12.0)
+                .color(theme::palette(ui).accent_hover),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add_enabled(state.task.is_none(), egui::Button::new("加载 SVD"))
@@ -727,9 +739,11 @@ mod tests {
             ..Default::default()
         };
         assert!(state.registers.values().all(|runtime| !runtime.enabled));
+        assert_eq!(state.selected_register_count(), 0);
         for runtime in state.registers.values_mut() {
             runtime.enabled = true;
         }
+        assert_eq!(state.selected_register_count(), 2);
 
         let actions = state.update(
             &RegisterData::default(),
