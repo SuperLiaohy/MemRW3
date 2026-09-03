@@ -33,6 +33,7 @@ pub struct MemRW3App {
     register_data: RegisterData,
     register_sequence: u64,
     link_event_receiver: std::sync::mpsc::Receiver<String>,
+    system_theme_monitor: ui::theme::SystemThemeMonitor,
     flash_task: Option<FlashTask>,
     rebuild_after_flash: bool,
     _acq_handle: Option<JoinHandle<()>>,
@@ -159,6 +160,7 @@ impl MemRW3App {
         chips.sort();
         session.all_chips = chips;
 
+        let system_theme_monitor = ui::theme::SystemThemeMonitor::new(repaint_ctx.clone());
         let probe = Arc::new(ProbeCell::new(ProbeSession::default()));
         let sync = Arc::new(Sync::new());
 
@@ -194,6 +196,7 @@ impl MemRW3App {
             register_data: RegisterData::default(),
             register_sequence: 0,
             link_event_receiver,
+            system_theme_monitor,
             flash_task: None,
             rebuild_after_flash: false,
             _acq_handle,
@@ -642,6 +645,7 @@ impl Drop for MemRW3App {
 
 impl eframe::App for MemRW3App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.system_theme_monitor.apply(ui.ctx());
         self.poll_link_events();
         self.poll_flash_task();
         if self.is_flashing() {

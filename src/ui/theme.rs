@@ -1,4 +1,14 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::thread::JoinHandle;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
+
 use eframe::egui::{self, Color32, Stroke, Ui};
+
+const THEME_UNKNOWN: u8 = 0;
+const THEME_DARK: u8 = 1;
+const THEME_LIGHT: u8 = 2;
 
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -35,7 +45,8 @@ pub fn install(ctx: &egui::Context) {
     );
     ctx.set_style_of(egui::Theme::Dark, dark_style);
     ctx.set_style_of(egui::Theme::Light, light_style);
-    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.options_mut(|options| options.fallback_theme = egui::Theme::Light);
+    ctx.set_theme(egui::ThemePreference::Light);
 }
 
 pub fn set_theme_preference(ctx: &egui::Context, preference: egui::ThemePreference) {
@@ -48,6 +59,131 @@ pub fn next_theme_preference(preference: egui::ThemePreference) -> egui::ThemePr
         egui::ThemePreference::Light => egui::ThemePreference::System,
         egui::ThemePreference::System => egui::ThemePreference::Dark,
     }
+}
+
+pub struct SystemThemeMonitor {
+    detected: Arc<AtomicU8>,
+    applied: AtomicU8,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl SystemThemeMonitor {
+    pub fn new(repaint_ctx: egui::Context) -> Self {
+        let detected = Arc::new(AtomicU8::new(theme_code(
+            detect_desktop_theme().unwrap_or(egui::Theme::Light),
+        )));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        #[cfg(target_os = "linux")]
+        let handle = {
+            let detected = Arc::clone(&detected);
+            let stop = Arc::clone(&stop);
+            Some(std::thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    if let Some(theme) = detect_desktop_theme() {
+                        let code = theme_code(theme);
+                        if detected.swap(code, Ordering::AcqRel) != code {
+                            repaint_ctx.request_repaint();
+                        }
+                    }
+                    for _ in 0..20 {
+                        if stop.load(Ordering::Acquire) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            }))
+        };
+        #[cfg(not(target_os = "linux"))]
+        let handle = {
+            let _ = repaint_ctx;
+            None
+        };
+
+        Self {
+            detected,
+            applied: AtomicU8::new(THEME_UNKNOWN),
+            stop,
+            handle,
+        }
+    }
+
+    pub fn apply(&self, ctx: &egui::Context) {
+        let code = self.detected.load(Ordering::Acquire);
+        if code == THEME_UNKNOWN || self.applied.swap(code, Ordering::AcqRel) == code {
+            return;
+        }
+        let theme = if code == THEME_DARK {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        };
+        ctx.options_mut(|options| options.fallback_theme = theme);
+    }
+}
+
+impl Drop for SystemThemeMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn theme_code(theme: egui::Theme) -> u8 {
+    match theme {
+        egui::Theme::Dark => THEME_DARK,
+        egui::Theme::Light => THEME_LIGHT,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_desktop_theme() -> Option<egui::Theme> {
+    let color_scheme = gsettings_value("color-scheme");
+    let gtk_theme = gsettings_value("gtk-theme");
+    desktop_theme_from_values(color_scheme.as_deref(), gtk_theme.as_deref())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detect_desktop_theme() -> Option<egui::Theme> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn gsettings_value(key: &str) -> Option<String> {
+    let output = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", key])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().trim_matches('\'').to_ascii_lowercase())
+}
+
+fn desktop_theme_from_values(
+    color_scheme: Option<&str>,
+    gtk_theme: Option<&str>,
+) -> Option<egui::Theme> {
+    if color_scheme.is_some_and(|value| value.contains("prefer-dark")) {
+        return Some(egui::Theme::Dark);
+    }
+    if color_scheme.is_some_and(|value| value.contains("prefer-light")) {
+        return Some(egui::Theme::Light);
+    }
+    if let Some(gtk_theme) = gtk_theme {
+        return Some(if gtk_theme.contains("dark") {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
+    }
+    color_scheme.map(|_| egui::Theme::Light)
 }
 
 fn configured_style(mut style: egui::Style, palette: Palette, dark_mode: bool) -> egui::Style {
@@ -186,7 +322,7 @@ fn light_palette() -> Palette {
 mod tests {
     use eframe::egui;
 
-    use super::{install, next_theme_preference, set_theme_preference};
+    use super::{desktop_theme_from_values, install, next_theme_preference, set_theme_preference};
 
     #[test]
     fn switches_the_complete_global_visual_theme() {
@@ -199,6 +335,10 @@ mod tests {
         assert!(dark.visuals.dark_mode);
         assert!(!light.visuals.dark_mode);
         assert_ne!(dark.visuals.panel_fill, light.visuals.panel_fill);
+        assert_eq!(
+            context.options(|options| options.theme_preference),
+            egui::ThemePreference::Light
+        );
 
         set_theme_preference(&context, egui::ThemePreference::System);
         assert_eq!(
@@ -220,6 +360,26 @@ mod tests {
         assert_eq!(
             next_theme_preference(egui::ThemePreference::System),
             egui::ThemePreference::Dark
+        );
+    }
+
+    #[test]
+    fn parses_gnome_and_gtk_theme_preferences() {
+        assert_eq!(
+            desktop_theme_from_values(Some("prefer-dark"), Some("Yaru")),
+            Some(egui::Theme::Dark)
+        );
+        assert_eq!(
+            desktop_theme_from_values(Some("default"), Some("Yaru-dark")),
+            Some(egui::Theme::Dark)
+        );
+        assert_eq!(
+            desktop_theme_from_values(Some("default"), Some("Yaru")),
+            Some(egui::Theme::Light)
+        );
+        assert_eq!(
+            desktop_theme_from_values(Some("prefer-light"), Some("Yaru-dark")),
+            Some(egui::Theme::Light)
         );
     }
 }
