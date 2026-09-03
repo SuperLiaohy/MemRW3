@@ -528,7 +528,7 @@ PooledVariable { id, name, address, ext_type, size, incoming, plugins_cnt, activ
 | Write | 叶子 TextEdit → `validate_write()` → `PluginAction::WriteVariable` |
 | 写入流程 | 主循环 drain `pending_writes` → `write_variable(var_id, value)` → `sync.send_request` 暂停采集线程 → `core.write_word_8/16/32/64` → 恢复 |
 | 写入校验 | 按 ExtendType 校验: u8(0-255), i8(-128~127), u16, i16, u32, i32, u64, i64, f32, f64; Other 类型禁止写入 |
-| SVD | 后台解析 CMSIS-SVD；展开数组与 derivedFrom，展示 peripheral/register/field、绝对地址、权限和复位值 |
+| SVD | 后台解析 CMSIS-SVD；Enter 提交且只过滤顶层 peripheral，搜索不自动展开，并提供全部折叠 |
 | 配置 | 递归保存树、展开状态、叶子 enabled/refresh_hz 和 SVD 路径；兼容旧版平面 Table payload |
 
 ### 7.1 FFT 频谱分析模块 (fft.rs)
