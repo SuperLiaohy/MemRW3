@@ -3,6 +3,8 @@ use crate::ui::theme;
 use eframe::egui::{self, RichText, Ui};
 use std::sync::atomic::Ordering;
 
+const CONTROL_BAR_STROKE_WIDTH: f32 = 1.0;
+
 pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
     let colors = theme::palette(ui);
     let (bar_fill, bar_stroke) =
@@ -372,15 +374,18 @@ fn control_bar_appearance(
     if running {
         (
             colors.surface_bg.lerp_to_gamma(colors.success, 0.18),
-            egui::Stroke::new(1.5, colors.success),
+            egui::Stroke::new(CONTROL_BAR_STROKE_WIDTH, colors.success),
         )
     } else if connected {
         (
             colors.surface_bg.lerp_to_gamma(colors.warning, 0.10),
-            egui::Stroke::new(1.0, colors.warning),
+            egui::Stroke::new(CONTROL_BAR_STROKE_WIDTH, colors.warning),
         )
     } else {
-        (colors.surface_bg, egui::Stroke::new(1.0, colors.border))
+        (
+            colors.surface_bg,
+            egui::Stroke::new(CONTROL_BAR_STROKE_WIDTH, colors.border),
+        )
     }
 }
 
@@ -390,7 +395,7 @@ mod tests {
 
     use crate::ui::theme;
 
-    use super::control_bar_appearance;
+    use super::{acquisition_status, control_bar_appearance};
 
     #[test]
     fn control_bar_uses_distinct_disconnected_paused_and_running_styles() {
@@ -404,6 +409,19 @@ mod tests {
             assert_ne!(paused, running);
             assert_eq!(running.1.color, colors.success);
             assert_eq!(paused.1.color, colors.warning);
+            assert_eq!(disconnected.1.width, paused.1.width);
+            assert_eq!(paused.1.width, running.1.width);
+        });
+    }
+
+    #[test]
+    fn acquisition_status_keeps_the_same_height_when_state_changes() {
+        egui::__run_test_ui(|ui| {
+            let colors = theme::palette(ui);
+            let running = acquisition_status(ui, true, colors);
+            let paused = acquisition_status(ui, false, colors);
+
+            assert_eq!(running.rect.height(), paused.rect.height());
         });
     }
 }
@@ -501,10 +519,22 @@ fn sampling_status(ui: &mut Ui, app: &MemRW3App) {
             .color(colors.accent_hover),
     );
     ui.separator();
-    let (text, color) = if app.session.is_running() {
-        ("● 采集中", colors.success)
+    acquisition_status(ui, app.session.is_running(), colors);
+}
+
+fn acquisition_status(ui: &mut Ui, running: bool, colors: theme::Palette) -> egui::Response {
+    let (text, color) = if running {
+        ("采集中", colors.success)
     } else {
-        ("○ 已暂停", colors.warning)
+        ("已暂停", colors.warning)
     };
-    ui.label(RichText::new(text).size(13.0).color(color));
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let (indicator_rect, _) =
+            ui.allocate_exact_size(egui::vec2(12.0, 16.0), egui::Sense::hover());
+        ui.painter()
+            .circle_filled(indicator_rect.center(), 4.0, color);
+        ui.label(RichText::new(text).size(13.0).color(color));
+    })
+    .response
 }
