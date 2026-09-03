@@ -761,6 +761,18 @@ impl eframe::App for MemRW3App {
                 &mut self.variable_tree,
             );
             self.handle_plugin_actions(popout_actions);
+
+            let mut variable_tree_actions = Vec::new();
+            let pop_in_plugin = self.variable_tree.show_popout(
+                ui,
+                &mut self.plugins,
+                &mut self.session.config.pool,
+                &mut variable_tree_actions,
+            );
+            self.handle_plugin_actions(variable_tree_actions);
+            if let Some(plugin_id) = pop_in_plugin {
+                self.dock.focus_plugin(&plugin_id);
+            }
         });
         self.frame_data = frame_data;
         if let Some(task) = self.flash_task.as_ref() {

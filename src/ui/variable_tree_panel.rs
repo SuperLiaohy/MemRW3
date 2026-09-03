@@ -13,6 +13,7 @@ const VARIABLE_TREE_LAYER_ORDER: egui::Order = egui::Order::Middle;
 struct VariableTreeTarget {
     plugin_id: String,
     viewport_id: egui::ViewportId,
+    popped: bool,
 }
 
 pub struct VariableTreePanel {
@@ -40,6 +41,7 @@ impl VariableTreePanel {
         self.target = Some(VariableTreeTarget {
             plugin_id: plugin_id.into(),
             viewport_id,
+            popped: false,
         });
         self.drag_state = None;
     }
@@ -47,11 +49,15 @@ impl VariableTreePanel {
     pub fn is_open_in(&self, viewport_id: egui::ViewportId) -> bool {
         self.target
             .as_ref()
-            .is_some_and(|target| target.viewport_id == viewport_id)
+            .is_some_and(|target| !target.popped && target.viewport_id == viewport_id)
     }
 
     pub fn close_in(&mut self, viewport_id: egui::ViewportId) {
-        if self.is_open_in(viewport_id) {
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|target| target.viewport_id == viewport_id)
+        {
             self.target = None;
             self.drag_state = None;
         }
@@ -68,7 +74,7 @@ impl VariableTreePanel {
         let Some(target) = self.target.as_ref() else {
             return;
         };
-        if target.viewport_id != viewport_id || target.plugin_id != plugin.id() {
+        if target.popped || target.viewport_id != viewport_id || target.plugin_id != plugin.id() {
             return;
         }
 
@@ -131,6 +137,66 @@ impl VariableTreePanel {
             });
     }
 
+    pub fn show_popout(
+        &mut self,
+        host_ui: &mut Ui,
+        plugins: &mut [Box<dyn MemRWPlugin>],
+        pool: &mut VariablePool,
+        actions: &mut Vec<PluginAction>,
+    ) -> Option<String> {
+        let target = self.target.clone().filter(|target| target.popped)?;
+        let Some(plugin) = plugins
+            .iter_mut()
+            .find(|plugin| plugin.id() == target.plugin_id)
+        else {
+            self.target = None;
+            return None;
+        };
+        let viewport_id =
+            egui::ViewportId::from_hash_of(format!("{}_variable_tree_popout", target.plugin_id));
+        let host_viewport_id = host_ui.ctx().viewport_id();
+        let title = format!("Variable Tree — {}", plugin.title());
+        let mut close_requested = false;
+        host_ui.ctx().show_viewport_immediate(
+            viewport_id,
+            egui::ViewportBuilder::default()
+                .with_title(title)
+                .with_inner_size([1000.0, 620.0])
+                .with_min_inner_size([700.0, 450.0])
+                .with_resizable(true),
+            |viewport_ui, _class| {
+                if viewport_ui
+                    .ctx()
+                    .input(|input| input.viewport().close_requested())
+                {
+                    close_requested = true;
+                    return;
+                }
+                egui::CentralPanel::default().show_inside(viewport_ui, |ui| {
+                    self.show_contents(ui, plugin.as_mut(), pool, actions);
+                });
+            },
+        );
+        if close_requested {
+            self.target = None;
+            self.drag_state = None;
+            return None;
+        }
+
+        let popped_in = self
+            .target
+            .as_ref()
+            .is_some_and(|current| current.plugin_id == target.plugin_id && !current.popped);
+        if popped_in {
+            if let Some(current) = self.target.as_mut() {
+                current.viewport_id = host_viewport_id;
+            }
+            Some(target.plugin_id)
+        } else {
+            None
+        }
+    }
+
     fn show_contents(
         &mut self,
         ui: &mut Ui,
@@ -169,14 +235,29 @@ impl VariableTreePanel {
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(2.0);
+        let is_popped = self.target.as_ref().is_some_and(|target| target.popped);
+        let mut close_requested = false;
+        let mut pop_requested = None;
         ui.horizontal(|ui| {
             ui.heading("变量列表 (DWARF Tree)");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("关闭").clicked() {
-                    self.target = None;
+                    close_requested = true;
+                }
+                let pop_label = if is_popped { "Pop in" } else { "Pop out" };
+                if ui.button(pop_label).clicked() {
+                    pop_requested = Some(!is_popped);
                 }
             });
         });
+        if close_requested {
+            self.target = None;
+        } else if let Some(popped) = pop_requested
+            && let Some(target) = self.target.as_mut()
+        {
+            target.popped = popped;
+            self.drag_state = None;
+        }
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(4.0);
@@ -196,7 +277,7 @@ impl VariableTreePanel {
                     .layout(egui::Layout::top_down(egui::Align::Min)),
             );
             egui::ScrollArea::both()
-                .id_salt("left_tree_scroll")
+                .id_salt(("left_tree_scroll", ui.ctx().viewport_id()))
                 .auto_shrink([false, false])
                 .show(&mut left_ui, |ui| {
                     crate::ui::vari_tree_ui(ui, &mut self.dwarf_state);
@@ -212,7 +293,7 @@ impl VariableTreePanel {
                     .layout(egui::Layout::top_down(egui::Align::Min)),
             );
             egui::ScrollArea::both()
-                .id_salt("right_props_scroll")
+                .id_salt(("right_props_scroll", ui.ctx().viewport_id()))
                 .auto_shrink([false, false])
                 .show(&mut right_ui, |ui| {
                     self.show_selected_properties(ui, plugin, pool, actions);
@@ -533,6 +614,20 @@ mod tests {
     #[test]
     fn variable_tree_keeps_foreground_available_for_toasts() {
         assert!(VARIABLE_TREE_LAYER_ORDER < egui::Order::Foreground);
+    }
+
+    #[test]
+    fn popped_tree_no_longer_blocks_its_host_viewport() {
+        let mut panel = VariableTreePanel::new(crate::dwarf::types::DwarfState::new(Vec::new()));
+        let viewport_id = egui::ViewportId::ROOT;
+        panel.open("chart", viewport_id);
+        assert!(panel.is_open_in(viewport_id));
+
+        panel.target.as_mut().unwrap().popped = true;
+        assert!(!panel.is_open_in(viewport_id));
+
+        panel.close_in(viewport_id);
+        assert!(panel.target.is_none());
     }
 
     fn node(

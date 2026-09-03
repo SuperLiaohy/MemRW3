@@ -49,6 +49,11 @@ impl DockLayoutState {
     fn set_active_plugin(&mut self, plugin_id: impl Into<String>) {
         self.active_plugin = Some(plugin_id.into());
     }
+
+    pub fn focus_plugin(&mut self, plugin_id: &str) {
+        self.set_popped(plugin_id, false);
+        self.set_active_plugin(plugin_id);
+    }
 }
 
 pub fn show_plugin_activity_bar(
@@ -431,5 +436,16 @@ mod tests {
 
         dock.toggle_plugin_paused("chart");
         assert!(!dock.is_plugin_paused("chart"));
+    }
+
+    #[test]
+    fn focusing_plugin_for_variable_tree_pops_it_back_in() {
+        let mut dock = DockLayoutState::default();
+        dock.set_popped("table", true);
+
+        dock.focus_plugin("table");
+
+        assert_eq!(dock.active_plugin_id(), Some("table"));
+        assert!(!dock.is_popped("table"));
     }
 }
