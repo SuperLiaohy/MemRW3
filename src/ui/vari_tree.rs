@@ -100,7 +100,7 @@ fn build_node_recursive(
     highlight_ids: Option<&HashSet<usize>>,
     highlight_bg: egui::Color32,
 ) {
-    let label: egui::WidgetText = if highlight_ids.map_or(false, |h| h.contains(&node.id)) {
+    let label: egui::WidgetText = if highlight_ids.is_some_and(|h| h.contains(&node.id)) {
         egui::RichText::new(&node.name)
             .background_color(highlight_bg)
             .into()

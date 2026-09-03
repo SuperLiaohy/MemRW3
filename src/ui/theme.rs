@@ -94,26 +94,6 @@ pub fn set_dark_mode(ctx: &egui::Context, dark_mode: bool) {
     ctx.set_global_style(style);
 }
 
-#[cfg(test)]
-mod tests {
-    use eframe::egui;
-
-    use super::set_dark_mode;
-
-    #[test]
-    fn switches_the_complete_global_visual_theme() {
-        let context = egui::Context::default();
-
-        set_dark_mode(&context, false);
-        assert!(!context.global_style().visuals.dark_mode);
-        let light_background = context.global_style().visuals.panel_fill;
-
-        set_dark_mode(&context, true);
-        assert!(context.global_style().visuals.dark_mode);
-        assert_ne!(context.global_style().visuals.panel_fill, light_background);
-    }
-}
-
 pub fn palette(ui: &Ui) -> Palette {
     if ui.visuals().dark_mode {
         dark_palette()
@@ -181,5 +161,25 @@ fn light_palette() -> Palette {
         danger: Color32::from_rgb(190, 67, 67),
         modal_overlay: Color32::from_black_alpha(96),
         tooltip_bg: Color32::from_rgba_premultiplied(255, 255, 255, 236),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui;
+
+    use super::set_dark_mode;
+
+    #[test]
+    fn switches_the_complete_global_visual_theme() {
+        let context = egui::Context::default();
+
+        set_dark_mode(&context, false);
+        assert!(!context.global_style().visuals.dark_mode);
+        let light_background = context.global_style().visuals.panel_fill;
+
+        set_dark_mode(&context, true);
+        assert!(context.global_style().visuals.dark_mode);
+        assert_ne!(context.global_style().visuals.panel_fill, light_background);
     }
 }

@@ -7,21 +7,11 @@ use crate::ui::plugin::{MemRWPlugin, PluginAction, PluginRenderContext};
 use crate::ui::theme;
 use crate::ui::variable_tree_panel::VariableTreePanel;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DockLayoutState {
     popped: HashMap<String, bool>,
     paused: HashMap<String, bool>,
     active_plugin: Option<String>,
-}
-
-impl Default for DockLayoutState {
-    fn default() -> Self {
-        Self {
-            popped: HashMap::new(),
-            paused: HashMap::new(),
-            active_plugin: None,
-        }
-    }
 }
 
 impl DockLayoutState {

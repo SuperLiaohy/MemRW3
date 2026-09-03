@@ -16,6 +16,8 @@ use std::time::Instant;
 
 const ZOOM_MODE_BUTTON_SIZE: [f32; 2] = [42.0, 22.0];
 const FFT_TOGGLE_BUTTON_SIZE: [f32; 2] = [80.0, 22.0];
+type CursorValue = (String, f64, f64, Color32);
+type CursorOverlay = (f32, f32, Vec<CursorValue>);
 
 #[derive(Clone, PartialEq)]
 pub enum YAxisMode {
@@ -645,10 +647,8 @@ pub fn chart_panel(
                                 state.log_file = Some(p);
                             }
                         }
-                        if state.log_file.is_some() {
-                            if ui.button("清除").clicked() {
-                                state.log_file = None;
-                            }
+                        if state.log_file.is_some() && ui.button("清除").clicked() {
+                            state.log_file = None;
                         }
                     });
                     if let Some(ref p) = state.log_file {
@@ -868,11 +868,9 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         egui::vec2(ui.available_width(), plot_height),
     );
 
-    let td_hovered = ui.ctx().input(|i| {
-        i.pointer
-            .hover_pos()
-            .map_or(false, |p| plot_rect.contains(p))
-    });
+    let td_hovered = ui
+        .ctx()
+        .input(|i| i.pointer.hover_pos().is_some_and(|p| plot_rect.contains(p)));
     let td_scroll = ui.ctx().input(|i| i.smooth_scroll_delta);
 
     if state.td_scroll_mode == FftScrollMode::Both {
@@ -896,7 +894,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         }
     }
 
-    let mut cursor_labels: Option<(f32, f32, Vec<(String, f64, f64, Color32)>)> = None;
+    let mut cursor_labels: Option<CursorOverlay> = None;
     let cursor_line = theme::palette(ui).border_strong.linear_multiply(0.8);
 
     Plot::new("chart_plot")
@@ -1109,7 +1107,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             .changed()
         {
             if let Ok(v) = sc_str.parse::<usize>() {
-                state.fft_sample_count = v.max(4).min(65536);
+                state.fft_sample_count = v.clamp(4, 65536);
                 state.fft_plot_bounds = None;
             }
         }
@@ -1129,11 +1127,9 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
     let plot_rect =
         egui::Rect::from_min_size(plot_pos, egui::vec2(ui.available_width(), plot_height));
 
-    let hovered = ui.ctx().input(|i| {
-        i.pointer
-            .hover_pos()
-            .map_or(false, |p| plot_rect.contains(p))
-    });
+    let hovered = ui
+        .ctx()
+        .input(|i| i.pointer.hover_pos().is_some_and(|p| plot_rect.contains(p)));
     let scroll_delta = ui.ctx().input(|i| i.smooth_scroll_delta);
 
     if state.fft_scroll_mode == FftScrollMode::Both {
@@ -1157,7 +1153,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         }
     }
 
-    let mut cursor_labels: Option<(f32, f32, Vec<(String, f64, f64, Color32)>)> = None;
+    let mut cursor_labels: Option<CursorOverlay> = None;
     let cursor_line = theme::palette(ui).border_strong.linear_multiply(0.8);
 
     Plot::new("fft_plot")

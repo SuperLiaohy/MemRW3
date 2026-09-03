@@ -192,8 +192,8 @@ impl DwarfState {
                         self.search_results.insert(var.id);
                     }
                 } else if node_name_eq(&var.name, &expanded[0]) {
-                    let mut path = vec![var.id];
-                    let results = self.search_level(var, &expanded, 1, &mut path);
+                    let path = vec![var.id];
+                    let results = self.search_level(var, &expanded, 1, &path);
                     for full_path in results {
                         for &id in &full_path {
                             self.search_path_nodes.insert(id);
@@ -237,10 +237,7 @@ impl DwarfState {
         }
         let mut cur = node_id;
         let mut idx_iter = indices.iter().rev();
-        loop {
-            let Some(parent_id) = self.find_node_by_id(cur).and_then(|n| n.parent_id) else {
-                break;
-            };
+        while let Some(parent_id) = self.find_node_by_id(cur).and_then(|n| n.parent_id) {
             let Some(parent) = self.find_node_by_id(parent_id) else {
                 break;
             };
@@ -299,7 +296,7 @@ impl DwarfState {
         node: &TreeNode,
         levels: &[String],
         level_idx: usize,
-        path: &mut Vec<usize>,
+        path: &[usize],
     ) -> Vec<Vec<usize>> {
         let is_last = level_idx == levels.len() - 1;
         let target = &levels[level_idx];
@@ -310,12 +307,12 @@ impl DwarfState {
             if let BasicType::ArrayElem(_, count) = node.basic_type {
                 if idx < count {
                     if let Some(elem) = node.children.iter().find(|c| c.name.starts_with('[')) {
-                        let mut full_path = path.clone();
+                        let mut full_path = path.to_vec();
                         full_path.push(elem.id);
                         if is_last {
                             return vec![full_path];
                         } else {
-                            return self.search_level(elem, levels, level_idx + 1, &mut full_path);
+                            return self.search_level(elem, levels, level_idx + 1, &full_path);
                         }
                     }
                 }
@@ -333,14 +330,14 @@ impl DwarfState {
 
             if matches {
                 if is_last {
-                    let mut full_path = path.clone();
+                    let mut full_path = path.to_vec();
                     full_path.push(child.id);
                     results.push(full_path);
                 } else {
-                    let mut child_path = path.clone();
+                    let mut child_path = path.to_vec();
                     child_path.push(child.id);
                     let child_results =
-                        self.search_level(child, levels, level_idx + 1, &mut child_path);
+                        self.search_level(child, levels, level_idx + 1, &child_path);
                     results.extend(child_results);
                 }
             }

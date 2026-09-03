@@ -8,7 +8,7 @@ use object::{Object, ObjectSection};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 
-pub fn load_elf(path: &String) -> Result<Vec<CuInfo>, String> {
+pub fn load_elf(path: &str) -> Result<Vec<CuInfo>, String> {
     if path.is_empty() {
         return Err("请输入 ELF 文件路径".into());
     }
@@ -39,9 +39,7 @@ pub fn load_elf(path: &String) -> Result<Vec<CuInfo>, String> {
     };
     match collect_cus(&dwarf) {
         Ok(c) => Ok(c),
-        Err(e) => {
-            return Err(format!("解析 DWARF 数据失败: {e}"));
-        }
+        Err(e) => Err(format!("解析 DWARF 数据失败: {e}")),
     }
 }
 
@@ -253,7 +251,7 @@ fn find_unit_for_debug_info_ref<'a>(
             UnitSectionOffset::DebugInfoOffset(di) => di.0,
             UnitSectionOffset::DebugTypesOffset(dt) => dt.0,
         };
-        if target >= hdr_start && target < hdr_start + header.length_including_self() as usize {
+        if target >= hdr_start && target < hdr_start + header.length_including_self() {
             let unit = dwarf.unit(header)?;
             // UnitOffset is relative to the CU header start, not entries_buf.
             // gimli internally subtracts header_size() when accessing entries_buf.
@@ -316,7 +314,7 @@ fn build_variable_node(
         type_ref.kind,
         TypeKind::Struct | TypeKind::Union | TypeKind::Class
     ) {
-        let fields = struct_fields(dwarf, type_ref, &type_defs)?;
+        let fields = struct_fields(dwarf, type_ref, type_defs)?;
         let mut root_visited = BTreeSet::new();
         let key = (type_ref.unit_header_offset, type_ref.unit_offset);
         root_visited.insert(key);
@@ -327,7 +325,7 @@ fn build_variable_node(
                 &field,
                 address,
                 &root_visited,
-                &type_defs,
+                type_defs,
                 next_id,
             )?);
         }
@@ -488,14 +486,14 @@ fn resolve_type_impl(
                     return resolve_type_impl(dwarf, unit, next, uho, effective_name, type_defs);
                 }
             }
-            return Ok(TypeRef {
+            Ok(TypeRef {
                 name: effective_name.or_else(|| Some("<unnamed-typedef>".to_string())),
                 size: None,
                 kind: TypeKind::Other,
                 unit_offset: offset,
                 unit_header_offset,
                 element_type: None,
-            });
+            })
         }
 
         // Pointer type: "element_type *"

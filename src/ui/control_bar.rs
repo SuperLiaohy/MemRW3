@@ -115,7 +115,7 @@ fn settings_dialog(ctx: &egui::Context, app: &mut MemRW3App) {
                     .cached_probe_list
                     .as_ref()
                     .and_then(|list| list.first().cloned())
-                    .unwrap_or_else(|| "".to_string())
+                    .unwrap_or_default()
             }
         }
     };
@@ -389,43 +389,6 @@ fn control_bar_appearance(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use eframe::egui;
-
-    use crate::ui::theme;
-
-    use super::{acquisition_status, control_bar_appearance};
-
-    #[test]
-    fn control_bar_uses_distinct_disconnected_paused_and_running_styles() {
-        egui::__run_test_ui(|ui| {
-            let colors = theme::palette(ui);
-            let disconnected = control_bar_appearance(colors, false, false);
-            let paused = control_bar_appearance(colors, true, false);
-            let running = control_bar_appearance(colors, true, true);
-
-            assert_ne!(disconnected, paused);
-            assert_ne!(paused, running);
-            assert_eq!(running.1.color, colors.success);
-            assert_eq!(paused.1.color, colors.warning);
-            assert_eq!(disconnected.1.width, paused.1.width);
-            assert_eq!(paused.1.width, running.1.width);
-        });
-    }
-
-    #[test]
-    fn acquisition_status_keeps_the_same_height_when_state_changes() {
-        egui::__run_test_ui(|ui| {
-            let colors = theme::palette(ui);
-            let running = acquisition_status(ui, true, colors);
-            let paused = acquisition_status(ui, false, colors);
-
-            assert_eq!(running.rect.height(), paused.rect.height());
-        });
-    }
-}
-
 fn delay_slider(ui: &mut Ui, app: &mut MemRW3App) {
     ui.add_enabled_ui(!app.session.is_running(), |ui| {
         ui.label(RichText::new("延迟:").size(12.0));
@@ -537,4 +500,41 @@ fn acquisition_status(ui: &mut Ui, running: bool, colors: theme::Palette) -> egu
         ui.label(RichText::new(text).size(13.0).color(color));
     })
     .response
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui;
+
+    use crate::ui::theme;
+
+    use super::{acquisition_status, control_bar_appearance};
+
+    #[test]
+    fn control_bar_uses_distinct_disconnected_paused_and_running_styles() {
+        egui::__run_test_ui(|ui| {
+            let colors = theme::palette(ui);
+            let disconnected = control_bar_appearance(colors, false, false);
+            let paused = control_bar_appearance(colors, true, false);
+            let running = control_bar_appearance(colors, true, true);
+
+            assert_ne!(disconnected, paused);
+            assert_ne!(paused, running);
+            assert_eq!(running.1.color, colors.success);
+            assert_eq!(paused.1.color, colors.warning);
+            assert_eq!(disconnected.1.width, paused.1.width);
+            assert_eq!(paused.1.width, running.1.width);
+        });
+    }
+
+    #[test]
+    fn acquisition_status_keeps_the_same_height_when_state_changes() {
+        egui::__run_test_ui(|ui| {
+            let colors = theme::palette(ui);
+            let running = acquisition_status(ui, true, colors);
+            let paused = acquisition_status(ui, false, colors);
+
+            assert_eq!(running.rect.height(), paused.rect.height());
+        });
+    }
 }

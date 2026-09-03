@@ -105,7 +105,7 @@ impl ProbeSession {
                     "{},SN:{}",
                     p.identifier,
                     p.serial_number.as_deref().unwrap_or("N/A")
-                ) == target_id.to_string()
+                ) == *target_id
             }) {
                 Some(probe) => Some(probe),
                 None => {
