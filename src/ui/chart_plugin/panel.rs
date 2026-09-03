@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::time::Instant;
 
+const ZOOM_MODE_BUTTON_SIZE: [f32; 2] = [42.0, 22.0];
+
 #[derive(Clone, PartialEq)]
 pub enum YAxisMode {
     Auto,
@@ -538,13 +540,7 @@ pub fn chart_panel(
                 ui.separator();
                 ui.label("缩放:");
                 for &mode in &[FftScrollMode::X, FftScrollMode::Y, FftScrollMode::Both] {
-                    if ui
-                        .selectable_label(
-                            state.td_scroll_mode == mode,
-                            RichText::new(mode.label()).size(12.0),
-                        )
-                        .clicked()
-                    {
+                    if zoom_mode_button(ui, state.td_scroll_mode == mode, mode).clicked() {
                         state.td_scroll_mode = mode;
                         state.td_plot_bounds = None;
                     }
@@ -1127,13 +1123,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         ui.separator();
         ui.label("缩放:");
         for &mode in &[FftScrollMode::X, FftScrollMode::Y, FftScrollMode::Both] {
-            if ui
-                .selectable_label(
-                    state.fft_scroll_mode == mode,
-                    RichText::new(mode.label()).size(12.0),
-                )
-                .clicked()
-            {
+            if zoom_mode_button(ui, state.fft_scroll_mode == mode, mode).clicked() {
                 state.fft_scroll_mode = mode;
             }
         }
@@ -1267,6 +1257,16 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             ty += gh + 1.0;
         }
     }
+}
+
+fn zoom_mode_button(ui: &mut Ui, selected: bool, mode: FftScrollMode) -> egui::Response {
+    ui.add_sized(
+        ZOOM_MODE_BUTTON_SIZE,
+        egui::Button::new(RichText::new(mode.label()).size(12.0))
+            .selected(selected)
+            .frame(true)
+            .frame_when_inactive(true),
+    )
 }
 
 fn compute_scroll_zoom(
@@ -1598,7 +1598,8 @@ mod tests {
     use crate::ui::plugin::MemRWPlugin;
 
     use super::{
-        ChartLegend, ChartPluginState, update_chart_data, visible_history_bounds, write_log_frame,
+        ChartLegend, ChartPluginState, FftScrollMode, ZOOM_MODE_BUTTON_SIZE, update_chart_data,
+        visible_history_bounds, write_log_frame, zoom_mode_button,
     };
 
     fn add_u8(pool: &mut VariablePool, name: &str, address: u64) -> usize {
@@ -1683,5 +1684,19 @@ mod tests {
         assert!(state.legends[0].data_history.is_empty());
         assert!(!state.was_running);
         assert!(state.auto_scroll);
+    }
+
+    #[test]
+    fn zoom_buttons_keep_the_same_allocated_size_in_every_state() {
+        egui::__run_test_ui(|ui| {
+            let inactive = zoom_mode_button(ui, false, FftScrollMode::X);
+            let active = zoom_mode_button(ui, true, FftScrollMode::Both);
+
+            assert_eq!(inactive.rect.size(), active.rect.size());
+            assert_eq!(
+                inactive.rect.size(),
+                egui::Vec2::from(ZOOM_MODE_BUTTON_SIZE)
+            );
+        });
     }
 }
