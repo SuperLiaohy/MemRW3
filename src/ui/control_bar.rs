@@ -54,18 +54,21 @@ pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
 }
 
 fn theme_button(ui: &mut Ui) {
-    let dark_mode = ui.visuals().dark_mode;
-    let label = if dark_mode {
-        "☀ 浅色"
-    } else {
-        "🌙 深色"
+    let preference = ui.ctx().options(|options| options.theme_preference);
+    let label = match preference {
+        egui::ThemePreference::Dark => "🌙 深色",
+        egui::ThemePreference::Light => "☀ 浅色",
+        egui::ThemePreference::System => "💻 系统",
     };
     if ui
-        .button(RichText::new(label).size(12.0))
-        .on_hover_text("切换深色/浅色主题")
+        .add_sized(
+            [76.0, 22.0],
+            egui::Button::new(RichText::new(label).size(12.0)),
+        )
+        .on_hover_text("切换深色、浅色或跟随系统主题")
         .clicked()
     {
-        theme::set_dark_mode(ui.ctx(), !dark_mode);
+        theme::set_theme_preference(ui.ctx(), theme::next_theme_preference(preference));
         ui.ctx().request_repaint();
     }
 }

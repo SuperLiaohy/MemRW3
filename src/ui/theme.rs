@@ -23,16 +23,34 @@ pub struct Palette {
 }
 
 pub fn install(ctx: &egui::Context) {
-    set_dark_mode(ctx, true);
+    let dark_style = configured_style(
+        (*ctx.style_of(egui::Theme::Dark)).clone(),
+        dark_palette(),
+        true,
+    );
+    let light_style = configured_style(
+        (*ctx.style_of(egui::Theme::Light)).clone(),
+        light_palette(),
+        false,
+    );
+    ctx.set_style_of(egui::Theme::Dark, dark_style);
+    ctx.set_style_of(egui::Theme::Light, light_style);
+    ctx.set_theme(egui::ThemePreference::Dark);
 }
 
-pub fn set_dark_mode(ctx: &egui::Context, dark_mode: bool) {
-    let palette = if dark_mode {
-        dark_palette()
-    } else {
-        light_palette()
-    };
-    let mut style = (*ctx.global_style()).clone();
+pub fn set_theme_preference(ctx: &egui::Context, preference: egui::ThemePreference) {
+    ctx.set_theme(preference);
+}
+
+pub fn next_theme_preference(preference: egui::ThemePreference) -> egui::ThemePreference {
+    match preference {
+        egui::ThemePreference::Dark => egui::ThemePreference::Light,
+        egui::ThemePreference::Light => egui::ThemePreference::System,
+        egui::ThemePreference::System => egui::ThemePreference::Dark,
+    }
+}
+
+fn configured_style(mut style: egui::Style, palette: Palette, dark_mode: bool) -> egui::Style {
     let visuals = &mut style.visuals;
 
     visuals.dark_mode = dark_mode;
@@ -91,7 +109,7 @@ pub fn set_dark_mode(ctx: &egui::Context, dark_mode: bool) {
     style.spacing.button_padding = egui::vec2(8.0, 3.0);
     style.spacing.window_margin = egui::Margin::same(8);
 
-    ctx.set_global_style(style);
+    style
 }
 
 pub fn palette(ui: &Ui) -> Palette {
@@ -168,18 +186,40 @@ fn light_palette() -> Palette {
 mod tests {
     use eframe::egui;
 
-    use super::set_dark_mode;
+    use super::{install, next_theme_preference, set_theme_preference};
 
     #[test]
     fn switches_the_complete_global_visual_theme() {
         let context = egui::Context::default();
 
-        set_dark_mode(&context, false);
-        assert!(!context.global_style().visuals.dark_mode);
-        let light_background = context.global_style().visuals.panel_fill;
+        install(&context);
+        let dark = context.style_of(egui::Theme::Dark);
+        let light = context.style_of(egui::Theme::Light);
 
-        set_dark_mode(&context, true);
-        assert!(context.global_style().visuals.dark_mode);
-        assert_ne!(context.global_style().visuals.panel_fill, light_background);
+        assert!(dark.visuals.dark_mode);
+        assert!(!light.visuals.dark_mode);
+        assert_ne!(dark.visuals.panel_fill, light.visuals.panel_fill);
+
+        set_theme_preference(&context, egui::ThemePreference::System);
+        assert_eq!(
+            context.options(|options| options.theme_preference),
+            egui::ThemePreference::System
+        );
+    }
+
+    #[test]
+    fn theme_preference_cycles_through_all_three_modes() {
+        assert_eq!(
+            next_theme_preference(egui::ThemePreference::Dark),
+            egui::ThemePreference::Light
+        );
+        assert_eq!(
+            next_theme_preference(egui::ThemePreference::Light),
+            egui::ThemePreference::System
+        );
+        assert_eq!(
+            next_theme_preference(egui::ThemePreference::System),
+            egui::ThemePreference::Dark
+        );
     }
 }
