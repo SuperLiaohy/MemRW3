@@ -79,7 +79,7 @@ fn show_tree(ui: &mut Ui, app: &mut DwarfState) {
 
     for action in actions {
         if let Action::SetSelected(ids) = action {
-            app.selected_node = ids.first().and_then(|id| app.find_node_by_id(*id));
+            app.selected_node = ids.first().copied();
         }
     }
 }

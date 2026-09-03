@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use eframe::egui::{self, RichText, Ui};
 
 use crate::model::VariablePool;
-use crate::ui::plugin::{FrameData, MemRWPlugin, PluginAction, PluginRenderContext};
+use crate::ui::plugin::{MemRWPlugin, PluginAction, PluginRenderContext};
 use crate::ui::theme;
 use crate::ui::variable_tree_panel::VariableTreePanel;
 
@@ -57,7 +57,6 @@ pub fn show_active_plugin_content(
     dock: &mut DockLayoutState,
     plugins: &mut [Box<dyn MemRWPlugin>],
     pool: &mut VariablePool,
-    frame_data: &FrameData,
     running: bool,
     interaction_enabled: bool,
     variable_tree: &mut VariableTreePanel,
@@ -87,7 +86,6 @@ pub fn show_active_plugin_content(
         dock,
         plugin,
         pool,
-        frame_data,
         running,
         interaction_enabled,
         variable_tree,
@@ -101,7 +99,6 @@ pub fn show_plugin_popouts(
     dock: &mut DockLayoutState,
     plugins: &mut [Box<dyn MemRWPlugin>],
     pool: &mut VariablePool,
-    frame_data: &FrameData,
     running: bool,
     interaction_enabled: bool,
     variable_tree: &mut VariableTreePanel,
@@ -112,7 +109,6 @@ pub fn show_plugin_popouts(
         dock,
         plugins,
         pool,
-        frame_data,
         running,
         interaction_enabled,
         variable_tree,
@@ -253,7 +249,6 @@ fn show_plugin_docked(
     dock: &mut DockLayoutState,
     plugin: &mut dyn MemRWPlugin,
     pool: &mut VariablePool,
-    frame_data: &FrameData,
     running: bool,
     interaction_enabled: bool,
     variable_tree: &mut VariableTreePanel,
@@ -272,7 +267,7 @@ fn show_plugin_docked(
                     dock.set_popped(plugin.id(), true);
                     return;
                 }
-                render_plugin_content(ui, plugin, pool, frame_data, running, actions);
+                render_plugin_content(ui, plugin, pool, running, actions);
             });
             variable_tree.show(ui, plugin, pool, actions);
         });
@@ -283,7 +278,6 @@ fn show_popout_viewports(
     dock: &mut DockLayoutState,
     plugins: &mut [Box<dyn MemRWPlugin>],
     pool: &mut VariablePool,
-    frame_data: &FrameData,
     running: bool,
     interaction_enabled: bool,
     variable_tree: &mut VariableTreePanel,
@@ -320,7 +314,6 @@ fn show_popout_viewports(
                             ui,
                             plugin.as_mut(),
                             pool,
-                            frame_data,
                             running,
                             actions,
                         );
@@ -341,7 +334,6 @@ fn render_plugin_content(
     ui: &mut Ui,
     plugin: &mut dyn MemRWPlugin,
     pool: &VariablePool,
-    frame_data: &FrameData,
     running: bool,
     actions: &mut Vec<PluginAction>,
 ) {
@@ -349,7 +341,6 @@ fn render_plugin_content(
         ui,
         PluginRenderContext {
             pool,
-            frame_data,
             running,
             viewport_id: ui.ctx().viewport_id(),
         },

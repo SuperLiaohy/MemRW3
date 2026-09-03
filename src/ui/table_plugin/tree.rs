@@ -234,6 +234,16 @@ impl TableNode {
         }
     }
 
+    pub fn reset_values(&mut self) {
+        if let Some(leaf) = &mut self.leaf {
+            leaf.current_value.clear();
+            leaf.current_value.push_str("--");
+        }
+        for child in &mut self.children {
+            child.reset_values();
+        }
+    }
+
     pub fn matches_root(&self, candidate: &VariableCandidate) -> bool {
         self.source_name == candidate.name && self.source_address == candidate.address
     }

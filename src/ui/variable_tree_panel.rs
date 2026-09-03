@@ -224,11 +224,14 @@ impl VariableTreePanel {
         pool: &mut VariablePool,
         actions: &mut Vec<PluginAction>,
     ) {
-        let Some(node) = self.dwarf_state.selected_node.clone() else {
+        let Some(node_id) = self.dwarf_state.selected_node else {
             ui.label("选择节点以查看属性");
             return;
         };
-        let node_id = node.id;
+        let Some(node) = self.dwarf_state.find_node_ref(node_id) else {
+            self.dwarf_state.selected_node = None;
+            return;
+        };
         let default_type = dwarf::types::basic_type_to_extend(&node.basic_type);
         let config =
             self.extend_configs
@@ -268,20 +271,26 @@ impl VariableTreePanel {
 
         let added = crate::ui::vari_properties_ui(
             ui,
-            &node,
+            node,
             config,
             plugin.supports_composite_variables(),
             |ui, default_name, current_config| {
-                let candidate = match variable_candidate(&node, current_config) {
-                    Ok(candidate) => candidate,
+                let mut candidate = || variable_candidate(node, current_config);
+                match plugin.add_variable_ui(
+                    ui,
+                    node_id,
+                    default_name,
+                    &mut candidate,
+                    pool,
+                ) {
+                    Ok(added) => added,
                     Err(error) => {
                         ui.label(
                             egui::RichText::new(error).color(crate::ui::theme::danger_text(ui)),
                         );
-                        return false;
+                        false
                     }
-                };
-                plugin.add_variable_ui(ui, node_id, default_name, &candidate, pool)
+                }
             },
         );
         if added {
@@ -296,10 +305,6 @@ impl VariableTreePanel {
                 if let Some(tree_node) = self.dwarf_state.find_node_mut(node_id) {
                     tree_node.name = new_name.clone();
                     tree_node.address = new_address;
-                }
-                if let Some(selected) = self.dwarf_state.selected_node.as_mut() {
-                    selected.name = new_name;
-                    selected.address = new_address;
                 }
             }
         }

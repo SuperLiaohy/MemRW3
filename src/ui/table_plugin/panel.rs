@@ -9,7 +9,8 @@ use super::tree::{CheckState, SavedTableLeaf, SavedTableNode, TableNode};
 use crate::dwarf::types::ExtendType;
 use crate::model::VariablePool;
 use crate::ui::plugin::{
-    MemRWPlugin, PluginAction, PluginRenderContext, ToastLevel, VariableCandidate, temp_text_value,
+    MemRWPlugin, PluginAction, PluginRenderContext, PluginUpdateContext, ToastLevel,
+    VariableCandidate, temp_text_value,
 };
 use crate::ui::theme;
 
@@ -79,11 +80,19 @@ impl MemRWPlugin for TablePluginState {
         true
     }
 
-    fn render(&mut self, ui: &mut Ui, ctx: PluginRenderContext<'_>) -> Vec<PluginAction> {
+    fn update(&mut self, ctx: PluginUpdateContext<'_>) {
         for root in &mut self.roots {
             root.update_values(ctx.pool, ctx.frame_data, format_value_into);
         }
+    }
 
+    fn reset_data(&mut self) {
+        for root in &mut self.roots {
+            root.reset_values();
+        }
+    }
+
+    fn render(&mut self, ui: &mut Ui, ctx: PluginRenderContext<'_>) -> Vec<PluginAction> {
         let mut actions = Vec::new();
         if table_panel(ui, self, ctx.pool) {
             actions.push(PluginAction::OpenVariableTree {
@@ -121,9 +130,9 @@ impl MemRWPlugin for TablePluginState {
         ui: &mut Ui,
         node_id: usize,
         default_name: &str,
-        candidate: &VariableCandidate,
+        candidate: &mut dyn FnMut() -> Result<VariableCandidate, String>,
         pool: &mut VariablePool,
-    ) -> bool {
+    ) -> Result<bool, String> {
         let name_id = ui.make_persistent_id(format!("table_add_name_{node_id}"));
         let name_default_id = ui.make_persistent_id(format!("table_add_name_default_{node_id}"));
         let mut display_name = temp_text_value(ui, name_id, name_default_id, default_name);
@@ -132,35 +141,23 @@ impl MemRWPlugin for TablePluginState {
             ui.label("显示名:");
             ui.text_edit_singleline(&mut display_name);
         });
-        let leaf_count = candidate.readable_leaf_count();
-        let label = if candidate.children.is_empty() {
-            "添加到 Table".to_owned()
-        } else {
-            format!("添加到 Table（{leaf_count} 个可读字段）")
-        };
-        let added = ui
-            .add_enabled(leaf_count > 0, egui::Button::new(label))
-            .clicked();
+        let added = ui.button("添加到 Table").clicked();
 
         ui.data_mut(|data| data.insert_temp(name_id, display_name.clone()));
         if !added {
-            return false;
+            return Ok(false);
         }
-        if self.roots.iter().any(|root| root.matches_root(candidate)) {
-            self.errors
-                .push(format!("{} 已添加到 Table", candidate.name));
-            return false;
+        let candidate = candidate()?;
+        if self.roots.iter().any(|root| root.matches_root(&candidate)) {
+            return Err(format!("{} 已添加到 Table", candidate.name));
         }
 
-        match TableNode::from_candidate(candidate, display_name, pool, &mut self.next_node_id) {
+        match TableNode::from_candidate(&candidate, display_name, pool, &mut self.next_node_id) {
             Ok(root) => {
                 self.roots.push(root);
-                true
+                Ok(true)
             }
-            Err(error) => {
-                self.errors.push(error);
-                false
-            }
+            Err(error) => Err(error),
         }
     }
 

@@ -265,14 +265,7 @@ fn run_control(ui: &mut Ui, app: &mut MemRW3App) {
     };
     if resp.clicked() {
         let new_running = !app.session.is_running();
-        app.session.set_running(new_running);
-        if new_running {
-            if !app.session.timer_was_started {
-                app.session.timer_was_started = true;
-                app.reset_timer();
-            }
-            app.rebuild_slots();
-        }
+        app.set_acquisition_running(new_running);
     }
 }
 

@@ -24,15 +24,6 @@ impl VariableCandidate {
         self.children.is_empty() && self.ext_type != ExtendType::Other
     }
 
-    pub fn readable_leaf_count(&self) -> usize {
-        usize::from(self.is_readable())
-            + self
-                .children
-                .iter()
-                .map(Self::readable_leaf_count)
-                .sum::<usize>()
-    }
-
     pub fn to_config(&self) -> ExtendConfig {
         ExtendConfig {
             name: self.name.clone(),
@@ -85,9 +76,14 @@ pub enum PluginAction {
 
 pub struct PluginRenderContext<'a> {
     pub pool: &'a VariablePool,
-    pub frame_data: &'a FrameData,
     pub running: bool,
     pub viewport_id: egui::ViewportId,
+}
+
+pub struct PluginUpdateContext<'a> {
+    pub pool: &'a VariablePool,
+    pub frame_data: &'a FrameData,
+    pub running: bool,
 }
 
 pub trait MemRWPlugin {
@@ -106,6 +102,10 @@ pub trait MemRWPlugin {
         false
     }
 
+    fn update(&mut self, _ctx: PluginUpdateContext<'_>) {}
+
+    fn reset_data(&mut self) {}
+
     fn render(&mut self, ui: &mut Ui, ctx: PluginRenderContext<'_>) -> Vec<PluginAction>;
 
     fn add_variable_ui(
@@ -113,9 +113,9 @@ pub trait MemRWPlugin {
         ui: &mut Ui,
         node_id: usize,
         default_name: &str,
-        candidate: &VariableCandidate,
+        candidate: &mut dyn FnMut() -> Result<VariableCandidate, String>,
         pool: &mut VariablePool,
-    ) -> bool;
+    ) -> Result<bool, String>;
 
     fn is_dialog_open(&self) -> bool {
         false

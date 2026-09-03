@@ -3,7 +3,8 @@ use super::legend::ChartLegend;
 use crate::dwarf::types::ExtendType;
 use crate::model::VariablePool;
 use crate::ui::plugin::{
-    MemRWPlugin, PluginAction, PluginRenderContext, ToastLevel, VariableCandidate, temp_text_value,
+    MemRWPlugin, PluginAction, PluginRenderContext, PluginUpdateContext, ToastLevel,
+    VariableCandidate, temp_text_value,
 };
 use crate::ui::theme;
 use eframe::egui::{self, Color32, RichText, Ui};
@@ -184,9 +185,31 @@ impl MemRWPlugin for ChartPluginState {
         egui::vec2(360.0, 240.0)
     }
 
+    fn update(&mut self, ctx: PluginUpdateContext<'_>) {
+        update_chart_data(self, ctx.pool, ctx.frame_data, ctx.running);
+    }
+
+    fn reset_data(&mut self) {
+        if self.logging_active {
+            self.log_stopped = true;
+        }
+        for legend in &mut self.legends {
+            legend.data_history.clear();
+            legend.plot_bridge = None;
+        }
+        self.auto_scroll = true;
+        self.td_plot_bounds = None;
+        self.fft_plot_bounds = None;
+        self.acq_hz = 0.0;
+        self.acq_frame_count = 0;
+        self.was_running = false;
+        self.log_writer = None;
+        self.logging_active = false;
+    }
+
     fn render(&mut self, ui: &mut Ui, ctx: PluginRenderContext<'_>) -> Vec<PluginAction> {
         let mut actions = Vec::new();
-        if chart_panel(ui, self, ctx.pool, ctx.frame_data, ctx.running) {
+        if chart_panel(ui, self, ctx.pool, ctx.running) {
             actions.push(PluginAction::OpenVariableTree {
                 plugin_id: self.id().to_owned(),
                 viewport_id: ctx.viewport_id,
@@ -226,9 +249,9 @@ impl MemRWPlugin for ChartPluginState {
         ui: &mut Ui,
         node_id: usize,
         default_name: &str,
-        candidate: &VariableCandidate,
+        candidate: &mut dyn FnMut() -> Result<VariableCandidate, String>,
         pool: &mut VariablePool,
-    ) -> bool {
+    ) -> Result<bool, String> {
         let color_id = ui.make_persistent_id(format!("chart_add_color_{node_id}"));
         let name_id = ui.make_persistent_id(format!("chart_add_name_{node_id}"));
         let name_default_id = ui.make_persistent_id(format!("chart_add_name_default_{node_id}"));
@@ -245,6 +268,7 @@ impl MemRWPlugin for ChartPluginState {
         });
 
         if added {
+            let candidate = candidate()?;
             let variable_id = if let Some(variable) = pool.find_compatible(
                 &candidate.name,
                 candidate.address,
@@ -258,7 +282,7 @@ impl MemRWPlugin for ChartPluginState {
             self.add_legend(variable_id, pool, curve_name, chart_color);
             pool.bind(variable_id, true);
         }
-        added
+        Ok(added)
     }
 
     fn is_dialog_open(&self) -> bool {
@@ -378,52 +402,46 @@ fn color_pick(ui: &mut Ui, current: &mut Color32) {
     });
 }
 
-pub fn chart_panel(
-    ui: &mut Ui,
+fn update_chart_data(
     state: &mut ChartPluginState,
     pool: &VariablePool,
     frame_data: &HashMap<usize, Vec<(f64, [u8; 8])>>,
     running: bool,
-) -> bool {
-    let mut open_tree = false;
-
+) {
     if running {
         if !state.was_running {
             state.acq_frame_count = 0;
             state.acq_last_reset = Instant::now();
             state.was_running = true;
-            if state.log_file.is_some() {
-                match std::fs::File::create(state.log_file.as_ref().unwrap()) {
-                    Ok(f) => {
-                        let mut w = BufWriter::new(f);
-                        let _ = write!(w, "timestamp");
+            if let Some(log_file) = &state.log_file {
+                match std::fs::File::create(log_file) {
+                    Ok(file) => {
+                        let mut writer = BufWriter::new(file);
+                        let _ = write!(writer, "timestamp");
                         for legend in &state.legends {
-                            let _ = write!(w, ",{}", legend.curve_name);
+                            let _ = write!(writer, ",{}", legend.curve_name);
                         }
-                        let _ = writeln!(w);
-                        state.log_writer = Some(w);
+                        let _ = writeln!(writer);
+                        state.log_writer = Some(writer);
                         state.logging_active = true;
                         state.log_started = true;
                     }
-                    Err(_) => {
-                        state.logging_active = false;
-                    }
+                    Err(_) => state.logging_active = false,
                 }
             }
         }
         for legend in &mut state.legends {
             if let Some(data) = frame_data.get(&legend.variable_id) {
-                let var = match pool.get(legend.variable_id) {
-                    Some(v) => v,
-                    None => continue,
+                let Some(variable) = pool.get(legend.variable_id) else {
+                    continue;
                 };
-                let n = data.len() as u64;
+                let sample_count = data.len() as u64;
                 let skip = legend.prepare_batch(data.len());
-                for (t, raw) in data.iter().skip(skip) {
-                    let val = decode_value_f64(raw, &var.ext_type);
-                    legend.push_prepared(*t, val);
+                for (timestamp, raw) in data.iter().skip(skip) {
+                    let value = decode_value_f64(raw, &variable.ext_type);
+                    legend.push_prepared(*timestamp, value);
                 }
-                state.acq_frame_count += n;
+                state.acq_frame_count += sample_count;
             }
         }
         let elapsed = state.acq_last_reset.elapsed().as_secs_f64();
@@ -442,17 +460,26 @@ pub fn chart_panel(
     }
 
     if running && state.logging_active {
-        if let Some(ref mut w) = state.log_writer {
+        if let Some(writer) = &mut state.log_writer {
             write_log_frame(
-                w,
+                writer,
                 &mut state.log_positions,
                 &state.legends,
                 pool,
                 frame_data,
             );
-            let _ = w.flush();
+            let _ = writer.flush();
         }
     }
+}
+
+pub fn chart_panel(
+    ui: &mut Ui,
+    state: &mut ChartPluginState,
+    pool: &VariablePool,
+    running: bool,
+) -> bool {
+    let mut open_tree = false;
 
     ui.vertical(|ui| {
         let dialog_is_open = state.show_line_dialog;
@@ -1564,10 +1591,15 @@ fn x_mode_label(mode: &XAxisMode) -> String {
 mod tests {
     use std::collections::HashMap;
 
+    use eframe::egui;
+
     use crate::dwarf::types::{ExtendConfig, ExtendType};
     use crate::model::VariablePool;
+    use crate::ui::plugin::MemRWPlugin;
 
-    use super::{ChartLegend, visible_history_bounds, write_log_frame};
+    use super::{
+        ChartLegend, ChartPluginState, update_chart_data, visible_history_bounds, write_log_frame,
+    };
 
     fn add_u8(pool: &mut VariablePool, name: &str, address: u64) -> usize {
         pool.add(&ExtendConfig {
@@ -1626,5 +1658,36 @@ mod tests {
             visible_history_bounds(&[visible, hidden]),
             Some((1.0, 3.0, -2.0, 4.0))
         );
+    }
+
+    #[test]
+    fn ingests_samples_without_rendering_the_chart() {
+        let mut pool = VariablePool::default();
+        let variable_id = add_u8(&mut pool, "value", 0x2000_0000);
+        let mut state = ChartPluginState::default();
+        state.add_legend(variable_id, &pool, "value".to_owned(), egui::Color32::WHITE);
+        let mut frame_data = HashMap::new();
+        frame_data.insert(variable_id, vec![(0.0, [1; 8]), (0.1, [2; 8])]);
+
+        update_chart_data(&mut state, &pool, &frame_data, true);
+
+        assert_eq!(state.legends[0].data_history.len(), 2);
+        assert_eq!(state.legends[0].data_history.back().unwrap().y, 2.0);
+    }
+
+    #[test]
+    fn resetting_data_starts_with_an_empty_time_epoch() {
+        let mut pool = VariablePool::default();
+        let variable_id = add_u8(&mut pool, "value", 0x2000_0000);
+        let mut state = ChartPluginState::default();
+        state.add_legend(variable_id, &pool, "value".to_owned(), egui::Color32::WHITE);
+        state.legends[0].push_prepared(10.0, 1.0);
+        state.was_running = true;
+
+        state.reset_data();
+
+        assert!(state.legends[0].data_history.is_empty());
+        assert!(!state.was_running);
+        assert!(state.auto_scroll);
     }
 }

@@ -6,7 +6,7 @@ use crate::ui;
 use crate::ui::chart_plugin::ChartPluginState;
 use crate::ui::dock::DockLayoutState;
 use crate::ui::plugin::{
-    FrameData, MemRWPlugin, PluginAction, SavedPluginConfig, ToastLevel,
+    FrameData, MemRWPlugin, PluginAction, PluginUpdateContext, SavedPluginConfig, ToastLevel,
 };
 use crate::ui::table_plugin::TablePluginState;
 use crate::ui::variable_tree_panel::VariableTreePanel;
@@ -156,6 +156,8 @@ impl MemRW3App {
                 probe.with_mut(ProbeSession::disconnect);
             });
             self.session.connected = false;
+            self.session.timer_was_started = false;
+            self.reset_plugin_data();
             self.session.connect_error = None;
             self.toasts
                 .info("已断开连接")
@@ -243,6 +245,7 @@ impl MemRW3App {
             .to_owned();
         self.session.set_running(false);
         self.session.timer_was_started = false;
+        self.reset_plugin_data();
         for variable in self.session.config.pool.iter() {
             variable.incoming.discard_all();
         }
@@ -309,8 +312,36 @@ impl MemRW3App {
         });
     }
 
+    fn reset_plugin_data(&mut self) {
+        for plugin in &mut self.plugins {
+            plugin.reset_data();
+        }
+    }
+
+    pub fn set_acquisition_running(&mut self, running: bool) {
+        if !running {
+            self.session.set_running(false);
+            return;
+        }
+        if !self.session.connected || self.is_flashing() {
+            return;
+        }
+
+        self.rebuild_slots();
+        if !self.session.timer_was_started {
+            for variable in self.session.config.pool.iter() {
+                variable.incoming.discard_all();
+            }
+            self.reset_plugin_data();
+            self.reset_timer();
+            self.session.timer_was_started = true;
+        }
+        self.session.set_running(true);
+    }
+
     pub fn clear_all_buffers(&mut self) {
-        self.session.timer_was_started = false;
+        self.session.timer_was_started = self.session.is_running();
+        self.reset_plugin_data();
         let pool = &self.session.config.pool;
         let probe = self.probe.clone();
         self.sync.send_request(move || {
@@ -517,6 +548,13 @@ impl eframe::App for MemRW3App {
                 var.incoming.drain_into(samples);
             }
         }
+        for plugin in &mut self.plugins {
+            plugin.update(PluginUpdateContext {
+                pool: &self.session.config.pool,
+                frame_data: &frame_data,
+                running,
+            });
+        }
 
         let bs_open = self.variable_tree.is_open_in(ui.ctx().viewport_id());
         let dialog_open = self.plugins.iter().any(|plugin| plugin.is_dialog_open());
@@ -568,7 +606,6 @@ impl eframe::App for MemRW3App {
                             &mut self.dock,
                             &mut self.plugins,
                             pool,
-                            &frame_data,
                             running,
                             interaction_enabled,
                             &mut self.variable_tree,
@@ -583,7 +620,6 @@ impl eframe::App for MemRW3App {
                     &mut self.dock,
                     &mut self.plugins,
                     pool,
-                    &frame_data,
                     running,
                     interaction_enabled,
                     &mut self.variable_tree,

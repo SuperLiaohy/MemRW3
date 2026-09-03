@@ -117,7 +117,8 @@ pub struct ExtendConfig {
 - 存储在 `VariableTreePanel.extend_configs: HashMap<usize, ExtendConfig>`，按 node_id 索引
 - `vari_properties_ui()` 通过 `&mut ExtendConfig` 读写
 - 首次选择节点时惰性初始化
-- 数组元素时 index 从 `selected_node.name` 解析同步（含搜索后更新）
+- `DwarfState.selected_node` 仅保存 node id；属性面板借用节点，避免每帧深克隆子树
+- 数组元素时 index 从所选节点名称解析同步（含搜索后更新）
 - "添加到 Chart/Table" 时，ExtendConfig 被消耗并存入 `VariablePool.add(config)`
 
 ### PooledVariable (池中仅存 extend 数据)
@@ -156,7 +157,9 @@ pub trait MemRWPlugin {
     fn id(&self) -> &'static str;
     fn title(&self) -> &'static str;
     fn render(&mut self, ui: &mut Ui, ctx: PluginRenderContext<'_>) -> Vec<PluginAction>;
-    fn add_variable_ui(&mut self, ui: &mut Ui, node_id: usize, default_name: &str, candidate: &VariableCandidate, pool: &mut VariablePool) -> bool;
+    fn update(&mut self, ctx: PluginUpdateContext<'_>);
+    fn reset_data(&mut self);
+    fn add_variable_ui(&mut self, ui: &mut Ui, node_id: usize, default_name: &str, candidate: &mut dyn FnMut() -> Result<VariableCandidate, String>, pool: &mut VariablePool) -> Result<bool, String>;
     fn save_config(&self, pool: &VariablePool) -> serde_json::Value;
     fn load_config(&mut self, payload: &serde_json::Value, pool: &mut VariablePool) -> Result<(), String>;
 }
@@ -277,7 +280,7 @@ BottomSheet (viewport 内模态覆盖层, 只阻止当前窗口交互)
         ├─ extend_name 和 extend_address 由 DwarfState 从 DWARF 树计算得到
         ├─ 用户可在 Extend 段编辑 address/type (size 自动绑定)
         ├─ 编辑结果存入 ExtendConfig (VariableTreePanel 内部 HashMap)
-        ├─ App 构建 `VariableCandidate`；数组根据单一 DWARF 原型完整展开
+        ├─ 插件按钮真正点击后才构建 `VariableCandidate`，避免每帧物化大数组
         ├─ 根据 active plugin id 查找 `Box<dyn MemRWPlugin>`
         └─ 调用 `plugin.add_variable_ui(...)`
             ├─ Chart: 曲线名 + 颜色 → 存入 ChartLegend (颜色persist via egui memory)
@@ -347,7 +350,9 @@ UI 线程 (每帧开始):
     var.incoming.drain_into(&mut frame_data[var.id])
     // FrameData HashMap 和各 Vec 跨帧复用容量
 
-  plugin.render(&frame_data): ← 从 frame_data 读, 不再调用 drain
+  for plugin in all_plugins:
+    plugin.update(&frame_data) ← 所有插件每帧摄取一次，不依赖当前可见/Pop out 状态
+  active/popped plugin.render() ← 只负责 UI
 ```
 
 **插件删除 → 解绑**:
@@ -449,9 +454,10 @@ pub struct RingBuffer<T> {
 
 | 操作 | timer_was_started | 计时行为 |
 |------|-------------------|---------|
-| "清空" | → `false` | 下次"开始"归零 |
+| "清空" | running 时保持 `true`，暂停时 `false` | 立即清历史并归零；运行中从新纪元继续 |
 | 首次"开始" | `false` → `true` | `reset_timer()` 归零 |
 | 暂停→继续 | `true` | 累积计时 |
+| 烧录/断开后 | → `false` | 清空插件历史；下次启动先重建 slots、归零，再置 running |
 | 连接/断开 | 不变 | 不影响 |
 
 ### 5. VariablePool 数据结构
@@ -700,12 +706,12 @@ svd-parser = "0.14.10"    # CMSIS-SVD 解析与数组/继承展开
     - **两阶段采集**: Phase1 read32 到跨轮复用的 `slot_values: Vec<[u8; 4]>` → Phase2 按索引和 byte_offset 组装变量值
     - `RingBuffer`: 基于 `crossbeam_queue::ArrayQueue` 的有界 lock-free 环形队列，容量 2560，满载时丢弃最旧样本
     - `delay_us: Arc<AtomicU64>`: 默认 0 (全速), 采集线程 sleep 节流, 主线程独立 vsync 刷新
-    - **FrameData 预 drain**: UI 每帧用 `drain_into` 消费到跨帧复用的 HashMap/Vec，plugin render 只读 — 稳态不再为每变量分配 batch Vec
+    - **FrameData 预 drain**: UI 每帧用 `drain_into` 消费到跨帧复用的 HashMap/Vec，再向所有插件调用 `update`；隐藏 Chart 也持续记录
     - **Plot/FFT**: 时域 Plot 直接借用 VecDeque 切片；FFT 直接遍历历史并输出 `Vec<PlotPoint>` 供绘图借用，应用层不再复制整段点集
     - **PluginAction**: 插件返回带 viewport 的 OpenVariableTree、RemoveVariable、SetVariableEnabled、WriteVariable 等意图
     - **绑定/读取分离**: `plugins_cnt` 管生命周期，`active_readers` 管是否生成采集 slots；Table 父节点批量操作后只 rebuild 一次
     - **Hz**: `acq_cycle_count: Arc<AtomicU64>` 采集线程每轮 +1, 主线程每秒计算采集轮询频率
-    - **计时**: `timer_was_started` 追踪, 首次"开始"和清空后第一次"开始"归零, 暂停再继续累积
+    - **计时**: 首次/清空/烧录后的启动先重建、清历史和归零，最后置 running；暂停继续则保持时间轴
 
 12. **Tree View 默认折叠, 搜索居中滚动**: 使用 `NodeBuilder::default_open(false)` 初始化所有树节点为折叠状态; 搜索后通过 `count_nodes_before()` (基于 `tree_state` 展开状态) 计算可见节点数, 使用 `viewport_h` 居中偏移公式 `ScrollArea::vertical_scroll_offset()` 居中显示。点击节点仅选中不滚动。
 

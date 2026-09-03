@@ -134,7 +134,7 @@ pub type VisitedKey = (UnitSectionOffset, UnitOffset);
 
 pub struct DwarfState {
     pub cus: Vec<CuInfo>,
-    pub selected_node: Option<TreeNode>,
+    pub selected_node: Option<usize>,
     pub tree_state: RefCell<TreeViewState<usize>>,
     pub search_text: String,
     pub search_mode: bool,
@@ -221,7 +221,7 @@ impl DwarfState {
         if let Some(&first_id) = self.search_results.iter().next() {
             let all: Vec<usize> = self.search_results.iter().copied().collect();
             self.tree_state.borrow_mut().set_selected(all);
-            self.selected_node = self.find_any_node_by_id(first_id);
+            self.selected_node = Some(first_id);
             self.scroll_target_id = Some(first_id);
         }
     }
@@ -253,40 +253,11 @@ impl DwarfState {
                             tn.name = format!("[{}]", idx);
                             tn.address = elem_size * idx;
                         }
-                        if let Some(ref mut sel) = self.selected_node {
-                            if sel.id == cur {
-                                sel.name = format!("[{}]", idx);
-                                sel.address = elem_size * idx;
-                            }
-                        }
                     }
                 }
             }
             cur = parent_id;
         }
-    }
-
-    fn find_any_node_by_id(&self, id: usize) -> Option<TreeNode> {
-        for cu in &self.cus {
-            for var in &cu.variables {
-                if let Some(node) = self.find_in_subtree(var, id) {
-                    return Some(node);
-                }
-            }
-        }
-        None
-    }
-
-    fn find_in_subtree(&self, node: &TreeNode, id: usize) -> Option<TreeNode> {
-        if node.id == id {
-            return Some(node.clone());
-        }
-        for child in &node.children {
-            if let Some(found) = self.find_in_subtree(child, id) {
-                return Some(found);
-            }
-        }
-        None
     }
 
     pub fn find_node_mut(&mut self, id: usize) -> Option<&mut TreeNode> {
@@ -430,14 +401,27 @@ impl DwarfState {
     }
 
     pub fn find_node_by_id(&self, id: usize) -> Option<TreeNode> {
+        self.find_node_ref(id).cloned()
+    }
+
+    pub fn find_node_ref(&self, id: usize) -> Option<&TreeNode> {
         for cu in &self.cus {
             for var in &cu.variables {
-                if let Some(node) = self.find_in_subtree(var, id) {
+                if let Some(node) = Self::find_in_subtree_ref(var, id) {
                     return Some(node);
                 }
             }
         }
         None
+    }
+
+    fn find_in_subtree_ref(node: &TreeNode, id: usize) -> Option<&TreeNode> {
+        if node.id == id {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| Self::find_in_subtree_ref(child, id))
     }
 
     pub fn compute_extend_name(&self, node_id: usize) -> String {
