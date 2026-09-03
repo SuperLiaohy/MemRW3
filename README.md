@@ -19,6 +19,7 @@
 - **统一主题**: App 背景、Activity Bar、控制栏、Dock、BottomSheet、状态提示和 Dialog 使用统一 palette，并可在 Control Bar 一键切换深色/浅色
 - **采集状态提示**: Control Bar 的底色、描边和开始/暂停按钮随未连接、已暂停、采集中状态联动
 - **断开数据保留**: 断开 Probe 只停止采集并释放连接，Chart、Table 与 SVD 保留最后一次显示值
+- **物理断链检测**: 采集、空槽及暂停状态都会检测 Probe/Core 链路；连续失败后自动断开并显示 Toast
 - **配置保存/加载**: JSON 格式保存 Probe 配置、变量池、插件 payload、ELF 路径；Chart/Table 各自保存图例和表格条目
 - **多探针支持**: CMSIS-DAP / ST-Link / J-Link，SWD / JTAG 协议，可调速度 100-20000 kHz
 - **跨平台**: Linux / macOS / Windows

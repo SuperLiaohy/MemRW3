@@ -270,19 +270,20 @@ impl ProbeSession {
     /// Two-phase acquisition:
     /// 1. Read all 32-bit slots into the reusable `slot_values` array
     /// 2. Assemble per-variable values from slots → push to the ring buffer
-    pub fn acquire_from_slots(&mut self) {
+    pub fn acquire_from_slots(&mut self) -> Result<(), String> {
         if !self.connected || self.slots.is_empty() {
-            return;
+            return Ok(());
         }
         let ts = self.timer.elapsed().as_secs_f64();
         let Some(session) = self.session.as_mut() else {
-            return;
+            return Err("Probe 会话不可用，请重新连接".to_owned());
         };
         let mut core = match session.core(0) {
             Ok(core) => core,
             Err(error) => {
-                self.last_error = Some(format!("获取核心失败: {error}"));
-                return;
+                let message = format!("获取核心失败: {error}");
+                self.last_error = Some(message.clone());
+                return Err(message);
             }
         };
 
@@ -293,8 +294,9 @@ impl ProbeSession {
                     self.slot_values[index] = v.to_le_bytes();
                 }
                 Err(e) => {
-                    self.last_error = Some(format!("读取 {:#010x} 失败: {e}", slot.address));
-                    return;
+                    let message = format!("读取 {:#010x} 失败: {e}", slot.address);
+                    self.last_error = Some(message.clone());
+                    return Err(message);
                 }
             }
         }
@@ -321,6 +323,24 @@ impl ProbeSession {
             }
             mapping.incoming.push((ts, val));
         }
+        Ok(())
+    }
+
+    /// Perform a read-only core status request to verify that the physical link is alive.
+    pub fn check_link(&mut self) -> Result<(), String> {
+        if !self.connected {
+            return Err("Probe 未连接".to_owned());
+        }
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| "Probe 会话不可用，请重新连接".to_owned())?;
+        let mut core = session
+            .core(0)
+            .map_err(|error| format!("获取核心失败: {error}"))?;
+        core.status()
+            .map(|_| ())
+            .map_err(|error| format!("Probe 链路检测失败: {error}"))
     }
 
     pub fn write_value(&mut self, addr: u64, size: u32, value: u64) -> bool {

@@ -32,6 +32,7 @@ pub struct MemRW3App {
     frame_data: FrameData,
     register_data: RegisterData,
     register_sequence: u64,
+    link_event_receiver: std::sync::mpsc::Receiver<String>,
     flash_task: Option<FlashTask>,
     rebuild_after_flash: bool,
     _acq_handle: Option<JoinHandle<()>>,
@@ -50,44 +51,93 @@ fn acq_thread(
     cycle_count: Arc<AtomicU64>,
     sync: Arc<Sync>,
     stop: Arc<AtomicBool>,
+    link_event_sender: std::sync::mpsc::SyncSender<String>,
+    repaint_ctx: egui::Context,
 ) {
+    const LINK_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+    let mut link_monitor = LinkHealthMonitor::default();
+    let mut last_link_check = Instant::now();
+
     while !stop.load(Ordering::Relaxed) {
         sync.try_acquire();
 
-        if !running.load(Ordering::Acquire) {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let acquisition_running = running.load(Ordering::Acquire);
+        let health_check_due = last_link_check.elapsed() >= LINK_CHECK_INTERVAL;
+        let (connected, slots_empty, acquired, health_result) = probe.with_mut(|probe_ref| {
+            if !probe_ref.connected {
+                return (false, true, false, None);
+            }
+            let slots_empty = probe_ref.slots.is_empty();
+            let acquisition_result = if acquisition_running && !slots_empty {
+                Some(probe_ref.acquire_from_slots())
+            } else {
+                None
+            };
+            let acquired = matches!(acquisition_result, Some(Ok(())));
+            let acquisition_failed = matches!(acquisition_result, Some(Err(_)));
+            let should_check =
+                health_check_due && (!acquisition_running || slots_empty || acquisition_failed);
+            let health_result = should_check.then(|| probe_ref.check_link());
+            (true, slots_empty, acquired, health_result)
+        });
+        if !connected {
+            link_monitor.reset();
             thread::sleep(Duration::from_millis(50));
             continue;
         }
 
-        while running.load(Ordering::Acquire) {
-            sync.try_acquire();
-
-            if stop.load(Ordering::Relaxed) {
-                return;
-            }
-
-            let (connected, slots_empty) = probe.with_mut(|probe_ref| {
-                if !probe_ref.connected {
-                    return (false, true);
-                }
-                probe_ref.acquire_from_slots();
-                (true, probe_ref.slots.is_empty())
-            });
-            if !connected {
-                break;
-            }
-            cycle_count.fetch_add(1, Ordering::Relaxed);
-
-            if slots_empty {
-                thread::sleep(Duration::from_millis(100));
+        if let Some(health_result) = health_result {
+            last_link_check = Instant::now();
+            if let Some(error) = link_monitor.observe(health_result) {
+                probe.with_mut(ProbeSession::disconnect);
+                running.store(false, Ordering::Release);
+                let _ = link_event_sender.try_send(error);
+                repaint_ctx.request_repaint();
                 continue;
             }
+        }
 
+        if acquired {
+            cycle_count.fetch_add(1, Ordering::Relaxed);
+        }
+        if acquisition_running && !slots_empty && acquired {
             let d = delay_us.load(Ordering::Acquire);
             if d > 0 {
                 thread::sleep(Duration::from_micros(d));
             }
+        } else {
+            thread::sleep(Duration::from_millis(50));
         }
+    }
+}
+
+#[derive(Default)]
+struct LinkHealthMonitor {
+    consecutive_failures: u8,
+}
+
+impl LinkHealthMonitor {
+    const FAILURE_LIMIT: u8 = 3;
+
+    fn observe(&mut self, result: Result<(), String>) -> Option<String> {
+        match result {
+            Ok(()) => {
+                self.reset();
+                None
+            }
+            Err(error) => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                (self.consecutive_failures >= Self::FAILURE_LIMIT).then_some(error)
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.consecutive_failures = 0;
     }
 }
 
@@ -99,7 +149,7 @@ impl MemRW3App {
         ]
     }
 
-    pub fn new(dwarf_state: dwarf::types::DwarfState) -> Self {
+    pub fn new(dwarf_state: dwarf::types::DwarfState, repaint_ctx: egui::Context) -> Self {
         let mut session = AppSession::default();
         let mut chips: Vec<String> = probe_rs::config::Registry::from_builtin_families()
             .families()
@@ -118,6 +168,7 @@ impl MemRW3App {
         let acq_cycles = session.acq_cycle_count.clone();
         let acq_stop_th = session.acq_stop.clone();
         let delay_us = session.config.delay_us.clone();
+        let (link_event_sender, link_event_receiver) = std::sync::mpsc::sync_channel(1);
         let _acq_handle = Some(thread::spawn(move || {
             acq_thread(
                 acq_probe,
@@ -126,6 +177,8 @@ impl MemRW3App {
                 acq_cycles,
                 acq_sync,
                 acq_stop_th,
+                link_event_sender,
+                repaint_ctx,
             );
         }));
 
@@ -140,6 +193,7 @@ impl MemRW3App {
             frame_data: FrameData::default(),
             register_data: RegisterData::default(),
             register_sequence: 0,
+            link_event_receiver,
             flash_task: None,
             rebuild_after_flash: false,
             _acq_handle,
@@ -302,6 +356,22 @@ impl MemRW3App {
         if self.rebuild_after_flash {
             self.rebuild_after_flash = false;
             self.rebuild_slots();
+        }
+    }
+
+    fn poll_link_events(&mut self) {
+        while let Ok(error) = self.link_event_receiver.try_recv() {
+            if !self.session.connected {
+                continue;
+            }
+            self.session.set_running(false);
+            self.session.connected = false;
+            self.session.timer_was_started = false;
+            self.session.connect_error = Some(error.clone());
+            self.toasts
+                .error(format!("Probe 物理链路已断开：{error}"))
+                .duration(Some(Duration::from_secs(8)))
+                .closable(true);
         }
     }
 
@@ -575,6 +645,7 @@ impl Drop for MemRW3App {
 
 impl eframe::App for MemRW3App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.poll_link_events();
         self.poll_flash_task();
         if self.is_flashing() {
             ui.ctx().request_repaint_after(Duration::from_millis(50));
@@ -1035,4 +1106,23 @@ fn find_font(
 #[cfg(not(target_os = "linux"))]
 fn scan_font_directories() -> Option<(String, Arc<egui::FontData>, String)> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LinkHealthMonitor;
+
+    #[test]
+    fn link_monitor_requires_consecutive_failures_and_recovers_after_success() {
+        let mut monitor = LinkHealthMonitor::default();
+        assert!(monitor.observe(Err("first".to_owned())).is_none());
+        assert!(monitor.observe(Err("second".to_owned())).is_none());
+        assert!(monitor.observe(Ok(())).is_none());
+        assert!(monitor.observe(Err("first again".to_owned())).is_none());
+        assert!(monitor.observe(Err("second again".to_owned())).is_none());
+        assert_eq!(
+            monitor.observe(Err("link removed".to_owned())),
+            Some("link removed".to_owned())
+        );
+    }
 }

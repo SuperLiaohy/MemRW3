@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow};
 use crate::app::MemRW3App;
 
 fn main() -> Result<()> {
-    let app = MemRW3App::new(dwarf::types::DwarfState::new(Vec::new()));
+    let dwarf_state = dwarf::types::DwarfState::new(Vec::new());
 
     eframe::run_native(
         "MemRW3 - Memory Read/Write Monitor",
@@ -22,9 +22,9 @@ fn main() -> Result<()> {
                 .with_min_inner_size([800.0, 500.0]),
             ..Default::default()
         },
-        Box::new(|cc| {
+        Box::new(move |cc| {
             app::setup_fonts(&cc.egui_ctx);
-            Ok(Box::new(app))
+            Ok(Box::new(MemRW3App::new(dwarf_state, cc.egui_ctx.clone())))
         }),
     )
     .map_err(|e| anyhow!("{}", e))?;

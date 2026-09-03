@@ -219,7 +219,7 @@ App 仍然是唯一执行硬件读写、变量池解绑、timer reset 和 toast 
 
 ```
 main.rs
-  ├─ MemRW3App::new(DwarfState::new(Vec::new())) → 启动空 DwarfState
+  ├─ MemRW3App::new(DwarfState::new(Vec::new()), egui_ctx) → 启动空 DwarfState
   └─ eframe::run_native() → 启动 UI (无预加载数据)
 
 用户操作:
@@ -335,6 +335,7 @@ BottomSheet (viewport 内模态覆盖层, 只阻止当前窗口交互)
 
 - **正常运行时**: 采集线程全速采集，主线程无锁 drain 数据渲染。两线程无交互。
 - **同步操作时** (连接/断开/复位/写入/更新slots): 主线程通过 `sync.send_request` 暂停采集线程后独占 probe，完成后恢复。烧录由后台任务调用同一握手，在进度 Modal 阻止其他 probe 操作。
+- **链路监控**: 采集失败时以及暂停/空槽状态下每 500 ms 读取一次 Core 状态；连续 3 次失败后采集线程释放 Probe、停止 running，通过单容量事件通道通知主线程并主动请求重绘，主线程同步连接状态并显示 Toast。
 
 #### 数据流 (无锁路径)
 
@@ -466,8 +467,9 @@ pub struct RingBuffer<T> {
 | "清空" | running 时保持 `true`，暂停时 `false` | 立即清历史并归零；运行中从新纪元继续 |
 | 首次"开始" | `false` → `true` | `reset_timer()` 归零 |
 | 暂停→继续 | `true` | 累积计时 |
-| 烧录/断开后 | → `false` | 清空插件历史；下次启动先重建 slots、归零，再置 running |
-| 连接/断开 | 不变 | 不影响 |
+| 烧录后 | → `false` | 清空插件历史；下次启动先重建 slots、归零，再置 running |
+| 断开后 | → `false` | 保留最后显示数据；下次启动先重建 slots、归零，再置 running |
+| 连接 | 不变 | 不影响 |
 
 ### 5. VariablePool 数据结构
 
