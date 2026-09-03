@@ -561,9 +561,11 @@ PooledVariable { id, name, address, ext_type, size, incoming, plugins_cnt, activ
 
 **计算流程**：
 1. 从数据末尾取 `sample_count` 个点 (clamp: `[4, min(total, 65536)]`)
-2. 由时间戳估算采样率
-3. FFT 大小 = `next_power_of_two(take).min(65536)`，零填充
-4. 施加窗函数 → 复数数组 → FFT → 取正频率半谱 → 归一化幅度
+2. 校验有限且严格递增的时间戳，以间隔中位数检测超过 3 倍的断点，只保留最后连续段
+3. 将连续段线性重采样到首尾时间之间的均匀网格，由网格步长计算采样率
+4. FFT 大小 = `next_power_of_two(take)`（最大 65536），零填充
+5. 施加窗函数 → 复数数组 → FFT → 输出含 DC/Nyquist 的单边谱
+6. 幅值按窗系数总和补偿；仅普通正频率乘 2，DC 与 Nyquist 保持单倍
 
 **状态字段** (`ChartPluginState`)：
 - `fft_sample_count: usize` — 默认 1024

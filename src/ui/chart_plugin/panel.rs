@@ -1066,7 +1066,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         ui.vertical_centered(|ui| {
             ui.add_space(10.0);
             ui.label(
-                RichText::new("FFT: 需要至少 4 个数据点")
+                RichText::new("FFT: 需要至少 4 个连续有效数据点")
                     .size(12.0)
                     .color(theme::muted_text(ui)),
             );
@@ -1074,11 +1074,26 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         return;
     }
 
-    let avg_sr = fft_series.iter().map(|s| s.3).sum::<f64>() / fft_series.len() as f64;
+    let min_sample_rate = fft_series
+        .iter()
+        .map(|series| series.3)
+        .fold(f64::INFINITY, f64::min);
+    let max_sample_rate = fft_series
+        .iter()
+        .map(|series| series.3)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let sample_rate_text = if max_sample_rate - min_sample_rate <= max_sample_rate.max(1.0) * 0.01 {
+        format!(
+            "采样率 ≈ {:.1} Hz",
+            (min_sample_rate + max_sample_rate) * 0.5
+        )
+    } else {
+        format!("采样率 {:.1}–{:.1} Hz", min_sample_rate, max_sample_rate)
+    };
 
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new(format!("📊 FFT | 采样率 ≈ {:.1} Hz", avg_sr))
+            RichText::new(format!("📊 FFT | {sample_rate_text}"))
                 .size(11.0)
                 .color(theme::muted_text(ui)),
         );
