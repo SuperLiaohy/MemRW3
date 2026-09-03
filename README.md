@@ -15,7 +15,7 @@
 - **固件烧录**: Control Bar 直接烧录并校验 ELF/AXF、HEX、BIN 或 UF2，完成后自动复位目标
 - **CSV 日志**: 可选择 CSV 文件，开始采集时覆盖写入时间戳 + 所有曲线数据行
 - **插件化界面**: Chart 与 Table 均实现 `MemRWPlugin` trait，Dock、变量树添加、写入、删除、Toast、配置保存/加载统一通过动态插件池分发
-- **统一主题**: App 背景、Activity Bar、控制栏、Dock、BottomSheet、状态提示和 Dialog 语义色来自同一套 `theme` palette
+- **统一主题**: App 背景、Activity Bar、控制栏、Dock、BottomSheet、状态提示和 Dialog 使用统一 palette，并可在 Control Bar 一键切换深色/浅色
 - **配置保存/加载**: JSON 格式保存 Probe 配置、变量池、插件 payload、ELF 路径；Chart/Table 各自保存图例和表格条目
 - **多探针支持**: CMSIS-DAP / ST-Link / J-Link，SWD / JTAG 协议，可调速度 100-20000 kHz
 - **跨平台**: Linux / macOS / Windows

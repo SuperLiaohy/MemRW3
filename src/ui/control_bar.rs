@@ -36,6 +36,8 @@ pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
                         }
                     },
                 );
+                ui.separator();
+                theme_button(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     sampling_status(ui, app);
                 });
@@ -44,6 +46,23 @@ pub fn control_bar(ui: &mut Ui, app: &mut MemRW3App) {
 
     if app.session.show_probe_settings {
         settings_dialog(ui.ctx(), app);
+    }
+}
+
+fn theme_button(ui: &mut Ui) {
+    let dark_mode = ui.visuals().dark_mode;
+    let label = if dark_mode {
+        "☀ 浅色"
+    } else {
+        "🌙 深色"
+    };
+    if ui
+        .button(RichText::new(label).size(12.0))
+        .on_hover_text("切换深色/浅色主题")
+        .clicked()
+    {
+        theme::set_dark_mode(ui.ctx(), !dark_mode);
+        ui.ctx().request_repaint();
     }
 }
 

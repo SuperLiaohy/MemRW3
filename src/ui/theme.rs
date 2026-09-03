@@ -23,11 +23,19 @@ pub struct Palette {
 }
 
 pub fn install(ctx: &egui::Context) {
-    let palette = dark_palette();
+    set_dark_mode(ctx, true);
+}
+
+pub fn set_dark_mode(ctx: &egui::Context, dark_mode: bool) {
+    let palette = if dark_mode {
+        dark_palette()
+    } else {
+        light_palette()
+    };
     let mut style = (*ctx.global_style()).clone();
     let visuals = &mut style.visuals;
 
-    visuals.dark_mode = true;
+    visuals.dark_mode = dark_mode;
     visuals.override_text_color = Some(palette.text);
     visuals.weak_text_color = Some(palette.text_muted);
     visuals.hyperlink_color = palette.accent_hover;
@@ -84,6 +92,26 @@ pub fn install(ctx: &egui::Context) {
     style.spacing.window_margin = egui::Margin::same(8);
 
     ctx.set_global_style(style);
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui;
+
+    use super::set_dark_mode;
+
+    #[test]
+    fn switches_the_complete_global_visual_theme() {
+        let context = egui::Context::default();
+
+        set_dark_mode(&context, false);
+        assert!(!context.global_style().visuals.dark_mode);
+        let light_background = context.global_style().visuals.panel_fill;
+
+        set_dark_mode(&context, true);
+        assert!(context.global_style().visuals.dark_mode);
+        assert_ne!(context.global_style().visuals.panel_fill, light_background);
+    }
 }
 
 pub fn palette(ui: &Ui) -> Palette {
