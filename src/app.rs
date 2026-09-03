@@ -161,7 +161,6 @@ impl MemRW3App {
             });
             self.session.connected = false;
             self.session.timer_was_started = false;
-            self.reset_plugin_data();
             self.session.connect_error = None;
             self.toasts
                 .info("已断开连接")
