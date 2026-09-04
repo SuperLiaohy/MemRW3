@@ -4,8 +4,8 @@ use eframe::egui::{self, RichText, Ui};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    BreakpointSpec, DebugCommand, DebugSnapshot, DebugStartMode, LogicalBreakpoint, StepKind,
-    TargetState, VariablePool, VariableView,
+    BreakpointSpec, DebugCommand, DebugSnapshot, DebugStartMode, LogicalBreakpoint,
+    SourceLocationView, StepKind, TargetState, VariablePool, VariableView,
 };
 use crate::ui::plugin::{
     MemRWPlugin, PluginAction, PluginRenderContext, PluginUpdateContext, VariableCandidate,
@@ -65,6 +65,8 @@ pub struct DebugPluginState {
     inspector_tab: InspectorTab,
     source_cursor: Option<(String, u64)>,
     assembly_cursor: Option<u64>,
+    assembly_scroll_target: Option<u64>,
+    pending_assembly_source: Option<(String, u64)>,
     source_filter: String,
     expanded_source_assembly: HashSet<(String, u64)>,
     inline_assembly_cache: HashMap<(String, u64), Vec<crate::model::InstructionView>>,
@@ -99,6 +101,8 @@ impl Default for DebugPluginState {
             inspector_tab: InspectorTab::CallStack,
             source_cursor: None,
             assembly_cursor: None,
+            assembly_scroll_target: None,
+            pending_assembly_source: None,
             source_filter: String::new(),
             expanded_source_assembly: HashSet::new(),
             inline_assembly_cache: HashMap::new(),
@@ -162,9 +166,14 @@ impl MemRWPlugin for DebugPluginState {
             self.variable_edits.clear();
             self.snapshot = ctx.debug_snapshot.clone();
             self.capture_inline_assembly();
+            self.resolve_pending_assembly_scroll();
         }
         if old_stop_id != self.snapshot.stop_id {
             self.expanded_variables.clear();
+            if let Some(pc) = self.snapshot.pc {
+                self.assembly_cursor = Some(pc);
+                self.assembly_scroll_target = Some(pc);
+            }
         }
         self.connected = ctx.connected;
         self.acquisition_requested = ctx.acquisition_requested;
@@ -200,7 +209,9 @@ impl MemRWPlugin for DebugPluginState {
                 .get(self.snapshot.selected_frame)
                 .and_then(|frame| frame.source.clone())
             {
+                let current_view = self.code_view;
                 self.navigate_to_source(source.path.clone(), source.line, false);
+                self.code_view = current_view;
             }
         }
         if !self.queued_after_load.is_empty() {
@@ -269,15 +280,8 @@ impl MemRWPlugin for DebugPluginState {
                     if self.code_view == CodeView::Split {
                         self.code_view = CodeView::Source;
                     } else {
-                        if let Some((path, line)) = self.source_cursor.clone() {
-                            self.pending
-                                .push(DebugCommand::Disassemble(BreakpointSpec::Source {
-                                    path,
-                                    line,
-                                    column: None,
-                                }));
-                        }
                         self.code_view = CodeView::Split;
+                        self.jump_selected_line_to_assembly();
                     }
                 }
                 if debug_icon_button(
@@ -290,6 +294,17 @@ impl MemRWPlugin for DebugPluginState {
                 .clicked()
                 {
                     self.jump_selected_line_to_assembly();
+                }
+                if debug_icon_button(
+                    ui,
+                    DebugIcon::Source,
+                    self.selected_assembly_source().is_some(),
+                    false,
+                    "将选中汇编指令跳转到对应源码",
+                )
+                .clicked()
+                {
+                    self.jump_selected_instruction_to_source();
                 }
                 if debug_icon_button(
                     ui,
@@ -660,6 +675,7 @@ enum DebugIcon {
     Back,
     Forward,
     Assembly,
+    Source,
     Split,
 }
 
@@ -678,20 +694,54 @@ fn debug_icon_button(
             egui::Sense::hover()
         },
     );
-    let fill = if selected {
+    let fill = if !enabled {
+        ui.visuals()
+            .widgets
+            .inactive
+            .weak_bg_fill
+            .gamma_multiply(0.55)
+    } else if selected {
         ui.visuals().selection.bg_fill
     } else if enabled && response.hovered() {
-        ui.visuals().widgets.hovered.weak_bg_fill
+        ui.visuals().selection.bg_fill.gamma_multiply(0.72)
     } else {
         egui::Color32::TRANSPARENT
     };
     ui.painter().rect_filled(rect, 3.0, fill);
-    let color = if enabled {
-        ui.visuals().text_color()
+    let border = if !enabled {
+        egui::Stroke::new(
+            1.0,
+            ui.visuals()
+                .widgets
+                .inactive
+                .bg_stroke
+                .color
+                .gamma_multiply(0.45),
+        )
+    } else if response.hovered() || selected {
+        egui::Stroke::new(1.5, ui.visuals().selection.stroke.color)
     } else {
-        ui.visuals().weak_text_color()
+        ui.visuals().widgets.inactive.bg_stroke
     };
-    paint_debug_icon(ui.painter(), rect.shrink(5.0), icon, color);
+    ui.painter()
+        .rect_stroke(rect, 3.0, border, egui::StrokeKind::Inside);
+    let color = if !enabled {
+        ui.visuals().weak_text_color().gamma_multiply(0.45)
+    } else if response.hovered() || selected {
+        ui.visuals().selection.stroke.color
+    } else {
+        ui.visuals().text_color()
+    };
+    paint_debug_icon(
+        ui.painter(),
+        rect.shrink(if response.hovered() && enabled {
+            4.0
+        } else {
+            5.0
+        }),
+        icon,
+        color,
+    );
     response.on_hover_text(tooltip)
 }
 
@@ -835,6 +885,18 @@ fn paint_debug_icon(
                 );
             }
         }
+        DebugIcon::Source => {
+            painter.rect_stroke(rect, 1.0, stroke, egui::StrokeKind::Inside);
+            for offset in [-3.5, 0.0, 3.5] {
+                painter.line_segment(
+                    [
+                        egui::pos2(left + 3.0, center.y + offset),
+                        egui::pos2(right - 3.0, center.y + offset),
+                    ],
+                    stroke,
+                );
+            }
+        }
         DebugIcon::Split => {
             painter.rect_stroke(rect, 1.0, stroke, egui::StrokeKind::Inside);
             painter.line_segment(
@@ -875,6 +937,71 @@ fn stable_selectable_label(ui: &mut Ui, selected: bool, text: RichText) -> egui:
             .frame(true)
             .truncate(),
     )
+}
+
+fn stable_selectable_job(
+    ui: &mut Ui,
+    selected: bool,
+    job: egui::text::LayoutJob,
+) -> egui::Response {
+    let fill = if selected {
+        ui.visuals().selection.bg_fill
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    ui.add(
+        egui::Button::new(job)
+            .selected(selected)
+            .fill(fill)
+            .stroke(egui::Stroke::NONE)
+            .frame(true)
+            .truncate(),
+    )
+}
+
+fn compact_expander(
+    ui: &mut Ui,
+    expanded: bool,
+    expand_tip: &str,
+    collapse_tip: &str,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+    let fill = if response.hovered() {
+        ui.visuals().selection.bg_fill.gamma_multiply(0.65)
+    } else {
+        ui.visuals()
+            .widgets
+            .inactive
+            .weak_bg_fill
+            .gamma_multiply(0.45)
+    };
+    let stroke = if response.hovered() {
+        egui::Stroke::new(1.25, ui.visuals().selection.stroke.color)
+    } else {
+        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color)
+    };
+    ui.painter().rect_filled(rect, 3.0, fill);
+    ui.painter()
+        .rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
+    let center = rect.center();
+    let mark = egui::Stroke::new(1.4, ui.visuals().text_color());
+    ui.painter().line_segment(
+        [
+            egui::pos2(center.x - 3.5, center.y),
+            egui::pos2(center.x + 3.5, center.y),
+        ],
+        mark,
+    );
+    if !expanded {
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x, center.y - 3.5),
+                egui::pos2(center.x, center.y + 3.5),
+            ],
+            mark,
+        );
+    }
+    response.on_hover_text(if expanded { collapse_tip } else { expand_tip })
 }
 
 fn stable_selectable_label_sized(
@@ -1311,6 +1438,8 @@ fn render_code(ui: &mut Ui, state: &mut DebugPluginState) {
 }
 
 fn render_disassembly(ui: &mut Ui, state: &mut DebugPluginState, id: &'static str) {
+    let scroll_target = state.assembly_scroll_target;
+    let mut target_found = false;
     egui::ScrollArea::both().id_salt(id).show(ui, |ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         for instruction in state.snapshot.instructions.clone() {
@@ -1358,6 +1487,12 @@ fn render_disassembly(ui: &mut Ui, state: &mut DebugPluginState, id: &'static st
                 state.assembly_cursor == Some(instruction.address),
                 rich,
             );
+            if scroll_target.map(normalize_code_address)
+                == Some(normalize_code_address(instruction.address))
+            {
+                response.scroll_to_me(Some(egui::Align::Center));
+                target_found = true;
+            }
             if response.clicked() {
                 state.assembly_cursor = Some(instruction.address);
             }
@@ -1379,6 +1514,251 @@ fn render_disassembly(ui: &mut Ui, state: &mut DebugPluginState, id: &'static st
             ui.label("没有可显示的汇编。请加载带代码段的 ELF，或暂停目标后刷新。");
         }
     });
+    if target_found {
+        state.assembly_scroll_target = None;
+    }
+}
+
+fn normalize_code_address(address: u64) -> u64 {
+    address & !1
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceToken {
+    Plain,
+    Keyword,
+    Type,
+    Number,
+    String,
+    Comment,
+    Preprocessor,
+}
+
+fn source_highlight_job(
+    ui: &Ui,
+    line_number: usize,
+    line: &str,
+    current: bool,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+    let line_color = if current {
+        ui.visuals().selection.stroke.color
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    job.append(
+        &format!("{line_number:>5}  "),
+        0.0,
+        egui::TextFormat {
+            font_id: font_id.clone(),
+            color: line_color,
+            ..Default::default()
+        },
+    );
+    if line.trim_start().starts_with('#') {
+        append_source_token(ui, &mut job, line, SourceToken::Preprocessor, &font_id);
+        return job;
+    }
+
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"//") {
+            append_source_token(ui, &mut job, &line[index..], SourceToken::Comment, &font_id);
+            break;
+        }
+        let byte = bytes[index];
+        if byte == b'"' || byte == b'\'' {
+            let quote = byte;
+            let start = index;
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\\' {
+                    index = (index + 2).min(bytes.len());
+                } else if bytes[index] == quote {
+                    index += 1;
+                    break;
+                } else {
+                    index += 1;
+                }
+            }
+            append_source_token(
+                ui,
+                &mut job,
+                &line[start..index],
+                SourceToken::String,
+                &font_id,
+            );
+        } else if byte.is_ascii_digit() {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'.'))
+            {
+                index += 1;
+            }
+            append_source_token(
+                ui,
+                &mut job,
+                &line[start..index],
+                SourceToken::Number,
+                &font_id,
+            );
+        } else if byte.is_ascii_alphabetic() || byte == b'_' {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            let word = &line[start..index];
+            let token = if is_source_keyword(word) {
+                SourceToken::Keyword
+            } else if is_source_type(word) {
+                SourceToken::Type
+            } else {
+                SourceToken::Plain
+            };
+            append_source_token(ui, &mut job, word, token, &font_id);
+        } else {
+            let char_len = line[index..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(1);
+            append_source_token(
+                ui,
+                &mut job,
+                &line[index..index + char_len],
+                SourceToken::Plain,
+                &font_id,
+            );
+            index += char_len;
+        }
+    }
+    job
+}
+
+fn append_source_token(
+    ui: &Ui,
+    job: &mut egui::text::LayoutJob,
+    text: &str,
+    token: SourceToken,
+    font_id: &egui::FontId,
+) {
+    let dark = ui.visuals().dark_mode;
+    let color = match (token, dark) {
+        (SourceToken::Plain, _) => ui.visuals().text_color(),
+        (SourceToken::Keyword, true) => egui::Color32::from_rgb(198, 120, 221),
+        (SourceToken::Keyword, false) => egui::Color32::from_rgb(125, 52, 145),
+        (SourceToken::Type, true) => egui::Color32::from_rgb(86, 182, 194),
+        (SourceToken::Type, false) => egui::Color32::from_rgb(20, 116, 125),
+        (SourceToken::Number, true) => egui::Color32::from_rgb(209, 154, 102),
+        (SourceToken::Number, false) => egui::Color32::from_rgb(156, 88, 34),
+        (SourceToken::String, true) => egui::Color32::from_rgb(152, 195, 121),
+        (SourceToken::String, false) => egui::Color32::from_rgb(54, 124, 46),
+        (SourceToken::Comment, true) => egui::Color32::from_rgb(106, 153, 85),
+        (SourceToken::Comment, false) => egui::Color32::from_rgb(70, 128, 55),
+        (SourceToken::Preprocessor, true) => egui::Color32::from_rgb(229, 192, 123),
+        (SourceToken::Preprocessor, false) => egui::Color32::from_rgb(150, 91, 22),
+    };
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: font_id.clone(),
+            color,
+            italics: token == SourceToken::Comment,
+            ..Default::default()
+        },
+    );
+}
+
+fn is_source_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "alignas"
+            | "alignof"
+            | "asm"
+            | "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "constexpr"
+            | "continue"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "enum"
+            | "extern"
+            | "for"
+            | "if"
+            | "inline"
+            | "let"
+            | "loop"
+            | "match"
+            | "mut"
+            | "namespace"
+            | "new"
+            | "operator"
+            | "override"
+            | "pub"
+            | "return"
+            | "sizeof"
+            | "static"
+            | "struct"
+            | "switch"
+            | "template"
+            | "this"
+            | "throw"
+            | "trait"
+            | "try"
+            | "typedef"
+            | "typename"
+            | "union"
+            | "unsafe"
+            | "using"
+            | "virtual"
+            | "volatile"
+            | "where"
+            | "while"
+    )
+}
+
+fn is_source_type(word: &str) -> bool {
+    matches!(
+        word,
+        "bool"
+            | "char"
+            | "double"
+            | "f32"
+            | "f64"
+            | "float"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "int"
+            | "isize"
+            | "long"
+            | "short"
+            | "signed"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "uint8_t"
+            | "uint16_t"
+            | "uint32_t"
+            | "uint64_t"
+            | "unsigned"
+            | "usize"
+            | "void"
+    )
 }
 
 fn render_source_code(ui: &mut Ui, state: &mut DebugPluginState) {
@@ -1466,32 +1846,19 @@ fn render_source_code(ui: &mut Ui, state: &mut DebugPluginState) {
                             let expanded = state
                                 .expanded_source_assembly
                                 .contains(&(debug_path.clone(), line_number as u64));
-                            toggle_inline_assembly = ui
-                                .add_sized(
-                                    [20.0, 18.0],
-                                    egui::Button::new(if expanded { "-" } else { "+" }),
-                                )
-                                .on_hover_text(if expanded {
-                                    "收起该行汇编"
-                                } else {
-                                    "展开该行对应汇编"
-                                })
-                                .clicked();
+                            toggle_inline_assembly =
+                                compact_expander(ui, expanded, "展开该行对应汇编", "收起该行汇编")
+                                    .clicked();
                         } else {
-                            ui.allocate_space(egui::vec2(20.0, 18.0));
+                            ui.allocate_space(egui::vec2(16.0, 16.0));
                         }
-                        let text = format!("{line_number:>5}  {line}");
-                        let rich = if current {
-                            RichText::new(text).monospace().strong()
-                        } else {
-                            RichText::new(text).monospace()
-                        };
-                        let code = stable_selectable_label(
+                        let job = source_highlight_job(ui, line_number, line, current);
+                        let code = stable_selectable_job(
                             ui,
                             state.source_cursor.as_ref().is_some_and(|(path, line)| {
                                 path == &debug_path && *line == line_number as u64
                             }),
-                            rich,
+                            job,
                         );
                         select_line = code.clicked();
                         toggle_breakpoint |= code.double_clicked();
@@ -1725,18 +2092,7 @@ fn render_variable_children(
             ui.add_space(depth as f32 * 12.0);
             if variable.has_children {
                 let expanded = state.expanded_variables.contains(&variable.reference);
-                if ui
-                    .add_sized(
-                        [22.0, 20.0],
-                        egui::Button::new(if expanded { "-" } else { "+" }),
-                    )
-                    .on_hover_text(if expanded {
-                        "收起变量"
-                    } else {
-                        "展开变量"
-                    })
-                    .clicked()
-                {
+                if compact_expander(ui, expanded, "展开变量", "收起变量").clicked() {
                     if expanded {
                         state.expanded_variables.remove(&variable.reference);
                     } else {
@@ -1749,7 +2105,7 @@ fn render_variable_children(
                     }
                 }
             } else {
-                ui.allocate_space(egui::vec2(22.0, 20.0));
+                ui.allocate_space(egui::vec2(16.0, 16.0));
             }
             ui.monospace(&variable.name);
             ui.label(RichText::new(&variable.type_name).color(ui.visuals().weak_text_color()));
@@ -1892,13 +2248,66 @@ impl DebugPluginState {
         let Some((path, line)) = self.source_cursor.clone() else {
             return;
         };
+        self.pending_assembly_source = Some((path.clone(), line));
+        if let Some(address) = self
+            .snapshot
+            .executable_lines
+            .iter()
+            .find(|record| record.path == path && record.line == line)
+            .map(|record| record.address)
+        {
+            self.assembly_cursor = Some(address);
+            self.assembly_scroll_target = Some(address);
+        }
         self.pending
             .push(DebugCommand::Disassemble(BreakpointSpec::Source {
                 path,
                 line,
                 column: None,
             }));
-        self.code_view = CodeView::Assembly;
+        if self.code_view != CodeView::Split {
+            self.code_view = CodeView::Assembly;
+        }
+    }
+
+    fn selected_assembly_source(&self) -> Option<SourceLocationView> {
+        let address = self.assembly_cursor.or(self.snapshot.pc)?;
+        self.snapshot
+            .instructions
+            .iter()
+            .find(|instruction| {
+                normalize_code_address(instruction.address) == normalize_code_address(address)
+            })
+            .and_then(|instruction| instruction.source.clone())
+    }
+
+    fn jump_selected_instruction_to_source(&mut self) {
+        let Some(source) = self.selected_assembly_source() else {
+            return;
+        };
+        self.navigate_to_source(source.path, source.line, true);
+    }
+
+    fn resolve_pending_assembly_scroll(&mut self) {
+        let Some((path, line)) = self.pending_assembly_source.clone() else {
+            return;
+        };
+        let address = self
+            .snapshot
+            .instructions
+            .iter()
+            .find(|instruction| {
+                instruction
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.path == path && source.line == Some(line))
+            })
+            .map(|instruction| instruction.address);
+        if let Some(address) = address {
+            self.assembly_cursor = Some(address);
+            self.assembly_scroll_target = Some(address);
+            self.pending_assembly_source = None;
+        }
     }
 
     fn capture_inline_assembly(&mut self) {
@@ -2139,9 +2548,10 @@ fn resolve_local_source_path(
 #[cfg(test)]
 mod tests {
     use super::{
-        CodeView, breakpoint_label, build_source_tree, compressed_directory, current_cursor_spec,
-        editable_variable_value, render_toolbar, resolve_local_source_path,
-        single_line_variable_value, source_node_matches, stabilize_debug_style,
+        CodeView, breakpoint_label, build_source_tree, compact_expander, compressed_directory,
+        current_cursor_spec, editable_variable_value, render_toolbar, resolve_local_source_path,
+        single_line_variable_value, source_highlight_job, source_node_matches,
+        stabilize_debug_style,
     };
     use crate::model::VariablePool;
     use crate::model::{
@@ -2202,6 +2612,33 @@ mod tests {
     }
 
     #[test]
+    fn compact_expander_keeps_identical_geometry_for_collapsed_and_expanded_states() {
+        eframe::egui::__run_test_ui(|ui| {
+            let collapsed = compact_expander(ui, false, "expand", "collapse");
+            let expanded = compact_expander(ui, true, "expand", "collapse");
+            assert_eq!(collapsed.rect.size(), eframe::egui::vec2(16.0, 16.0));
+            assert_eq!(expanded.rect.size(), collapsed.rect.size());
+        });
+    }
+
+    #[test]
+    fn source_highlighter_preserves_text_and_styles_common_tokens() {
+        eframe::egui::__run_test_ui(|ui| {
+            let job =
+                source_highlight_job(ui, 42, "if (value >= 10) return \"ok\"; // done", false);
+            assert_eq!(job.text, "   42  if (value >= 10) return \"ok\"; // done");
+            assert!(job.sections.len() > 6);
+            assert!(job.sections.iter().any(|section| section.format.italics));
+            let distinct_colors = job
+                .sections
+                .iter()
+                .map(|section| section.format.color)
+                .collect::<std::collections::HashSet<_>>();
+            assert!(distinct_colors.len() >= 4);
+        });
+    }
+
+    #[test]
     fn source_navigation_supports_back_forward_and_split_mode() {
         let mut plugin = super::DebugPluginState::default();
         plugin.navigate_to_source("/src/a.cpp".to_owned(), Some(10), true);
@@ -2215,6 +2652,95 @@ mod tests {
         plugin.navigate_forward();
         assert_eq!(plugin.selected_source_path.as_deref(), Some("/src/b.cpp"));
         assert_eq!(plugin.code_view, CodeView::Split);
+    }
+
+    #[test]
+    fn source_and_assembly_jumps_preserve_split_mode_and_set_scroll_targets() {
+        let path = "/src/main.cpp".to_owned();
+        let mut plugin = super::DebugPluginState {
+            code_view: CodeView::Split,
+            source_cursor: Some((path.clone(), 42)),
+            assembly_cursor: Some(0x100),
+            snapshot: crate::model::DebugSnapshot {
+                executable_lines: vec![crate::model::ExecutableLineView {
+                    path: path.clone(),
+                    line: 42,
+                    address: 0x100,
+                }]
+                .into(),
+                instructions: vec![InstructionView {
+                    address: 0x100,
+                    bytes: "00 BF".to_owned(),
+                    instruction: "nop".to_owned(),
+                    source: Some(SourceLocationView {
+                        path: path.clone(),
+                        line: Some(42),
+                        column: None,
+                    }),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        plugin.jump_selected_line_to_assembly();
+        assert_eq!(plugin.code_view, CodeView::Split);
+        assert_eq!(plugin.assembly_scroll_target, Some(0x100));
+        assert!(matches!(
+            plugin.pending.last(),
+            Some(DebugCommand::Disassemble(BreakpointSpec::Source {
+                line: 42,
+                ..
+            }))
+        ));
+
+        plugin.jump_selected_instruction_to_source();
+        assert_eq!(plugin.code_view, CodeView::Split);
+        assert_eq!(plugin.selected_source_path.as_deref(), Some(path.as_str()));
+        assert_eq!(plugin.source_scroll_target, Some(42));
+    }
+
+    #[test]
+    fn a_new_stop_centers_the_program_counter_in_assembly() {
+        let mut plugin = super::DebugPluginState {
+            code_view: CodeView::Assembly,
+            ..Default::default()
+        };
+        let pool = VariablePool::default();
+        let frame_data = FrameData::default();
+        let register_data = crate::model::RegisterData::default();
+        let snapshot = crate::model::DebugSnapshot {
+            revision: 1,
+            stop_id: 1,
+            pc: Some(0x0800_1235),
+            frames: vec![crate::model::StackFrameView {
+                index: 0,
+                function: "main".to_owned(),
+                pc: 0x0800_1235,
+                source: Some(SourceLocationView {
+                    path: "/src/main.cpp".to_owned(),
+                    line: Some(42),
+                    column: None,
+                }),
+                is_inline: false,
+            }],
+            ..Default::default()
+        };
+        let context = eframe::egui::Context::default();
+        plugin.update(PluginUpdateContext {
+            pool: &pool,
+            frame_data: &frame_data,
+            register_data: &register_data,
+            running: false,
+            acquisition_requested: true,
+            connected: true,
+            hardware_busy: false,
+            debug_snapshot: &snapshot,
+            egui_ctx: &context,
+        });
+        assert_eq!(plugin.assembly_cursor, Some(0x0800_1235));
+        assert_eq!(plugin.assembly_scroll_target, Some(0x0800_1235));
+        assert_eq!(plugin.code_view, CodeView::Assembly);
     }
 
     #[test]

@@ -2,6 +2,32 @@
 
 ## 2026-09-04
 
+### 反馈优化：紧凑展开控件与源码高亮
+
+- 源码行汇编和局部变量树的展开按钮统一改为固定 16×16 Painter 控件，悬浮时只改变
+  固定框内底色/描边；展开态仅移除内部竖线，折叠态增加竖线，不再使用会因字体度量变化
+  而重排布局的 `Button("+")/Button("-")`。
+- 无子项的占位也固定为 16×16，因此同层有无 children 不会改变名称列起始位置。
+- 新增轻量级源码词法高亮：C/C++/Rust 关键字、常用基础类型、数值、字符串/字符、行注释
+  和预处理指令使用适配深浅主题的颜色；注释使用斜体，当前执行行号使用强调色。
+- 高亮通过单行 `LayoutJob` 绘制，保留原始源码文本和固定行几何，不影响断点、选中、
+  双击或滚动定位。
+- 新增展开/收起按钮几何完全一致及高亮文本完整性/多 token 配色测试。
+
+### 反馈修复：图标状态与源码/汇编双向居中
+
+- Painter 图标按钮新增明确的四态视觉：普通态边框、禁用态低对比底色+45% 图标、悬浮态
+  accent 底色+1.5 px 描边+框内图标放大、选中态 selection 底色。所有效果限制在固定矩形
+  内，不重新引入 hover 布局膨胀。
+- 新 stop（Step、Run-to-Cursor、普通断点命中）会把真实 PC 同时设置为汇编选中地址和
+  独立滚动目标；目标指令渲染后调用 `scroll_to_me(Center)`。
+- 源码→汇编跳转先用 executable line index 设置即时目标，再等待异步反汇编快照解析最终
+  地址；切换到汇编后目标指令居中。
+- Split 模式下源码→汇编不再切回纯汇编模式，只滚动右侧汇编半栏。
+- 工具栏新增汇编→源码图标，根据选中指令（无选中时使用 PC）的 DWARF location 打开源码
+  缓冲并居中；Split 模式下只滚动左侧源码半栏。
+- 新增 stop→PC 汇编居中、源码/汇编双向跳转和 Split 模式保持测试。
+
 ### 反馈实现：图标 DebugBar、双底栏和源码/汇编联动
 
 - DebugBar 的两行命令合并为一行；Attach、Reset、启动、停止、暂停、继续、运行到光标、
@@ -136,7 +162,7 @@
 
 - `cargo test --release ui::debug_plugin --verbose`
 - `cargo fmt --all -- --check`
-- `cargo test --release --verbose`：82 passed，0 failed，3 ignored（含硬件回归入口）。
+- `cargo test --release --verbose`：86 passed，0 failed，3 ignored（含硬件回归入口）。
 - 硬件回归：1 passed，0 failed。
 - `cargo build --release --verbose`：通过，生成 `target/release/MemRW3`。
 - `cargo clippy --all-targets`：DebugPlugin/ProbeWorker 本轮新增代码无警告；仍有 3 个既有
