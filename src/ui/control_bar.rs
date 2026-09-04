@@ -320,7 +320,10 @@ fn connect_button(ui: &mut Ui, app: &mut MemRW3App) {
         "连接"
     };
     if ui
-        .add(egui::Button::new(RichText::new(label).size(13.0)))
+        .add_enabled(
+            !app.is_connection_pending() && !app.is_flashing(),
+            egui::Button::new(RichText::new(label).size(13.0)),
+        )
         .clicked()
     {
         app.sync_connect();
@@ -339,9 +342,12 @@ fn settings_button(ui: &mut Ui, app: &mut MemRW3App) {
 }
 
 fn run_control(ui: &mut Ui, app: &mut MemRW3App) {
-    let enabled = app.session.connected;
+    let target_halted = app.is_target_halted();
+    let enabled = app.session.connected && !target_halted && !app.is_flashing();
     let running = app.session.is_running();
-    let label = if !enabled {
+    let label = if target_halted {
+        "断点中"
+    } else if !enabled {
         "开始"
     } else if running {
         "暂停"

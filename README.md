@@ -14,7 +14,9 @@
 - **SVD 寄存器读写**: Table 右侧后台加载 CMSIS-SVD；寄存器可独立勾选、按 1–30 Hz 批量读取，并按访问权限写入
 - **固件烧录**: Control Bar 直接烧录并校验 ELF/AXF、HEX、BIN 或 UF2，完成后自动复位目标
 - **CSV 日志**: 可选择 CSV 文件，开始采集时覆盖写入时间戳 + 所有曲线数据行
-- **插件化界面**: Chart 与 Table 均实现 `MemRWPlugin` trait，Dock、变量树添加、写入、删除、Toast、配置保存/加载统一通过动态插件池分发
+- **插件化界面**: Chart、Table 与 Debug 均实现 `MemRWPlugin` trait，Dock、硬件请求、Toast 和配置保存/加载统一通过动态插件池分发
+- **IDE 风格调试**: DebugPlugin 支持目标暂停/继续、单指令与源码级步入/步过/步出、源码和地址硬件断点、CPU 寄存器、源码/汇编联动、调用栈、原始栈内存及局部变量懒加载
+- **单一 ProbeWorker**: 连接、采集、Table/SVD 读写、烧录和调试命令由唯一硬件线程串行调度；运行时高频采集，断点暂停时停止 Chart 数据流并以 1 Hz 维持 Table 最新值
 - **插件独立暂停**: 每个插件标题栏可单独暂停更新和交互，当前画面和已打开的变量树保持不变，不影响其他插件
 - **变量树独立窗口**: DWARF 变量树可从 Bottom Sheet 弹出为原生窗口，并可一键 Pop in 回对应插件；再次点击打开时保持当前 Pop out 状态
 - **统一主题**: 默认使用浅色；App 背景、Activity Bar、控制栏、Dock、BottomSheet、状态提示和 Dialog 使用统一 palette，并可切换深色、浅色或跟随系统（含 Ubuntu/GNOME 回退检测）
@@ -60,6 +62,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 | egui_ltreeview | 0.7 | DWARF 变量树视图 |
 | egui-notify | 0.22 | Toast 通知 |
 | probe-rs | 0.31 | MCU 调试探针连接与采集 |
+| probe-rs-debug | 0.31 | 源码断点、源码级步进、调用栈和局部变量求值 |
+| capstone | 0.14 | ARM/Thumb/AArch64/RISC-V 反汇编 |
 | crossbeam-queue | 0.3 | 有界 lock-free 采集环形队列 |
 | gimli | 0.31 | DWARF 调试信息解析 |
 | object | 0.36 | ELF 文件解析 |
@@ -175,25 +179,57 @@ cargo run --release
 - 每帧数据追加写入
 - 暂停采集时自动关闭文件
 
+### 10. Debug 调试
+
+- 先通过任一变量树入口加载与目标固件匹配、包含 DWARF 信息的 ELF；Debug 面板也提供同一个共享入口
+- 连接 Probe 不会自动启动 DebugPlugin。和其他插件一样，必须先点击全局“开始”；然后在已启用的 DebugPlugin 中选择 `Attach`（保持目标当前状态）或 `Reset`（复位并暂停），再点击调试“启动”。全局停止会同步停止 DebugEngine
+- 每个 `MemRWPlugin` 都有统一的“暂停插件/启用插件”按钮。暂停 DebugPlugin 会停止调试状态轮询并卸载硬件断点，但不会擅自改变 MCU 当前运行/暂停状态；重新启用后需要手动再次启动
+- Debug 面板会从 DWARF 自动生成工程源码目录树；若 ELF 记录的是构建机路径，可选择本机源码根目录进行映射
+- 工程树会自动合并连续的单子目录路径，例如 `/home/liaohy/User/...` 显示为一个目录节点
+- 调试工作区采用可拖动的左侧工程/断点、中间源码/汇编、右侧调用栈/栈内存和底部左右分栏布局；底部左侧为局部变量、右侧为寄存器，分隔比例可拖动并随配置保存
+- 全局主题禁用控件 hover/active/open 的外扩绘制；DebugPlugin 不再直接使用 egui `selectable_value/selectable_label`，页签、工程文件、断点、调用栈、源码行和汇编行全部使用固定背景/描边的稳定选择控件。滚动区使用不会在悬浮时变宽的实体滚动条
+- 工程树支持按文件名或完整路径筛选；点击断点列表项可直接定位到对应源码行或汇编地址
+- 源码编辑区使用多缓冲区标签；从工程树、调用栈、断点或汇编打开的文件会保留独立标签，可切换和关闭
+- ELF 信息栏同时提供后退、前进、选中源码行跳转汇编以及源码/汇编并排显示工具按钮；按钮使用程序绘制图标，不依赖字体 glyph
+- 连接目标后可在运行状态下添加源码行断点或指令地址断点；双击源码或汇编行可添加/移除断点
+- 断点面板只显示硬件容量和已有断点；新增断点统一通过源码/汇编双击或 `F9`，不再显示手工地址、路径和行号输入框
+- 源码断点支持规范化路径、构建路径后缀匹配，并会从空行/注释行向后查找最近的可执行行；断点列表显示最终解析行和硬件地址
+- 命中断点或点击“暂停”后，Chart 高频流自动停止，Debug 面板刷新 PC、CPU 寄存器、汇编、调用栈、原始栈内存和当前栈帧局部变量
+- 支持单指令、源码级步入、步过和步出；三种源码步进全部只使用硬件 single-step，不设置临时断点。每一步只按 DWARF 规范化文件路径和行号判断源码是否前进，不把同一行的列号变化误判为完成；Over/Out 再结合 unwind 调用栈深度判断跨函数和返回
+- Cortex-M 源码级步进期间会临时设置并回读验证 PRIMASK，结束后恢复原值；无法确认屏蔽生效时直接取消步进，避免普通心跳/SysTick 中断把落点带到 ISR。NMI 和 Fault 仍可能改变实际停止位置
+- C++ 局部变量会在 probe-rs-debug 完成位置求值后，由 MemRW3 补充基础整数、浮点、布尔、字符、枚举、指针和位域解码
+- 暂停时可直接编辑具有内存地址的标量局部变量并按 Enter 或“写”提交；请求携带 stop/frame/reference 防止旧栈帧写入，C++ 基础类型按 C ABI 编码写入并回读刷新
+- 寄存器视图固定名称列并让值列占满检查器剩余宽度，窄窗口中也不会只挤在左侧
+- 可执行源码行提供 `+/-` 展开按钮，按需反汇编并缓存该行对应指令；多个已展开行可以同时保留
+- 复合局部变量的摘要会折叠换行和连续空白，在一行中截断显示；展开按钮使用可靠的 `+/-`，不再依赖可能缺失的三角形字符
+- 汇编视图以 ELF 代码段离线反汇编为常驻内容；只有 PC 不属于 ELF 代码段时才读取目标代码内存。栈读取按目标 RAM 边界逐字进行，局部读取失败作为非致命警告处理
+- 单击源码行或汇编指令可移动调试光标；目标暂停时可“运行到光标”，临时断点命中或提前暂停后会自动清理
+- 常用快捷键：`F5` 继续、`F6` 暂停、`F9` 切换光标断点、`F10` 源码步过、`F11` 源码步入、`Shift+F11` 源码步出；正在编辑文本时不会触发调试快捷键
+- Halt 期间 Table 左侧变量以约 1 Hz 更新且不写入 Chart/CSV/FFT 数据流；Table 写入和 SVD 读写仍通过同一 ProbeWorker 正常执行
+- 点击“继续”后，如果进入断点前正在采集，Chart 高频采集会自动恢复
+
+当前仅使用 core 0。断点为目标硬件断点，数量由 MCU 决定；优化构建中的局部变量可能显示为不可用或已优化掉。Xtensa 暂不支持汇编显示。
+
 ## 项目结构
 
 ```
 src/
 ├── main.rs              # 入口
 ├── app.rs               # 主 App + 采集/连接/插件池/配置编排
-├── sync.rs              # 同步原语 (双 Condvar 握手)
 ├── dwarf/
 │   ├── mod.rs           # DWARF 模块入口
 │   ├── types.rs         # TreeNode / DwarfState / ExtendConfig / ExtendType
 │   └── extract.rs       # ELF + DWARF 解析
 ├── model/
+│   ├── debug.rs         # 调试命令、目标状态、断点/栈/局部变量/汇编快照 DTO
 │   ├── mod.rs           # Model 模块入口
 │   ├── state.rs         # AppSession
 │   ├── variable_pool.rs # VariablePool (Vec + HashMap)
 │   └── ring_buffer.rs   # 有界 lock-free 环形队列
 ├── probe/
-│   ├── mod.rs           # ProbeCell (线程安全 Session owner)
-│   └── session.rs       # ProbeSession (probe-rs 连接/采集)
+│   ├── mod.rs
+│   ├── session.rs       # ProbeSession (probe-rs 连接/采集/断点)
+│   └── worker.rs        # 唯一 Session owner；运行/暂停双调度策略和调试引擎
 ├── svd/
 │   └── mod.rs           # CMSIS-SVD 解析与轻量寄存器树
 └── ui/
@@ -201,6 +237,7 @@ src/
     ├── control_bar.rs   # 控制栏
     ├── dock.rs          # VS Code 风格左侧插件栏 + 原生 OS 窗口 pop-out/pop-in
     ├── plugin.rs        # MemRWPlugin trait + 统一 PluginAction/FrameData/配置 payload
+    ├── debug_plugin/    # IDE 风格调试插件
     ├── theme.rs         # 统一 palette + egui Visuals/WidgetVisuals 配置
     ├── vari_tree.rs     # DWARF 变量树
     ├── vari_properties.rs # 属性面板

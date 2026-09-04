@@ -23,6 +23,8 @@ pub struct VariableTreePanel {
     drag_state: Option<(f32, f32)>,
     height: f32,
     extend_configs: HashMap<usize, dwarf::types::ExtendConfig>,
+    loaded_elf_path: Option<String>,
+    program_generation: u64,
 }
 
 impl VariableTreePanel {
@@ -34,6 +36,8 @@ impl VariableTreePanel {
             drag_state: None,
             height: 250.0,
             extend_configs: HashMap::new(),
+            loaded_elf_path: None,
+            program_generation: 0,
         }
     }
 
@@ -388,8 +392,23 @@ impl VariableTreePanel {
 
     fn load_elf(&mut self) -> Result<(), String> {
         self.dwarf_state = load_dwarf_state(&self.elf_path)?;
+        self.loaded_elf_path = Some(self.elf_path.trim().to_owned());
+        self.program_generation = self.program_generation.wrapping_add(1).max(1);
         self.extend_configs.clear();
         Ok(())
+    }
+
+    pub fn load_program_path(&mut self, path: String) -> Result<(), String> {
+        self.elf_path = path;
+        self.load_elf()
+    }
+
+    pub fn loaded_elf_path(&self) -> Option<&str> {
+        self.loaded_elf_path.as_deref()
+    }
+
+    pub fn program_generation(&self) -> u64 {
+        self.program_generation
     }
 
     pub fn prepare_config(
@@ -410,6 +429,8 @@ impl VariableTreePanel {
 
     pub fn apply_config_source(&mut self, elf_path: String, dwarf_state: dwarf::types::DwarfState) {
         self.elf_path = elf_path;
+        self.loaded_elf_path = (!self.elf_path.trim().is_empty()).then(|| self.elf_path.clone());
+        self.program_generation = self.program_generation.wrapping_add(1).max(1);
         self.dwarf_state = dwarf_state;
         self.extend_configs.clear();
         self.target = None;

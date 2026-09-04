@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::dwarf::types::{ExtendConfig, ExtendType};
-use crate::model::{RegisterData, RegisterReadRequest, RegisterWriteRequest, VariablePool};
+use crate::model::{
+    DebugCommand, DebugSnapshot, RegisterData, RegisterReadRequest, RegisterWriteRequest,
+    VariablePool,
+};
 
 pub type FrameData = HashMap<usize, Vec<(f64, [u8; 8])>>;
 
@@ -54,13 +57,18 @@ pub enum PluginAction {
         plugin_id: String,
         viewport_id: egui::ViewportId,
     },
+    LoadProgram {
+        path: String,
+    },
     RemoveVariable {
         var_id: usize,
         was_enabled: bool,
+        read_class: crate::model::VariableReadClass,
     },
     SetVariableEnabled {
         var_id: usize,
         enabled: bool,
+        read_class: crate::model::VariableReadClass,
     },
     WriteVariable {
         var_id: usize,
@@ -74,6 +82,7 @@ pub enum PluginAction {
     },
     ResetTimer,
     RebuildSlots,
+    Debug(DebugCommand),
     Toast {
         level: ToastLevel,
         message: String,
@@ -91,8 +100,10 @@ pub struct PluginUpdateContext<'a> {
     pub frame_data: &'a FrameData,
     pub register_data: &'a RegisterData,
     pub running: bool,
+    pub acquisition_requested: bool,
     pub connected: bool,
     pub hardware_busy: bool,
+    pub debug_snapshot: &'a DebugSnapshot,
     pub egui_ctx: &'a egui::Context,
 }
 
@@ -113,6 +124,10 @@ pub trait MemRWPlugin {
     }
 
     fn update(&mut self, _ctx: PluginUpdateContext<'_>) -> Vec<PluginAction> {
+        Vec::new()
+    }
+
+    fn on_enabled_changed(&mut self, _enabled: bool) -> Vec<PluginAction> {
         Vec::new()
     }
 

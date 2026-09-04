@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-use crate::model::VariablePool;
+use crate::model::{VariablePool, VariableReadClass};
 use crate::ui::plugin::{FrameData, VariableCandidate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +60,7 @@ impl TableNode {
                 )
                 .map(|variable| variable.id)
                 .unwrap_or_else(|| pool.add(&candidate.to_config()));
-            pool.bind(variable_id, true);
+            pool.bind(variable_id, true, VariableReadClass::Latest);
             TableLeaf {
                 variable_id,
                 enabled: true,
@@ -116,7 +116,7 @@ impl TableNode {
                     })
                     .map(|variable| variable.id)
                     .ok_or_else(|| format!("表格变量 \"{}\" 匹配失败", saved_leaf.variable_name))?;
-                pool.bind(variable_id, saved_leaf.enabled);
+                pool.bind(variable_id, saved_leaf.enabled, VariableReadClass::Latest);
                 Some(TableLeaf {
                     variable_id,
                     enabled: saved_leaf.enabled,
@@ -231,13 +231,19 @@ impl TableNode {
                 let due = leaf
                     .last_value_update
                     .is_none_or(|last_update| last_update.elapsed() >= interval);
-                if let Some((_, raw)) = frame_data
-                    .get(&leaf.variable_id)
-                    .and_then(|samples| samples.last())
-                {
+                let latest = pool
+                    .get(leaf.variable_id)
+                    .and_then(|variable| variable.latest.load().map(|(_, raw)| raw))
+                    .or_else(|| {
+                        frame_data
+                            .get(&leaf.variable_id)
+                            .and_then(|samples| samples.last())
+                            .map(|(_, raw)| *raw)
+                    });
+                if let Some(raw) = latest {
                     if due {
                         if let Some(variable) = pool.get(leaf.variable_id) {
-                            formatter(raw, &variable.ext_type, &mut leaf.current_value);
+                            formatter(&raw, &variable.ext_type, &mut leaf.current_value);
                             leaf.last_value_update = Some(Instant::now());
                         }
                     }

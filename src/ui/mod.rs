@@ -1,5 +1,6 @@
 pub mod chart_plugin;
 mod control_bar;
+pub mod debug_plugin;
 pub mod dock;
 pub mod plugin;
 pub mod table_plugin;

@@ -2,6 +2,7 @@ use super::fft::{FftWindowType, compute_fft};
 use super::legend::ChartLegend;
 use crate::dwarf::types::ExtendType;
 use crate::model::VariablePool;
+use crate::model::VariableReadClass;
 use crate::ui::plugin::{
     MemRWPlugin, PluginAction, PluginRenderContext, PluginUpdateContext, ToastLevel,
     VariableCandidate, temp_text_value,
@@ -191,7 +192,13 @@ impl MemRWPlugin for ChartPluginState {
     }
 
     fn update(&mut self, ctx: PluginUpdateContext<'_>) -> Vec<PluginAction> {
-        update_chart_data(self, ctx.pool, ctx.frame_data, ctx.running);
+        update_chart_data(
+            self,
+            ctx.pool,
+            ctx.frame_data,
+            ctx.running,
+            ctx.acquisition_requested,
+        );
         Vec::new()
     }
 
@@ -226,6 +233,7 @@ impl MemRWPlugin for ChartPluginState {
             actions.push(PluginAction::RemoveVariable {
                 var_id,
                 was_enabled: true,
+                read_class: VariableReadClass::Stream,
             });
         }
         if self.reset_timer {
@@ -286,7 +294,7 @@ impl MemRWPlugin for ChartPluginState {
                 pool.add(&candidate.to_config())
             };
             self.add_legend(variable_id, pool, curve_name, chart_color);
-            pool.bind(variable_id, true);
+            pool.bind(variable_id, true, VariableReadClass::Stream);
         }
         Ok(added)
     }
@@ -357,7 +365,7 @@ impl MemRWPlugin for ChartPluginState {
             legend.visible = saved.visible;
             legend.buffer_size = saved.buffer_size;
             self.legends.push(legend);
-            pool.bind(var_id, true);
+            pool.bind(var_id, true, VariableReadClass::Stream);
         }
         Ok(())
     }
@@ -413,8 +421,9 @@ fn update_chart_data(
     pool: &VariablePool,
     frame_data: &HashMap<usize, Vec<(f64, [u8; 8])>>,
     running: bool,
+    acquisition_requested: bool,
 ) {
-    if running {
+    if acquisition_requested {
         if !state.was_running {
             state.acq_frame_count = 0;
             state.acq_last_reset = Instant::now();
@@ -436,18 +445,20 @@ fn update_chart_data(
                 }
             }
         }
-        for legend in &mut state.legends {
-            if let Some(data) = frame_data.get(&legend.variable_id) {
-                let Some(variable) = pool.get(legend.variable_id) else {
-                    continue;
-                };
-                let sample_count = data.len() as u64;
-                let skip = legend.prepare_batch(data.len());
-                for (timestamp, raw) in data.iter().skip(skip) {
-                    let value = decode_value_f64(raw, &variable.ext_type);
-                    legend.push_prepared(*timestamp, value);
+        if running {
+            for legend in &mut state.legends {
+                if let Some(data) = frame_data.get(&legend.variable_id) {
+                    let Some(variable) = pool.get(legend.variable_id) else {
+                        continue;
+                    };
+                    let sample_count = data.len() as u64;
+                    let skip = legend.prepare_batch(data.len());
+                    for (timestamp, raw) in data.iter().skip(skip) {
+                        let value = decode_value_f64(raw, &variable.ext_type);
+                        legend.push_prepared(*timestamp, value);
+                    }
+                    state.acq_frame_count += sample_count;
                 }
-                state.acq_frame_count += sample_count;
             }
         }
         let elapsed = state.acq_last_reset.elapsed().as_secs_f64();
@@ -1700,10 +1711,26 @@ mod tests {
         let mut frame_data = HashMap::new();
         frame_data.insert(variable_id, vec![(0.0, [1; 8]), (0.1, [2; 8])]);
 
-        update_chart_data(&mut state, &pool, &frame_data, true);
+        update_chart_data(&mut state, &pool, &frame_data, true, true);
 
         assert_eq!(state.legends[0].data_history.len(), 2);
         assert_eq!(state.legends[0].data_history.back().unwrap().y, 2.0);
+    }
+
+    #[test]
+    fn debug_halt_keeps_the_acquisition_session_open() {
+        let pool = VariablePool::default();
+        let frame_data = std::collections::HashMap::new();
+        let mut state = ChartPluginState::default();
+
+        update_chart_data(&mut state, &pool, &frame_data, true, true);
+        assert!(state.was_running);
+
+        update_chart_data(&mut state, &pool, &frame_data, false, true);
+        assert!(state.was_running);
+
+        update_chart_data(&mut state, &pool, &frame_data, false, false);
+        assert!(!state.was_running);
     }
 
     #[test]

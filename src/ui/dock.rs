@@ -232,6 +232,7 @@ fn plugin_icon(plugin_id: &str, title: &str) -> String {
     match plugin_id {
         "chart" => "📈".to_owned(),
         "table" => "📋".to_owned(),
+        "debug" => "🐞".to_owned(),
         _ => title.chars().next().unwrap_or('□').to_string(),
     }
 }
@@ -240,6 +241,7 @@ fn native_window_title(plugin_id: &str, title: &str) -> String {
     match plugin_id {
         "chart" => "Chart".to_owned(),
         "table" => "Table".to_owned(),
+        "debug" => "Debug".to_owned(),
         _ => {
             let title = title
                 .chars()
@@ -276,6 +278,7 @@ fn show_plugin_docked(
             let controls = dock_control_bar(ui, Some(plugin.title()), "Pop out", paused);
             if controls.toggle_paused {
                 dock.toggle_plugin_paused(plugin.id());
+                actions.extend(plugin.on_enabled_changed(!dock.is_plugin_paused(plugin.id())));
             }
             if controls.move_viewport {
                 dock.set_popped(plugin.id(), true);
@@ -325,6 +328,8 @@ fn show_popout_viewports(
                     let controls = dock_control_bar(ui, Some(plugin.title()), "Pop in", paused);
                     if controls.toggle_paused {
                         dock.toggle_plugin_paused(plugin.id());
+                        actions
+                            .extend(plugin.on_enabled_changed(!dock.is_plugin_paused(plugin.id())));
                     }
                     if controls.move_viewport {
                         pop_in = true;

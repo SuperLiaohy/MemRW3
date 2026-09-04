@@ -2,7 +2,7 @@ use super::types::*;
 use anyhow::{Context, Result, bail};
 use gimli::{
     AttributeValue, DebugInfoOffset, DebuggingInformationEntry, Dwarf, EndianSlice,
-    EntriesTreeNode, RunTimeEndian, SectionId, Unit, UnitOffset, UnitSectionOffset,
+    EntriesTreeNode, Reader, RunTimeEndian, SectionId, Unit, UnitOffset, UnitSectionOffset,
 };
 use object::{Object, ObjectSection};
 use std::collections::{BTreeSet, HashMap};
@@ -41,6 +41,155 @@ pub fn load_elf(path: &str) -> Result<Vec<CuInfo>, String> {
         Ok(c) => Ok(c),
         Err(e) => Err(format!("解析 DWARF 数据失败: {e}")),
     }
+}
+
+pub type SourceLineRecord = crate::model::ExecutableLineView;
+
+#[derive(Debug, Clone, Default)]
+pub struct DebugSourceIndex {
+    pub files: Vec<String>,
+    pub executable_lines: Vec<SourceLineRecord>,
+}
+
+/// Collect source files and executable source rows referenced by DWARF line programs. Paths are
+/// the original compiler paths; the DebugPlugin may map their common root to a local directory.
+pub fn load_source_index(path: &str) -> Result<DebugSourceIndex, String> {
+    let data = fs::read(path).map_err(|error| format!("读取 ELF 失败: {error}"))?;
+    let object = object::read::File::parse(data.as_slice())
+        .map_err(|error| format!("解析 ELF 失败: {error}"))?;
+    let endian = match object.endianness() {
+        object::Endianness::Little => RunTimeEndian::Little,
+        object::Endianness::Big => RunTimeEndian::Big,
+    };
+    let dwarf = load_dwarf(&object, endian).map_err(|error| format!("加载 DWARF 失败: {error}"))?;
+    let mut paths = std::collections::BTreeSet::new();
+    let mut executable_lines = std::collections::BTreeMap::new();
+    let mut units = dwarf.units();
+    while let Some(header) = units
+        .next()
+        .map_err(|error| format!("读取编译单元失败: {error}"))?
+    {
+        let unit = dwarf
+            .unit(header)
+            .map_err(|error| format!("读取编译单元失败: {error}"))?;
+        let compilation_dir = unit.comp_dir.as_ref().and_then(reader_string);
+        if let Ok(mut tree) = unit.entries_tree(None)
+            && let Ok(root) = tree.root()
+            && let Ok(Some(name_attr)) = root.entry().attr_value(gimli::DW_AT_name)
+            && let Ok(Some(name)) = attr_to_string(&dwarf, &unit, name_attr)
+        {
+            let mut source = std::path::PathBuf::from(name);
+            if source.is_relative()
+                && let Some(compilation_dir) = compilation_dir.as_deref()
+            {
+                source = std::path::Path::new(compilation_dir).join(source);
+            }
+            paths.insert(source.to_string_lossy().into_owned());
+        }
+        if let Some(line_program) = unit.line_program.as_ref() {
+            let line_header = line_program.header();
+            for file in line_header.file_names() {
+                let Some(name) = dwarf
+                    .attr_string(&unit, file.path_name())
+                    .ok()
+                    .and_then(|reader| reader_string(&reader))
+                else {
+                    continue;
+                };
+                let directory = file.directory(line_header).and_then(|directory| {
+                    dwarf
+                        .attr_string(&unit, directory)
+                        .ok()
+                        .and_then(|reader| reader_string(&reader))
+                });
+                let mut source = directory
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default()
+                    .join(name);
+                if source.is_relative()
+                    && let Some(compilation_dir) = compilation_dir.as_deref()
+                {
+                    source = std::path::Path::new(compilation_dir).join(source);
+                }
+                paths.insert(source.to_string_lossy().into_owned());
+            }
+
+            let mut rows = line_program.clone().rows();
+            while let Some((header, row)) = rows
+                .next_row()
+                .map_err(|error| format!("解析 DWARF 行表失败: {error}"))?
+            {
+                if row.end_sequence() || !row.is_stmt() {
+                    continue;
+                }
+                let Some(line) = row.line().map(std::num::NonZeroU64::get) else {
+                    continue;
+                };
+                let Some(path) = source_path_for_index(
+                    &dwarf,
+                    &unit,
+                    header,
+                    row.file_index(),
+                    compilation_dir.as_deref(),
+                ) else {
+                    continue;
+                };
+                paths.insert(path.clone());
+                executable_lines
+                    .entry((path, line))
+                    .and_modify(|address: &mut u64| *address = (*address).min(row.address()))
+                    .or_insert(row.address());
+            }
+        }
+    }
+    Ok(DebugSourceIndex {
+        files: paths.into_iter().collect(),
+        executable_lines: executable_lines
+            .into_iter()
+            .map(|((path, line), address)| SourceLineRecord {
+                path,
+                line,
+                address,
+            })
+            .collect(),
+    })
+}
+
+fn reader_string<R: Reader>(reader: &R) -> Option<String> {
+    reader
+        .to_slice()
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(bytes.as_ref()).into_owned())
+}
+
+fn source_path_for_index<'a>(
+    dwarf: &Dwarf<EndianSlice<'a, RunTimeEndian>>,
+    unit: &Unit<EndianSlice<'a, RunTimeEndian>>,
+    header: &gimli::LineProgramHeader<EndianSlice<'a, RunTimeEndian>>,
+    file_index: u64,
+    compilation_dir: Option<&str>,
+) -> Option<String> {
+    let file = header.file(file_index)?;
+    let name = dwarf
+        .attr_string(unit, file.path_name())
+        .ok()
+        .and_then(|reader| reader_string(&reader))?;
+    let directory = file.directory(header).and_then(|directory| {
+        dwarf
+            .attr_string(unit, directory)
+            .ok()
+            .and_then(|reader| reader_string(&reader))
+    });
+    let mut source = directory
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(name);
+    if source.is_relative()
+        && let Some(compilation_dir) = compilation_dir
+    {
+        source = std::path::Path::new(compilation_dir).join(source);
+    }
+    Some(source.to_string_lossy().into_owned())
 }
 
 fn load_dwarf<'a>(
@@ -1140,5 +1289,32 @@ fn attr_to_string(
             Ok(Some(cow.into_owned()))
         }
         Err(_) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod source_file_tests {
+    #[test]
+    #[ignore = "parses the complete host test binary and is intentionally slow"]
+    fn discovers_project_sources_from_the_test_elf() {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        let executable = std::env::current_exe().unwrap();
+        let index = super::load_source_index(executable.to_string_lossy().as_ref()).unwrap();
+        let sources = index.files;
+        assert!(
+            sources
+                .iter()
+                .any(|path| path.ends_with("src/dwarf/extract.rs")),
+            "source list did not contain extract.rs: {sources:?}"
+        );
+        assert!(
+            index
+                .executable_lines
+                .iter()
+                .any(|row| row.path.ends_with("src/dwarf/extract.rs") && row.address != 0),
+            "source line index did not contain executable extract.rs rows"
+        );
     }
 }

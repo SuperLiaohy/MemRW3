@@ -5,13 +5,13 @@ use std::time::Instant;
 
 pub struct AppSession {
     pub connected: bool,
+    pub acquisition_requested: Arc<AtomicBool>,
     pub running: Arc<AtomicBool>,
     pub sampling_hz: f64,
     pub acq_cycle_count: Arc<AtomicU64>,
     pub slot_count: Arc<AtomicU64>,
     pub hz_last_cycles: u64,
     pub hz_last_time: Instant,
-    pub acq_stop: Arc<AtomicBool>,
     pub all_chips: Vec<String>,
     pub probe_id: Option<String>,
     pub cached_probe_list: Option<Vec<String>>,
@@ -38,13 +38,13 @@ impl Default for AppSession {
     fn default() -> Self {
         Self {
             connected: false,
+            acquisition_requested: Arc::new(AtomicBool::new(false)),
             running: Arc::new(AtomicBool::new(false)),
             sampling_hz: 0.0,
             acq_cycle_count: Arc::new(AtomicU64::new(0)),
             slot_count: Arc::new(AtomicU64::new(0)),
             hz_last_cycles: 0,
             hz_last_time: Instant::now(),
-            acq_stop: Arc::new(AtomicBool::new(false)),
             all_chips: Vec::new(),
             probe_id: None,
             cached_probe_list: None,

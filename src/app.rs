@@ -1,9 +1,11 @@
 use crate::dwarf;
-use crate::model::{AppSession, RegisterData, RegisterReadResult, VariablePool};
-use crate::probe::{AcqSlot, ProbeCell, ProbeSession, VarSlotMapping};
-use crate::sync::Sync;
+use crate::model::{AppSession, DebugSnapshot, RegisterData, RegisterReadResult, VariablePool};
+use crate::probe::{
+    AcqSlot, ProbeCommand, ProbeEvent, ProbeSession, ProbeWorkerHandle, VarSlotMapping, WriteKind,
+};
 use crate::ui;
 use crate::ui::chart_plugin::ChartPluginState;
+use crate::ui::debug_plugin::DebugPluginState;
 use crate::ui::dock::DockLayoutState;
 use crate::ui::plugin::{
     FrameData, MemRWPlugin, PluginAction, PluginUpdateContext, SavedPluginConfig, ToastLevel,
@@ -14,11 +16,7 @@ use eframe::egui;
 use egui::Ui;
 use serde::{Deserialize, Serialize};
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    thread::{self, JoinHandle},
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 pub struct MemRW3App {
@@ -26,120 +24,19 @@ pub struct MemRW3App {
     pub session: AppSession,
     variable_tree: VariableTreePanel,
     plugins: Vec<Box<dyn MemRWPlugin>>,
-    probe: Arc<ProbeCell>,
-    sync: Arc<Sync>,
+    probe_worker: ProbeWorkerHandle,
     pub toasts: egui_notify::Toasts,
     frame_data: FrameData,
     register_data: RegisterData,
     register_sequence: u64,
-    link_event_receiver: std::sync::mpsc::Receiver<String>,
     system_theme_monitor: ui::theme::SystemThemeMonitor,
-    flash_task: Option<FlashTask>,
+    flashing: bool,
+    flashing_file_name: Option<String>,
+    connection_pending: bool,
+    next_request_id: u64,
     rebuild_after_flash: bool,
-    _acq_handle: Option<JoinHandle<()>>,
-}
-
-struct FlashTask {
-    receiver: std::sync::mpsc::Receiver<Result<(), String>>,
-    file_name: String,
-    handle: Option<JoinHandle<()>>,
-}
-
-fn acq_thread(
-    probe: Arc<ProbeCell>,
-    running: Arc<AtomicBool>,
-    delay_us: Arc<AtomicU64>,
-    cycle_count: Arc<AtomicU64>,
-    sync: Arc<Sync>,
-    stop: Arc<AtomicBool>,
-    link_event_sender: std::sync::mpsc::SyncSender<String>,
-    repaint_ctx: egui::Context,
-) {
-    const LINK_CHECK_INTERVAL: Duration = Duration::from_millis(500);
-    let mut link_monitor = LinkHealthMonitor::default();
-    let mut last_link_check = Instant::now();
-
-    while !stop.load(Ordering::Relaxed) {
-        sync.try_acquire();
-
-        if stop.load(Ordering::Relaxed) {
-            return;
-        }
-
-        let acquisition_running = running.load(Ordering::Acquire);
-        let health_check_due = last_link_check.elapsed() >= LINK_CHECK_INTERVAL;
-        let (connected, slots_empty, acquired, health_result) = probe.with_mut(|probe_ref| {
-            if !probe_ref.connected {
-                return (false, true, false, None);
-            }
-            let slots_empty = probe_ref.slots.is_empty();
-            let acquisition_result = if acquisition_running && !slots_empty {
-                Some(probe_ref.acquire_from_slots())
-            } else {
-                None
-            };
-            let acquired = matches!(acquisition_result, Some(Ok(())));
-            let acquisition_failed = matches!(acquisition_result, Some(Err(_)));
-            let should_check =
-                health_check_due && (!acquisition_running || slots_empty || acquisition_failed);
-            let health_result = should_check.then(|| probe_ref.check_link());
-            (true, slots_empty, acquired, health_result)
-        });
-        if !connected {
-            link_monitor.reset();
-            thread::sleep(Duration::from_millis(50));
-            continue;
-        }
-
-        if let Some(health_result) = health_result {
-            last_link_check = Instant::now();
-            if let Some(error) = link_monitor.observe(health_result) {
-                probe.with_mut(ProbeSession::disconnect);
-                running.store(false, Ordering::Release);
-                let _ = link_event_sender.try_send(error);
-                repaint_ctx.request_repaint();
-                continue;
-            }
-        }
-
-        if acquired {
-            cycle_count.fetch_add(1, Ordering::Relaxed);
-        }
-        if acquisition_running && !slots_empty && acquired {
-            let d = delay_us.load(Ordering::Acquire);
-            if d > 0 {
-                thread::sleep(Duration::from_micros(d));
-            }
-        } else {
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
-}
-
-#[derive(Default)]
-struct LinkHealthMonitor {
-    consecutive_failures: u8,
-}
-
-impl LinkHealthMonitor {
-    const FAILURE_LIMIT: u8 = 3;
-
-    fn observe(&mut self, result: Result<(), String>) -> Option<String> {
-        match result {
-            Ok(()) => {
-                self.reset();
-                None
-            }
-            Err(error) => {
-                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-                (self.consecutive_failures >= Self::FAILURE_LIMIT).then_some(error)
-            }
-        }
-    }
-
-    fn reset(&mut self) {
-        self.consecutive_failures = 0;
-    }
+    debug_snapshot: DebugSnapshot,
+    sent_program_generation: u64,
 }
 
 impl MemRW3App {
@@ -147,6 +44,7 @@ impl MemRW3App {
         vec![
             Box::new(ChartPluginState::default()),
             Box::new(TablePluginState::default()),
+            Box::new(DebugPluginState::default()),
         ]
     }
 
@@ -161,138 +59,95 @@ impl MemRW3App {
         session.all_chips = chips;
 
         let system_theme_monitor = ui::theme::SystemThemeMonitor::new(repaint_ctx.clone());
-        let probe = Arc::new(ProbeCell::new(ProbeSession::default()));
-        let sync = Arc::new(Sync::new());
-
-        let acq_probe = probe.clone();
-        let acq_sync = sync.clone();
-        let acq_running = session.running.clone();
-        let acq_cycles = session.acq_cycle_count.clone();
-        let acq_stop_th = session.acq_stop.clone();
-        let delay_us = session.config.delay_us.clone();
-        let (link_event_sender, link_event_receiver) = std::sync::mpsc::sync_channel(1);
-        let _acq_handle = Some(thread::spawn(move || {
-            acq_thread(
-                acq_probe,
-                acq_running,
-                delay_us,
-                acq_cycles,
-                acq_sync,
-                acq_stop_th,
-                link_event_sender,
-                repaint_ctx,
-            );
-        }));
+        let probe_worker = ProbeWorkerHandle::spawn(
+            session.acquisition_requested.clone(),
+            session.running.clone(),
+            session.config.delay_us.clone(),
+            session.acq_cycle_count.clone(),
+            repaint_ctx,
+        );
 
         Self {
             dock: DockLayoutState::default(),
             session,
             variable_tree: VariableTreePanel::new(dwarf_state),
             plugins: Self::default_plugins(),
-            probe,
-            sync,
+            probe_worker,
             toasts: egui_notify::Toasts::default().with_anchor(egui_notify::Anchor::BottomRight),
             frame_data: FrameData::default(),
             register_data: RegisterData::default(),
             register_sequence: 0,
-            link_event_receiver,
             system_theme_monitor,
-            flash_task: None,
+            flashing: false,
+            flashing_file_name: None,
+            connection_pending: false,
+            next_request_id: 1,
             rebuild_after_flash: false,
-            _acq_handle,
+            debug_snapshot: DebugSnapshot::default(),
+            sent_program_generation: 0,
         }
     }
 
     pub fn sync_connect(&mut self) {
+        if self.connection_pending || self.is_flashing() {
+            return;
+        }
         let chip = self.session.config.probe_chip.clone();
         let protocol = self.session.config.probe_protocol.clone();
         let speed = self.session.config.probe_speed_khz;
         let probe_id = self.session.probe_id.clone();
-        let probe = self.probe.clone();
         let connected = self.session.connected;
 
         if connected {
+            self.session
+                .acquisition_requested
+                .store(false, Ordering::Release);
             self.session.set_running(false);
-            self.sync.send_request(move || {
-                probe.with_mut(ProbeSession::disconnect);
-            });
-            self.session.connected = false;
-            self.session.timer_was_started = false;
-            self.toasts
-                .info("已断开连接")
-                .duration(Some(Duration::from_secs(5)))
-                .closable(true);
+            self.connection_pending = true;
+            if let Err(error) = self.probe_worker.send(ProbeCommand::Disconnect) {
+                self.connection_pending = false;
+                self.show_plugin_toast(ToastLevel::Error, error);
+            }
         } else {
             for var in self.session.config.pool.iter() {
                 var.incoming.discard_all();
             }
-            let sync = self.sync.clone();
-            let running = self.session.running.clone();
-            let connection_result = sync.send_request(move || {
-                probe.with_mut(|probe| {
-                    probe.chip_name = chip;
-                    probe.protocol = protocol;
-                    probe.speed_khz = speed;
-                    probe.selected_probe_id = probe_id;
-                    let connected = probe.connect();
-                    if !connected {
-                        running.store(false, Ordering::Release);
-                    }
-                    (
-                        connected,
-                        probe.chip_name.clone(),
-                        probe.speed_khz,
-                        probe.protocol.clone(),
-                        probe.selected_probe_id.clone(),
-                        probe.last_error.clone(),
-                    )
-                })
-            });
-            let (connected, chip_name, speed_khz, protocol, selected_probe_id, last_error) =
-                connection_result;
-            self.session.connected = connected;
-            self.toasts
-                .info(format!(
-                    "连接配置: chip:{},freq:{},protocol:{},id:{}",
-                    chip_name,
-                    speed_khz,
-                    protocol,
-                    selected_probe_id.as_deref().unwrap_or("auto")
-                ))
-                .duration(Some(Duration::from_secs(5)))
-                .closable(true);
-            if !self.session.connected {
-                let err = last_error.unwrap_or_default();
-                self.toasts
-                    .error(err)
-                    .duration(Some(Duration::from_secs(5)))
-                    .closable(true);
-                self.session.set_running(false);
-            } else {
-                self.toasts
-                    .success("连接成功")
-                    .duration(Some(Duration::from_secs(5)))
-                    .closable(true);
+            self.connection_pending = true;
+            if let Err(error) = self.probe_worker.send(ProbeCommand::Connect {
+                chip_name: chip,
+                protocol,
+                speed_khz: speed,
+                selected_probe_id: probe_id,
+            }) {
+                self.connection_pending = false;
+                self.show_plugin_toast(ToastLevel::Error, error);
             }
         }
     }
 
     pub fn sync_reset(&mut self) {
-        let probe = self.probe.clone();
-        self.sync.send_request(move || {
-            probe.with_mut(ProbeSession::reset_target);
-        });
+        if let Err(error) = self.probe_worker.send(ProbeCommand::Reset) {
+            self.show_plugin_toast(ToastLevel::Error, error);
+        }
     }
 
     pub fn is_flashing(&self) -> bool {
-        self.flash_task.is_some()
+        self.flashing
+    }
+
+    pub fn is_connection_pending(&self) -> bool {
+        self.connection_pending
+    }
+
+    pub fn is_target_halted(&self) -> bool {
+        self.debug_snapshot.target_state.is_halted()
     }
 
     pub fn start_flash_firmware(&mut self, path: std::path::PathBuf) -> Result<(), String> {
         if !self.session.connected {
             return Err("请先连接目标设备".to_owned());
         }
-        if self.flash_task.is_some() {
+        if self.flashing {
             return Err("已有烧录任务正在执行".to_owned());
         }
 
@@ -302,84 +157,23 @@ impl MemRW3App {
             .unwrap_or("firmware")
             .to_owned();
         self.session.set_running(false);
+        self.session
+            .acquisition_requested
+            .store(false, Ordering::Release);
         self.session.timer_was_started = false;
         self.reset_plugin_data();
         for variable in self.session.config.pool.iter() {
             variable.incoming.discard_all();
         }
 
-        let probe = self.probe.clone();
-        let sync = self.sync.clone();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let handle = thread::spawn(move || {
-            let outcome = sync.send_request(|| probe.with_mut(|probe| probe.flash_firmware(&path)));
-            let _ = sender.send(outcome);
-        });
-
-        self.flash_task = Some(FlashTask {
-            receiver,
-            file_name,
-            handle: Some(handle),
-        });
+        self.probe_worker.send(ProbeCommand::Flash { path })?;
+        self.flashing = true;
+        self.flashing_file_name = Some(file_name);
         Ok(())
     }
 
-    fn poll_flash_task(&mut self) {
-        let Some(task) = self.flash_task.as_ref() else {
-            return;
-        };
-        let outcome = match task.receiver.try_recv() {
-            Ok(outcome) => outcome,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("烧录线程意外结束".to_owned()),
-        };
-        let mut task = self.flash_task.take().unwrap();
-        if let Some(handle) = task.handle.take() {
-            let _ = handle.join();
-        }
-
-        for variable in self.session.config.pool.iter() {
-            variable.incoming.discard_all();
-        }
-        match outcome {
-            Ok(()) => {
-                self.toasts
-                    .success(format!("固件 {} 烧录并校验成功", task.file_name))
-                    .duration(Some(Duration::from_secs(5)));
-            }
-            Err(error) => {
-                self.toasts
-                    .error(error)
-                    .duration(Some(Duration::from_secs(8)))
-                    .closable(true);
-            }
-        }
-        if self.rebuild_after_flash {
-            self.rebuild_after_flash = false;
-            self.rebuild_slots();
-        }
-    }
-
-    fn poll_link_events(&mut self) {
-        while let Ok(error) = self.link_event_receiver.try_recv() {
-            if !self.session.connected {
-                continue;
-            }
-            self.session.set_running(false);
-            self.session.connected = false;
-            self.session.timer_was_started = false;
-            self.toasts
-                .error(format!("Probe 物理链路已断开：{error}"))
-                .duration(Some(Duration::from_secs(8)))
-                .closable(true);
-        }
-    }
-
     pub fn reset_timer(&self) {
-        let probe = self.probe.clone();
-        self.sync.send_request(move || {
-            probe.with_mut(|probe| probe.timer = Instant::now());
-        });
+        let _ = self.probe_worker.send(ProbeCommand::ResetTimer);
     }
 
     fn reset_plugin_data(&mut self) {
@@ -398,6 +192,9 @@ impl MemRW3App {
 
     pub fn set_acquisition_running(&mut self, running: bool) {
         if !running {
+            self.session
+                .acquisition_requested
+                .store(false, Ordering::Release);
             self.session.set_running(false);
             return;
         }
@@ -405,6 +202,12 @@ impl MemRW3App {
             return;
         }
 
+        self.session
+            .acquisition_requested
+            .store(true, Ordering::Release);
+        if self.debug_snapshot.target_state.is_halted() {
+            return;
+        }
         self.rebuild_slots();
         if !self.session.timer_was_started {
             for variable in self.session.config.pool.iter() {
@@ -420,30 +223,38 @@ impl MemRW3App {
     pub fn clear_all_buffers(&mut self) {
         self.session.timer_was_started = self.session.is_running();
         self.reset_plugin_data();
-        let pool = &self.session.config.pool;
-        let probe = self.probe.clone();
-        self.sync.send_request(move || {
-            probe.with_mut(|probe| probe.timer = Instant::now());
-            for var in pool.iter() {
-                var.incoming.discard_all();
-            }
-        });
+        self.reset_timer();
+        for var in self.session.config.pool.iter() {
+            var.incoming.discard_all();
+        }
     }
 
-    pub fn write_variable(&self, var_id: usize, value: u64) -> bool {
+    fn next_request_id(&mut self) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        request_id
+    }
+
+    pub fn write_variable(&mut self, var_id: usize, value: u64) -> bool {
         let var = match self.session.config.pool.get(var_id) {
             Some(v) => v,
             None => return false,
         };
         let addr = var.address;
         let size = var.size;
-        let probe = self.probe.clone();
-        self.sync
-            .send_request(|| probe.with_mut(|probe| probe.write_value(addr, size, value)))
+        let request_id = self.next_request_id();
+        self.probe_worker
+            .send(ProbeCommand::WriteValue {
+                request_id,
+                address: addr,
+                size,
+                value,
+                kind: WriteKind::Variable,
+            })
+            .is_ok()
     }
 
     pub fn rebuild_slots(&self) {
-        let probe = self.probe.clone();
         let pool = &self.session.config.pool;
         let mut slot_map: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
         let mut slots: Vec<AcqSlot> = Vec::new();
@@ -461,10 +272,16 @@ impl MemRW3App {
                     index
                 } else {
                     let index = slots.len();
-                    slots.push(AcqSlot { address: addr });
+                    slots.push(AcqSlot {
+                        address: addr,
+                        needed_for_latest: var.latest_readers > 0,
+                    });
                     slot_map.insert(addr, index);
                     index
                 };
+                if var.latest_readers > 0 {
+                    slots[slot_index].needed_for_latest = true;
+                }
                 slot_indices.push(slot_index);
             }
             mappings.push(VarSlotMapping {
@@ -472,23 +289,32 @@ impl MemRW3App {
                 size: var.size,
                 byte_offset,
                 incoming: var.incoming.clone(),
+                latest: var.latest.clone(),
+                stream_enabled: var.stream_readers > 0,
+                latest_enabled: var.latest_readers > 0,
             });
         }
 
         let slot_n = slots.len() as u64;
-        let sc = self.session.slot_count.clone();
-        self.sync.send_request(move || {
-            probe.with_mut(|probe| {
-                probe.slots = slots;
-                probe.slot_values.resize(probe.slots.len(), [0; 4]);
-                probe.var_mappings = mappings;
-            });
-            sc.store(slot_n, Ordering::Relaxed);
-        });
+        if self
+            .probe_worker
+            .send(ProbeCommand::ConfigureSlots { slots, mappings })
+            .is_ok()
+        {
+            self.session.slot_count.store(slot_n, Ordering::Relaxed);
+        }
     }
 
-    pub fn unbind_variable(&mut self, var_id: usize, was_enabled: bool) {
-        self.session.config.pool.unbind(var_id, was_enabled);
+    pub fn unbind_variable(
+        &mut self,
+        var_id: usize,
+        was_enabled: bool,
+        read_class: crate::model::VariableReadClass,
+    ) {
+        self.session
+            .config
+            .pool
+            .unbind(var_id, was_enabled, read_class);
     }
 
     fn handle_plugin_actions(&mut self, actions: Vec<PluginAction>) {
@@ -501,19 +327,40 @@ impl MemRW3App {
                 } => {
                     self.variable_tree.open(plugin_id, viewport_id);
                 }
+                PluginAction::LoadProgram { path } => {
+                    match self.variable_tree.load_program_path(path) {
+                        Ok(()) => {
+                            self.sync_program_to_worker();
+                            self.toasts
+                                .success("ELF 与调试信息已加载")
+                                .duration(Some(Duration::from_secs(3)));
+                        }
+                        Err(error) => {
+                            self.toasts
+                                .error(error)
+                                .duration(Some(Duration::from_secs(8)))
+                                .closable(true);
+                        }
+                    }
+                }
                 PluginAction::RemoveVariable {
                     var_id,
                     was_enabled,
+                    read_class,
                 } => {
-                    self.unbind_variable(var_id, was_enabled);
+                    self.unbind_variable(var_id, was_enabled, read_class);
                     rebuild_slots = true;
                 }
-                PluginAction::SetVariableEnabled { var_id, enabled } => {
+                PluginAction::SetVariableEnabled {
+                    var_id,
+                    enabled,
+                    read_class,
+                } => {
                     if self
                         .session
                         .config
                         .pool
-                        .set_binding_enabled(var_id, enabled)
+                        .set_binding_enabled(var_id, enabled, read_class)
                     {
                         if !enabled {
                             if let Some(variable) = self.session.config.pool.get(var_id) {
@@ -532,14 +379,9 @@ impl MemRW3App {
                             .duration(Some(Duration::from_secs(3)));
                         continue;
                     }
-                    let ok = self.write_variable(var_id, value);
-                    if ok {
+                    if !self.write_variable(var_id, value) {
                         self.toasts
-                            .success("写入成功")
-                            .duration(Some(Duration::from_secs(2)));
-                    } else {
-                        self.toasts
-                            .error("写入失败")
+                            .error("无法提交写入请求")
                             .duration(Some(Duration::from_secs(3)));
                     }
                 }
@@ -547,15 +389,12 @@ impl MemRW3App {
                     if requests.is_empty() || !self.session.connected || self.is_flashing() {
                         continue;
                     }
-                    let probe = self.probe.clone();
-                    let results = self.sync.send_request(move || {
-                        probe.with_mut(|probe| probe.read_registers(&requests))
-                    });
-                    self.register_sequence = self.register_sequence.wrapping_add(1);
-                    let sequence = self.register_sequence;
-                    for (id, value) in results {
-                        self.register_data
-                            .insert(id, RegisterReadResult { sequence, value });
+                    let request_id = self.next_request_id();
+                    if let Err(error) = self.probe_worker.send(ProbeCommand::ReadRegisters {
+                        request_id,
+                        requests,
+                    }) {
+                        self.show_plugin_toast(ToastLevel::Error, error);
                     }
                 }
                 PluginAction::WriteRegister { request } => {
@@ -571,24 +410,15 @@ impl MemRW3App {
                             .duration(Some(Duration::from_secs(3)));
                         continue;
                     }
-                    let probe = self.probe.clone();
-                    let ok = self.sync.send_request(move || {
-                        probe.with_mut(|probe| {
-                            probe.write_value(
-                                request.address,
-                                u32::from(request.size_bytes),
-                                request.value,
-                            )
-                        })
-                    });
-                    if ok {
-                        self.toasts
-                            .success("寄存器写入成功")
-                            .duration(Some(Duration::from_secs(2)));
-                    } else {
-                        self.toasts
-                            .error("寄存器写入失败")
-                            .duration(Some(Duration::from_secs(3)));
+                    let request_id = self.next_request_id();
+                    if let Err(error) = self.probe_worker.send(ProbeCommand::WriteValue {
+                        request_id,
+                        address: request.address,
+                        size: u32::from(request.size_bytes),
+                        value: request.value,
+                        kind: WriteKind::Register,
+                    }) {
+                        self.show_plugin_toast(ToastLevel::Error, error);
                     }
                 }
                 PluginAction::ResetTimer => {
@@ -598,6 +428,21 @@ impl MemRW3App {
                 }
                 PluginAction::RebuildSlots => {
                     rebuild_slots = true;
+                }
+                PluginAction::Debug(command) => {
+                    if self.is_flashing() {
+                        self.toasts
+                            .error("固件烧录期间不能执行调试命令")
+                            .duration(Some(Duration::from_secs(3)));
+                        continue;
+                    }
+                    let request_id = self.next_request_id();
+                    if let Err(error) = self.probe_worker.send(ProbeCommand::Debug {
+                        request_id,
+                        command,
+                    }) {
+                        self.show_plugin_toast(ToastLevel::Error, error);
+                    }
                 }
                 PluginAction::Toast { level, message } => {
                     self.show_plugin_toast(level, message);
@@ -627,18 +472,176 @@ impl MemRW3App {
             }
         }
     }
-}
 
-impl Drop for MemRW3App {
-    fn drop(&mut self) {
-        if let Some(mut task) = self.flash_task.take() {
-            if let Some(handle) = task.handle.take() {
-                let _ = handle.join();
+    fn poll_probe_events(&mut self) {
+        while let Ok(event) = self.probe_worker.event_receiver.try_recv() {
+            match event {
+                ProbeEvent::ConnectFinished {
+                    connected,
+                    chip_name,
+                    speed_khz,
+                    protocol,
+                    selected_probe_id,
+                    error,
+                } => {
+                    self.connection_pending = false;
+                    self.session.connected = connected;
+                    self.toasts
+                        .info(format!(
+                            "连接配置: chip:{chip_name},freq:{speed_khz},protocol:{protocol},id:{}",
+                            selected_probe_id.as_deref().unwrap_or("auto")
+                        ))
+                        .duration(Some(Duration::from_secs(5)))
+                        .closable(true);
+                    if connected {
+                        self.toasts
+                            .success("连接成功")
+                            .duration(Some(Duration::from_secs(5)));
+                        self.rebuild_slots();
+                    } else {
+                        self.session.set_running(false);
+                        self.toasts
+                            .error(error.unwrap_or_else(|| "连接失败".to_owned()))
+                            .duration(Some(Duration::from_secs(5)))
+                            .closable(true);
+                    }
+                }
+                ProbeEvent::Disconnected => {
+                    self.connection_pending = false;
+                    self.session.connected = false;
+                    self.session.timer_was_started = false;
+                    self.toasts
+                        .info("已断开连接")
+                        .duration(Some(Duration::from_secs(5)));
+                }
+                ProbeEvent::ResetFinished(result) => match result {
+                    Ok(()) => {
+                        self.toasts
+                            .success("目标已复位")
+                            .duration(Some(Duration::from_secs(2)));
+                    }
+                    Err(error) => {
+                        self.toasts
+                            .error(error)
+                            .duration(Some(Duration::from_secs(5)));
+                    }
+                },
+                ProbeEvent::FlashFinished(result) => {
+                    self.flashing = false;
+                    let file_name = self
+                        .flashing_file_name
+                        .take()
+                        .unwrap_or_else(|| "firmware".to_owned());
+                    for variable in self.session.config.pool.iter() {
+                        variable.incoming.discard_all();
+                    }
+                    match result {
+                        Ok(()) => {
+                            self.toasts
+                                .success(format!("固件 {file_name} 烧录并校验成功"))
+                                .duration(Some(Duration::from_secs(5)));
+                        }
+                        Err(error) => {
+                            self.toasts
+                                .error(error)
+                                .duration(Some(Duration::from_secs(8)))
+                                .closable(true);
+                        }
+                    }
+                    if self.rebuild_after_flash {
+                        self.rebuild_after_flash = false;
+                        self.rebuild_slots();
+                    }
+                }
+                ProbeEvent::WriteFinished {
+                    request_id,
+                    kind,
+                    result,
+                } => {
+                    let _ = request_id;
+                    match (kind, result) {
+                        (WriteKind::Variable, Ok(())) => {
+                            self.toasts
+                                .success("写入成功")
+                                .duration(Some(Duration::from_secs(2)));
+                        }
+                        (WriteKind::Register, Ok(())) => {
+                            self.toasts
+                                .success("寄存器写入成功")
+                                .duration(Some(Duration::from_secs(2)));
+                        }
+                        (_, Err(error)) => {
+                            self.toasts
+                                .error(error)
+                                .duration(Some(Duration::from_secs(3)));
+                        }
+                    }
+                }
+                ProbeEvent::RegistersRead {
+                    request_id,
+                    results,
+                } => {
+                    let _ = request_id;
+                    self.register_sequence = self.register_sequence.wrapping_add(1);
+                    let sequence = self.register_sequence;
+                    for (id, value) in results {
+                        self.register_data
+                            .insert(id, RegisterReadResult { sequence, value });
+                    }
+                }
+                ProbeEvent::LinkLost(error) => {
+                    self.session.set_running(false);
+                    self.session.connected = false;
+                    self.session.timer_was_started = false;
+                    self.connection_pending = false;
+                    self.toasts
+                        .error(format!("Probe 物理链路已断开：{error}"))
+                        .duration(Some(Duration::from_secs(8)))
+                        .closable(true);
+                }
+                ProbeEvent::ProgramLoaded { generation, result } => {
+                    if generation != self.variable_tree.program_generation() {
+                        continue;
+                    }
+                    if let Err(error) = result {
+                        self.toasts
+                            .error(error)
+                            .duration(Some(Duration::from_secs(8)))
+                            .closable(true);
+                    }
+                }
+                ProbeEvent::DebugUpdated {
+                    request_id,
+                    snapshot,
+                } => {
+                    let _ = request_id;
+                    let generation_matches = self.sent_program_generation == 0
+                        || snapshot.program_generation == self.sent_program_generation;
+                    if generation_matches && snapshot.revision >= self.debug_snapshot.revision {
+                        self.debug_snapshot = *snapshot;
+                    }
+                }
             }
         }
-        self.session.acq_stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self._acq_handle.take() {
-            let _ = handle.join();
+    }
+
+    fn sync_program_to_worker(&mut self) {
+        let generation = self.variable_tree.program_generation();
+        if generation == 0 || generation == self.sent_program_generation {
+            return;
+        }
+        let Some(path) = self.variable_tree.loaded_elf_path() else {
+            return;
+        };
+        if self
+            .probe_worker
+            .send(ProbeCommand::LoadProgram {
+                path: path.into(),
+                generation,
+            })
+            .is_ok()
+        {
+            self.sent_program_generation = generation;
         }
     }
 }
@@ -646,8 +649,8 @@ impl Drop for MemRW3App {
 impl eframe::App for MemRW3App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.system_theme_monitor.apply(ui.ctx());
-        self.poll_link_events();
-        self.poll_flash_task();
+        self.poll_probe_events();
+        self.sync_program_to_worker();
         if self.is_flashing() {
             ui.ctx().request_repaint_after(Duration::from_millis(50));
         }
@@ -676,6 +679,7 @@ impl eframe::App for MemRW3App {
             }
         }
         let connected = self.session.connected;
+        let acquisition_requested = self.session.acquisition_requested.load(Ordering::Acquire);
         let hardware_busy = self.is_flashing();
         let mut update_actions = Vec::new();
         for plugin in &mut self.plugins {
@@ -687,8 +691,10 @@ impl eframe::App for MemRW3App {
                 frame_data: &frame_data,
                 register_data: &self.register_data,
                 running,
+                acquisition_requested,
                 connected,
                 hardware_busy,
+                debug_snapshot: &self.debug_snapshot,
                 egui_ctx: ui.ctx(),
             }));
         }
@@ -776,8 +782,8 @@ impl eframe::App for MemRW3App {
             }
         });
         self.frame_data = frame_data;
-        if let Some(task) = self.flash_task.as_ref() {
-            firmware_flash_modal(ui.ctx(), &task.file_name);
+        if let Some(file_name) = self.flashing_file_name.as_deref() {
+            firmware_flash_modal(ui.ctx(), file_name);
         }
         self.toasts.show(ui.ctx());
     }
@@ -956,6 +962,11 @@ impl MemRW3App {
         self.session.config.probe_protocol = config.probe_protocol;
         self.session.config.probe_speed_khz = config.probe_speed_khz;
         self.session.config.pool = new_pool;
+        let request_id = self.next_request_id();
+        let _ = self.probe_worker.send(ProbeCommand::Debug {
+            request_id,
+            command: crate::model::DebugCommand::ReplaceBreakpoints(Vec::new()),
+        });
         self.plugins = new_plugins;
         self.variable_tree
             .apply_config_source(config.elf_path, new_dwarf_state);
@@ -1119,23 +1130,4 @@ fn find_font(
 #[cfg(not(target_os = "linux"))]
 fn scan_font_directories() -> Option<(String, Arc<egui::FontData>, String)> {
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::LinkHealthMonitor;
-
-    #[test]
-    fn link_monitor_requires_consecutive_failures_and_recovers_after_success() {
-        let mut monitor = LinkHealthMonitor::default();
-        assert!(monitor.observe(Err("first".to_owned())).is_none());
-        assert!(monitor.observe(Err("second".to_owned())).is_none());
-        assert!(monitor.observe(Ok(())).is_none());
-        assert!(monitor.observe(Err("first again".to_owned())).is_none());
-        assert!(monitor.observe(Err("second again".to_owned())).is_none());
-        assert_eq!(
-            monitor.observe(Err("link removed".to_owned())),
-            Some("link removed".to_owned())
-        );
-    }
 }

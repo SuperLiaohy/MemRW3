@@ -8,6 +8,7 @@ use super::svd_panel::{SavedSvdRegister, SvdPanelState, render_svd_panel};
 use super::tree::{CheckState, SavedTableLeaf, SavedTableNode, TableNode};
 use crate::dwarf::types::ExtendType;
 use crate::model::VariablePool;
+use crate::model::VariableReadClass;
 use crate::ui::plugin::{
     MemRWPlugin, PluginAction, PluginRenderContext, PluginUpdateContext, ToastLevel,
     VariableCandidate, temp_text_value,
@@ -111,17 +112,20 @@ impl MemRWPlugin for TablePluginState {
                 viewport_id: ctx.viewport_id,
             });
         }
-        actions.extend(
-            self.pending_enabled
-                .drain(..)
-                .map(|(var_id, enabled)| PluginAction::SetVariableEnabled { var_id, enabled }),
-        );
+        actions.extend(self.pending_enabled.drain(..).map(|(var_id, enabled)| {
+            PluginAction::SetVariableEnabled {
+                var_id,
+                enabled,
+                read_class: VariableReadClass::Latest,
+            }
+        }));
         actions.extend(
             self.pending_removals
                 .drain(..)
                 .map(|(var_id, was_enabled)| PluginAction::RemoveVariable {
                     var_id,
                     was_enabled,
+                    read_class: VariableReadClass::Latest,
                 }),
         );
         actions.extend(

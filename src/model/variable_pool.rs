@@ -2,6 +2,35 @@ use crate::dwarf::types::{ExtendConfig, ExtendType};
 use crate::model::RingBuffer;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableReadClass {
+    Stream,
+    Latest,
+}
+
+#[derive(Default)]
+pub struct LatestValue {
+    value: AtomicU64,
+    sequence: AtomicU64,
+}
+
+impl LatestValue {
+    pub fn store(&self, bytes: [u8; 8]) {
+        self.value
+            .store(u64::from_le_bytes(bytes), Ordering::Relaxed);
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn load(&self) -> Option<(u64, [u8; 8])> {
+        let sequence = self.sequence.load(Ordering::Acquire);
+        (sequence != 0).then(|| {
+            let value = self.value.load(Ordering::Relaxed).to_le_bytes();
+            (sequence, value)
+        })
+    }
+}
 
 pub struct PooledVariable {
     pub id: usize,
@@ -10,8 +39,11 @@ pub struct PooledVariable {
     pub ext_type: ExtendType,
     pub size: u32,
     pub incoming: Arc<RingBuffer<(f64, [u8; 8])>>,
+    pub latest: Arc<LatestValue>,
     pub plugins_cnt: usize,
     pub active_readers: usize,
+    pub stream_readers: usize,
+    pub latest_readers: usize,
 }
 
 #[derive(Default)]
@@ -33,8 +65,11 @@ impl VariablePool {
             ext_type: config.ext_type.clone(),
             size: config.size,
             incoming: Arc::new(RingBuffer::new()),
+            latest: Arc::new(LatestValue::default()),
             plugins_cnt: 0,
             active_readers: 0,
+            stream_readers: 0,
+            latest_readers: 0,
         });
         self.id_index.insert(id, idx);
         id
@@ -95,18 +130,27 @@ impl VariablePool {
         })
     }
 
-    pub fn bind(&mut self, id: usize, enabled: bool) -> bool {
+    pub fn bind(&mut self, id: usize, enabled: bool, class: VariableReadClass) -> bool {
         let Some(variable) = self.get_mut(id) else {
             return false;
         };
         variable.plugins_cnt += 1;
         if enabled {
             variable.active_readers += 1;
+            match class {
+                VariableReadClass::Stream => variable.stream_readers += 1,
+                VariableReadClass::Latest => variable.latest_readers += 1,
+            }
         }
         true
     }
 
-    pub fn set_binding_enabled(&mut self, id: usize, enabled: bool) -> bool {
+    pub fn set_binding_enabled(
+        &mut self,
+        id: usize,
+        enabled: bool,
+        class: VariableReadClass,
+    ) -> bool {
         let Some(variable) = self.get_mut(id) else {
             return false;
         };
@@ -115,16 +159,28 @@ impl VariablePool {
                 return false;
             }
             variable.active_readers += 1;
+            match class {
+                VariableReadClass::Stream => variable.stream_readers += 1,
+                VariableReadClass::Latest => variable.latest_readers += 1,
+            }
         } else {
             if variable.active_readers == 0 {
                 return false;
             }
             variable.active_readers -= 1;
+            match class {
+                VariableReadClass::Stream => {
+                    variable.stream_readers = variable.stream_readers.saturating_sub(1)
+                }
+                VariableReadClass::Latest => {
+                    variable.latest_readers = variable.latest_readers.saturating_sub(1)
+                }
+            }
         }
         true
     }
 
-    pub fn unbind(&mut self, id: usize, was_enabled: bool) -> bool {
+    pub fn unbind(&mut self, id: usize, was_enabled: bool, class: VariableReadClass) -> bool {
         let should_remove = {
             let Some(variable) = self.get_mut(id) else {
                 return false;
@@ -132,6 +188,14 @@ impl VariablePool {
             variable.plugins_cnt = variable.plugins_cnt.saturating_sub(1);
             if was_enabled {
                 variable.active_readers = variable.active_readers.saturating_sub(1);
+                match class {
+                    VariableReadClass::Stream => {
+                        variable.stream_readers = variable.stream_readers.saturating_sub(1)
+                    }
+                    VariableReadClass::Latest => {
+                        variable.latest_readers = variable.latest_readers.saturating_sub(1)
+                    }
+                }
             }
             variable.plugins_cnt == 0
         };
@@ -146,7 +210,7 @@ impl VariablePool {
 mod tests {
     use crate::dwarf::types::{ExtendConfig, ExtendType};
 
-    use super::VariablePool;
+    use super::{VariablePool, VariableReadClass};
 
     fn config() -> ExtendConfig {
         ExtendConfig {
@@ -163,23 +227,47 @@ mod tests {
     fn tracks_bindings_and_active_readers_independently() {
         let mut pool = VariablePool::default();
         let id = pool.add(&config());
-        assert!(pool.bind(id, true));
-        assert!(pool.bind(id, true));
-        assert!(pool.set_binding_enabled(id, false));
+        assert!(pool.bind(id, true, VariableReadClass::Stream));
+        assert!(pool.bind(id, true, VariableReadClass::Latest));
+        assert_eq!(
+            pool.get(id).map(|variable| variable.stream_readers),
+            Some(1)
+        );
+        assert_eq!(
+            pool.get(id).map(|variable| variable.latest_readers),
+            Some(1)
+        );
+        assert!(pool.set_binding_enabled(id, false, VariableReadClass::Latest));
         assert_eq!(pool.get(id).map(|variable| variable.plugins_cnt), Some(2));
         assert_eq!(
             pool.get(id).map(|variable| variable.active_readers),
             Some(1)
         );
+        assert_eq!(
+            pool.get(id).map(|variable| variable.latest_readers),
+            Some(0)
+        );
 
-        assert!(pool.unbind(id, false));
+        assert!(pool.unbind(id, false, VariableReadClass::Latest));
         assert!(pool.contains(id));
         assert_eq!(
             pool.get(id).map(|variable| variable.active_readers),
             Some(1)
         );
 
-        assert!(pool.unbind(id, true));
+        assert!(pool.unbind(id, true, VariableReadClass::Stream));
         assert!(!pool.contains(id));
+    }
+
+    #[test]
+    fn latest_value_keeps_table_data_out_of_the_stream_queue() {
+        let mut pool = VariablePool::default();
+        let id = pool.add(&config());
+        let variable = pool.get(id).unwrap();
+        variable.latest.store(42_u64.to_le_bytes());
+
+        assert_eq!(variable.latest.load(), Some((1, 42_u64.to_le_bytes())));
+        let mut samples = Vec::new();
+        assert_eq!(variable.incoming.drain_into(&mut samples), 0);
     }
 }

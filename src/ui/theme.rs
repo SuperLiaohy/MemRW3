@@ -241,6 +241,14 @@ fn configured_style(mut style: egui::Style, palette: Palette, dark_mode: bool) -
     widgets.open.fg_stroke = Stroke::new(1.0, palette.text);
     widgets.open.corner_radius = egui::CornerRadius::same(4);
 
+    // Keep hover/press paint inside the widget allocation. Expansion makes
+    // adjacent controls appear to move even though their logical rect is stable.
+    widgets.noninteractive.expansion = 0.0;
+    widgets.inactive.expansion = 0.0;
+    widgets.hovered.expansion = 0.0;
+    widgets.active.expansion = 0.0;
+    widgets.open.expansion = 0.0;
+
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
     style.spacing.button_padding = egui::vec2(8.0, 3.0);
     style.spacing.window_margin = egui::Margin::same(8);
@@ -335,6 +343,11 @@ mod tests {
         assert!(dark.visuals.dark_mode);
         assert!(!light.visuals.dark_mode);
         assert_ne!(dark.visuals.panel_fill, light.visuals.panel_fill);
+        for style in [&dark, &light] {
+            assert_eq!(style.visuals.widgets.hovered.expansion, 0.0);
+            assert_eq!(style.visuals.widgets.active.expansion, 0.0);
+            assert_eq!(style.visuals.widgets.open.expansion, 0.0);
+        }
         assert_eq!(
             context.options(|options| options.theme_preference),
             egui::ThemePreference::Light

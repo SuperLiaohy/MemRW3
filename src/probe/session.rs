@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::model::{RegisterReadRequest, RingBuffer};
+use crate::model::{LatestValue, RegisterReadRequest, RingBuffer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FirmwareImageKind {
@@ -35,6 +35,7 @@ impl FirmwareImageKind {
 /// Deduplicated: multiple variables may share the same address.
 pub struct AcqSlot {
     pub address: u64,
+    pub needed_for_latest: bool,
 }
 
 /// Maps one PooledVariable to its set of AcqSlots.
@@ -44,6 +45,9 @@ pub struct VarSlotMapping {
     /// Byte offset of the variable's address within the first 32-bit slot.
     pub byte_offset: usize,
     pub incoming: Arc<RingBuffer<(f64, [u8; 8])>>,
+    pub latest: Arc<LatestValue>,
+    pub stream_enabled: bool,
+    pub latest_enabled: bool,
 }
 
 pub struct ProbeSession {
@@ -82,6 +86,24 @@ impl Default for ProbeSession {
 }
 
 impl ProbeSession {
+    pub(crate) fn session_mut(&mut self) -> Result<&mut Session, probe_rs::Error> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| probe_rs::Error::Other("Probe 会话不可用，请重新连接".to_owned()))
+    }
+
+    pub fn breakpoint_capacity(&mut self) -> Result<u32, probe_rs::Error> {
+        self.session_mut()?.core(0)?.available_breakpoint_units()
+    }
+
+    pub fn set_hw_breakpoint(&mut self, address: u64) -> Result<(), probe_rs::Error> {
+        self.session_mut()?.core(0)?.set_hw_breakpoint(address)
+    }
+
+    pub fn clear_hw_breakpoint(&mut self, address: u64) -> Result<(), probe_rs::Error> {
+        self.session_mut()?.core(0)?.clear_hw_breakpoint(address)
+    }
+
     pub fn connect(&mut self) -> bool {
         self.last_error = None;
         let protocol = match self.protocol.as_str() {
@@ -177,18 +199,20 @@ impl ProbeSession {
         self.connected = false;
     }
 
-    pub fn reset_target(&mut self) -> bool {
+    pub fn reset_target_result(&mut self) -> Result<(), probe_rs::Error> {
         self.last_error = None;
         if let Some(ref mut session) = self.session {
             match session.core(0).and_then(|mut core| core.reset()) {
-                Ok(_) => true,
+                Ok(_) => Ok(()),
                 Err(e) => {
                     self.last_error = Some(format!("复位失败: {e}"));
-                    false
+                    Err(e)
                 }
             }
         } else {
-            false
+            Err(probe_rs::Error::Other(
+                "Probe 会话不可用，请重新连接".to_owned(),
+            ))
         }
     }
 
@@ -271,6 +295,14 @@ impl ProbeSession {
     /// 1. Read all 32-bit slots into the reusable `slot_values` array
     /// 2. Assemble per-variable values from slots → push to the ring buffer
     pub fn acquire_from_slots(&mut self) -> Result<(), String> {
+        self.acquire_from_slots_mode(true)
+    }
+
+    pub fn acquire_latest_from_slots(&mut self) -> Result<(), String> {
+        self.acquire_from_slots_mode(false)
+    }
+
+    fn acquire_from_slots_mode(&mut self, publish_stream: bool) -> Result<(), String> {
         if !self.connected || self.slots.is_empty() {
             return Ok(());
         }
@@ -289,6 +321,9 @@ impl ProbeSession {
 
         self.slot_values.resize(self.slots.len(), [0; 4]);
         for (index, slot) in self.slots.iter().enumerate() {
+            if !publish_stream && !slot.needed_for_latest {
+                continue;
+            }
             match core.read_word_32(slot.address) {
                 Ok(v) => {
                     self.slot_values[index] = v.to_le_bytes();
@@ -302,6 +337,9 @@ impl ProbeSession {
         }
 
         for mapping in &self.var_mappings {
+            if !(mapping.latest_enabled || publish_stream && mapping.stream_enabled) {
+                continue;
+            }
             let mut val = [0u8; 8];
             let mut pos: usize = 0;
             let size = (mapping.size as usize).min(8);
@@ -321,7 +359,12 @@ impl ProbeSession {
                     break;
                 }
             }
-            mapping.incoming.push((ts, val));
+            if publish_stream && mapping.stream_enabled {
+                mapping.incoming.push((ts, val));
+            }
+            if mapping.latest_enabled {
+                mapping.latest.store(val);
+            }
         }
         Ok(())
     }
@@ -343,19 +386,25 @@ impl ProbeSession {
             .map_err(|error| format!("Probe 链路检测失败: {error}"))
     }
 
-    pub fn write_value(&mut self, addr: u64, size: u32, value: u64) -> bool {
+    pub fn write_value_result(
+        &mut self,
+        addr: u64,
+        size: u32,
+        value: u64,
+    ) -> Result<(), probe_rs::Error> {
         if let Some(ref mut session) = self.session {
-            if let Ok(mut core) = session.core(0) {
-                return match size {
-                    1 => core.write_word_8(addr, value as u8).is_ok(),
-                    2 => core.write_word_16(addr, value as u16).is_ok(),
-                    4 => core.write_word_32(addr, value as u32).is_ok(),
-                    8 => core.write_word_64(addr, value).is_ok(),
-                    _ => false,
-                };
-            }
+            let mut core = session.core(0)?;
+            return match size {
+                1 => core.write_word_8(addr, value as u8),
+                2 => core.write_word_16(addr, value as u16),
+                4 => core.write_word_32(addr, value as u32),
+                8 => core.write_word_64(addr, value),
+                _ => Err(probe_rs::Error::Other(format!("不支持 {size} 字节写入"))),
+            };
         }
-        false
+        Err(probe_rs::Error::Other(
+            "Probe 会话不可用，请重新连接".to_owned(),
+        ))
     }
 
     /// Read a group of SVD registers while holding one probe core handle.
