@@ -2568,10 +2568,15 @@ fn resolve_local_source_path(
         .strip_prefix(debug_root)
         .unwrap_or(&normalized)
         .trim_start_matches('/');
+    // Keep mapped source paths in the same separator form as DWARF paths.
+    // `Path::join` uses the host separator, which produced mixed paths such
+    // as `/workspace/src\\driver/gpio.c` on Windows.  Forward slashes are
+    // accepted by Windows filesystem APIs and make path keys/comparisons
+    // deterministic across platforms.
     std::path::Path::new(local_root)
         .join(relative)
         .to_string_lossy()
-        .into_owned()
+        .replace('\\', "/")
 }
 
 #[cfg(test)]
