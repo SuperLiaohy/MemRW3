@@ -68,6 +68,7 @@ pub struct BreakpointView {
 pub enum DebugCommand {
     Start(DebugStartMode),
     Stop,
+    Interrupt,
     Halt,
     Continue,
     RunTo(BreakpointSpec),

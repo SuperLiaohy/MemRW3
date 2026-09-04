@@ -200,6 +200,11 @@ RingBuffer 写入，因此不会在 Chart、FFT 或 CSV 中制造调试暂停期
 - 源码步进期间暂时卸载用户硬件断点，结束后恢复，避免目标指令同时命中用户 comparator
   干扰单步停止原因。
 
+`ProbeWorkerHandle` 另持有不经过命令队列的原子步进中断标志。Debug 手动打断写入 Halt
+请求，全局 Reset 写入优先级更高的 Reset 请求；`single_step_source` 在每条硬件指令前后
+检查标志。Worker 退出循环并恢复 PRIMASK/用户断点后，再处理队列中的 Interrupt 或 Reset，
+因此唯一 Session owner 约束不变，也不会从 UI 线程直接访问 Probe。
+
 汇编由 Capstone 0.14 完成。支持 Thumb2、A32、A64、RV32 和 RV32C；Xtensa
 当前返回不支持而不会导致 Worker panic。Cortex-M 的 Thumb 地址在比较 PC 和
 断点时会清除 bit 0。

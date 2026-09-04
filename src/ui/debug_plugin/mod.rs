@@ -645,6 +645,17 @@ fn render_toolbar(ui: &mut Ui, state: &mut DebugPluginState) {
             }
             if debug_icon_button(
                 ui,
+                DebugIcon::Interrupt,
+                active && state.command_pending,
+                false,
+                "手动打断当前步进",
+            )
+            .clicked()
+            {
+                state.pending.push(DebugCommand::Interrupt);
+            }
+            if debug_icon_button(
+                ui,
                 DebugIcon::Refresh,
                 halted && !state.command_pending,
                 false,
@@ -671,6 +682,7 @@ enum DebugIcon {
     StepInto,
     StepOver,
     StepOut,
+    Interrupt,
     Refresh,
     Back,
     Forward,
@@ -871,6 +883,23 @@ fn paint_debug_icon(
                 stroke,
             );
             triangle(right - 7.0, 1.0);
+        }
+        DebugIcon::Interrupt => {
+            painter.circle_stroke(center, 6.0, stroke);
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - 3.0, center.y - 3.0),
+                    egui::pos2(center.x + 3.0, center.y + 3.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(center.x + 3.0, center.y - 3.0),
+                    egui::pos2(center.x - 3.0, center.y + 3.0),
+                ],
+                stroke,
+            );
         }
         DebugIcon::Back => triangle(center.x + 2.0, -1.0),
         DebugIcon::Forward => triangle(center.x - 2.0, 1.0),

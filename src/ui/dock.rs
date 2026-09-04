@@ -12,6 +12,7 @@ pub struct DockLayoutState {
     popped: HashMap<String, bool>,
     paused: HashMap<String, bool>,
     active_plugin: Option<String>,
+    pending_pop_in: Option<String>,
 }
 
 impl DockLayoutState {
@@ -44,6 +45,16 @@ impl DockLayoutState {
         self.set_popped(plugin_id, false);
         self.set_active_plugin(plugin_id);
     }
+
+    fn request_pop_in(&mut self, plugin_id: &str) {
+        self.pending_pop_in = Some(plugin_id.to_owned());
+    }
+
+    fn confirm_pop_in(&mut self) {
+        if let Some(plugin_id) = self.pending_pop_in.take() {
+            self.focus_plugin(&plugin_id);
+        }
+    }
 }
 
 pub fn show_plugin_activity_bar(
@@ -56,6 +67,7 @@ pub fn show_plugin_activity_bar(
     }
     ensure_active_plugin(dock, plugins);
     show_activity_bar(ui, dock, plugins);
+    show_pop_in_confirmation(ui.ctx(), dock, plugins);
 }
 
 pub fn show_active_plugin_content(
@@ -166,8 +178,11 @@ fn show_activity_bar(ui: &mut Ui, dock: &mut DockLayoutState, plugins: &[Box<dyn
                 let button_rect = response.rect;
 
                 if response.clicked() {
-                    dock.set_popped(plugin_id, false);
-                    dock.set_active_plugin(plugin_id);
+                    if is_popped {
+                        dock.request_pop_in(plugin_id);
+                    } else {
+                        dock.set_active_plugin(plugin_id);
+                    }
                 }
 
                 if is_active {
@@ -184,6 +199,44 @@ fn show_activity_bar(ui: &mut Ui, dock: &mut DockLayoutState, plugins: &[Box<dyn
                 ui.add_space(6.0);
             });
         });
+}
+
+fn show_pop_in_confirmation(
+    ctx: &egui::Context,
+    dock: &mut DockLayoutState,
+    plugins: &[Box<dyn MemRWPlugin>],
+) {
+    let Some(plugin_id) = dock.pending_pop_in.clone() else {
+        return;
+    };
+    if !dock.is_popped(&plugin_id) {
+        dock.pending_pop_in = None;
+        return;
+    }
+    let title = plugins
+        .iter()
+        .find(|plugin| plugin.id() == plugin_id)
+        .map(|plugin| plugin.title())
+        .unwrap_or(plugin_id.as_str());
+    let mut confirm = false;
+    let mut cancel = false;
+    let response = egui::Modal::new(egui::Id::new("confirm_plugin_pop_in")).show(ctx, |ui| {
+        ui.set_min_width(300.0);
+        ui.heading("确认返回主窗口");
+        ui.label(format!("是否将“{title}”从独立窗口移回主窗口？"));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            cancel = ui.button("取消").clicked();
+            confirm = ui.button("确认 Pop in").clicked();
+        });
+    });
+    cancel |= response.backdrop_response.clicked()
+        || ctx.input(|input| input.key_pressed(egui::Key::Escape));
+    if confirm {
+        dock.confirm_pop_in();
+    } else if cancel {
+        dock.pending_pop_in = None;
+    }
 }
 
 fn activity_button(
@@ -346,6 +399,9 @@ fn show_popout_viewports(
         if !keep_popped {
             variable_tree.close_in(viewport_id);
             dock.set_popped(&plugin_id, false);
+            if dock.pending_pop_in.as_deref() == Some(plugin_id.as_str()) {
+                dock.pending_pop_in = None;
+            }
         }
     }
 }
@@ -436,5 +492,20 @@ mod tests {
 
         assert_eq!(dock.active_plugin_id(), Some("table"));
         assert!(!dock.is_popped("table"));
+    }
+
+    #[test]
+    fn activity_bar_pop_in_requires_explicit_confirmation() {
+        let mut dock = DockLayoutState::default();
+        dock.set_popped("debug", true);
+        dock.request_pop_in("debug");
+
+        assert!(dock.is_popped("debug"));
+        assert_eq!(dock.pending_pop_in.as_deref(), Some("debug"));
+
+        dock.confirm_pop_in();
+        assert!(!dock.is_popped("debug"));
+        assert_eq!(dock.active_plugin_id(), Some("debug"));
+        assert!(dock.pending_pop_in.is_none());
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -26,6 +26,10 @@ use crate::model::{
 };
 
 use super::{AcqSlot, ProbeSession, VarSlotMapping};
+
+const STEP_INTERRUPT_NONE: u8 = 0;
+const STEP_INTERRUPT_HALT: u8 = 1;
+const STEP_INTERRUPT_RESET: u8 = 2;
 
 pub enum ProbeCommand {
     Connect {
@@ -107,6 +111,7 @@ pub enum ProbeEvent {
 pub struct ProbeWorkerHandle {
     pub command_sender: Sender<ProbeCommand>,
     pub event_receiver: Receiver<ProbeEvent>,
+    step_interrupt: Arc<AtomicU8>,
     join_handle: Option<JoinHandle<()>>,
 }
 
@@ -120,29 +125,50 @@ impl ProbeWorkerHandle {
     ) -> Self {
         let (command_sender, command_receiver) = std::sync::mpsc::channel();
         let (event_sender, event_receiver) = std::sync::mpsc::channel();
+        let step_interrupt = Arc::new(AtomicU8::new(STEP_INTERRUPT_NONE));
+        let worker_interrupt = Arc::clone(&step_interrupt);
         let join_handle = thread::spawn(move || {
             ProbeWorker::new(
                 running,
                 acquisition_requested,
                 delay_us,
                 cycle_count,
-                command_receiver,
-                event_sender,
-                repaint_ctx,
+                ProbeWorkerIo {
+                    command_receiver,
+                    event_sender,
+                    repaint_ctx,
+                    step_interrupt: worker_interrupt,
+                },
             )
             .run();
         });
         Self {
             command_sender,
             event_receiver,
+            step_interrupt,
             join_handle: Some(join_handle),
         }
     }
 
     pub fn send(&self, command: ProbeCommand) -> Result<(), String> {
-        self.command_sender
-            .send(command)
-            .map_err(|_| "Probe worker 已停止".to_owned())
+        let interrupt = match &command {
+            ProbeCommand::Reset => STEP_INTERRUPT_RESET,
+            ProbeCommand::Debug {
+                command: DebugCommand::Interrupt,
+                ..
+            } => STEP_INTERRUPT_HALT,
+            _ => STEP_INTERRUPT_NONE,
+        };
+        if interrupt != STEP_INTERRUPT_NONE {
+            self.step_interrupt.fetch_max(interrupt, Ordering::AcqRel);
+        }
+        if self.command_sender.send(command).is_err() {
+            self.step_interrupt
+                .store(STEP_INTERRUPT_NONE, Ordering::Release);
+            Err("Probe worker 已停止".to_owned())
+        } else {
+            Ok(())
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -159,6 +185,13 @@ impl Drop for ProbeWorkerHandle {
     }
 }
 
+struct ProbeWorkerIo {
+    command_receiver: Receiver<ProbeCommand>,
+    event_sender: Sender<ProbeEvent>,
+    repaint_ctx: egui::Context,
+    step_interrupt: Arc<AtomicU8>,
+}
+
 struct ProbeWorker {
     probe: ProbeSession,
     acquisition_requested: Arc<AtomicBool>,
@@ -168,6 +201,7 @@ struct ProbeWorker {
     command_receiver: Receiver<ProbeCommand>,
     event_sender: Sender<ProbeEvent>,
     repaint_ctx: egui::Context,
+    step_interrupt: Arc<AtomicU8>,
     last_link_check: Instant,
     link_failures: u8,
     debug_info: Option<DebugInfo>,
@@ -205,10 +239,14 @@ impl ProbeWorker {
         acquisition_requested: Arc<AtomicBool>,
         delay_us: Arc<AtomicU64>,
         cycle_count: Arc<AtomicU64>,
-        command_receiver: Receiver<ProbeCommand>,
-        event_sender: Sender<ProbeEvent>,
-        repaint_ctx: egui::Context,
+        io: ProbeWorkerIo,
     ) -> Self {
+        let ProbeWorkerIo {
+            command_receiver,
+            event_sender,
+            repaint_ctx,
+            step_interrupt,
+        } = io;
         Self {
             probe: ProbeSession::default(),
             acquisition_requested,
@@ -218,6 +256,7 @@ impl ProbeWorker {
             command_receiver,
             event_sender,
             repaint_ctx,
+            step_interrupt,
             last_link_check: Instant::now(),
             link_failures: 0,
             debug_info: None,
@@ -397,6 +436,8 @@ impl ProbeWorker {
                 self.emit(ProbeEvent::Disconnected);
             }
             ProbeCommand::Reset => {
+                self.step_interrupt
+                    .store(STEP_INTERRUPT_NONE, Ordering::Release);
                 self.clear_temporary_breakpoint();
                 let result = self
                     .probe
@@ -525,7 +566,8 @@ impl ProbeWorker {
     fn handle_debug_command(&mut self, request_id: u64, command: DebugCommand) {
         let requires_active = matches!(
             &command,
-            DebugCommand::Halt
+            DebugCommand::Interrupt
+                | DebugCommand::Halt
                 | DebugCommand::Continue
                 | DebugCommand::RunTo(_)
                 | DebugCommand::Step(_)
@@ -557,6 +599,11 @@ impl ProbeWorker {
         let result = match command {
             DebugCommand::Start(mode) => self.debug_start(mode),
             DebugCommand::Stop => self.debug_stop(),
+            DebugCommand::Interrupt => {
+                self.step_interrupt
+                    .store(STEP_INTERRUPT_NONE, Ordering::Release);
+                self.debug_interrupt()
+            }
             DebugCommand::Halt => self.debug_halt(),
             DebugCommand::Continue => self.debug_continue(),
             DebugCommand::RunTo(spec) => self.debug_run_to(&spec),
@@ -731,6 +778,38 @@ impl ProbeWorker {
         self.refresh_halted_data_at(Some(info.pc))
     }
 
+    fn debug_interrupt(&mut self) -> Result<(), String> {
+        if !self.probe.connected {
+            return Err("请先连接目标设备".to_owned());
+        }
+        let pc = {
+            let mut core = self
+                .probe
+                .session_mut()
+                .and_then(|session| session.core(0))
+                .map_err(|error| format!("打断步进时获取核心失败: {error}"))?;
+            if core
+                .status()
+                .map_err(|error| format!("打断步进时读取核心状态失败: {error}"))?
+                .is_halted()
+            {
+                core.read_core_reg(core.program_counter().id())
+                    .and_then(|value: RegisterValue| value.try_into())
+                    .map_err(|error| format!("打断步进时读取 PC 失败: {error}"))?
+            } else {
+                core.halt(Duration::from_millis(500))
+                    .map_err(|error| format!("打断步进时暂停目标失败: {error}"))?
+                    .pc
+            }
+        };
+        self.running.store(false, Ordering::Release);
+        self.target_state = TargetState::Halted {
+            reason: "用户打断步进".to_owned(),
+        };
+        self.stop_id = self.stop_id.wrapping_add(1);
+        self.refresh_halted_data_at(Some(pc))
+    }
+
     fn debug_continue(&mut self) -> Result<(), String> {
         if !self.target_state.is_halted() {
             return Err("目标未处于暂停状态".to_owned());
@@ -872,7 +951,13 @@ impl ProbeWorker {
                     .and_then(|session| session.core(0))
                     .map_err(|error| format!("获取核心失败: {error}"))?;
                 let interrupt_mask = mask_interrupts_for_source_step(&mut core)?;
-                let result = single_step_source(&mut core, debug_info, kind, origin_pc);
+                let result = single_step_source(
+                    &mut core,
+                    debug_info,
+                    kind,
+                    origin_pc,
+                    &self.step_interrupt,
+                );
                 let restore_mask = restore_interrupt_mask(&mut core, interrupt_mask);
                 match (result, restore_mask) {
                     (Ok(result), Ok(())) => Ok(result),
@@ -1746,6 +1831,7 @@ fn single_step_source(
     debug_info: &DebugInfo,
     kind: StepKind,
     origin_pc: u64,
+    step_interrupt: &AtomicU8,
 ) -> Result<(CoreStatus, u64), String> {
     let origin = debug_info
         .get_source_location(origin_pc)
@@ -1764,9 +1850,11 @@ fn single_step_source(
     let mut last_location = Some(origin.clone());
 
     for step_count in 1..=4096 {
+        check_step_interrupt(step_interrupt)?;
         let information = core
             .step()
             .map_err(|error| format!("源码{kind:?}的第 {step_count} 次指令步进失败: {error}"))?;
+        check_step_interrupt(step_interrupt)?;
         let pc = normalize_code_address(information.pc);
         if pc == previous_pc {
             return Err(format!("源码{kind:?}没有前进，目标仍停在 0x{pc:08X}"));
@@ -1814,6 +1902,15 @@ fn single_step_source(
     Err(format!(
         "源码{kind:?}执行了 4096 条指令后仍未达到新的有效 DWARF 停止位置"
     ))
+}
+
+fn check_step_interrupt(step_interrupt: &AtomicU8) -> Result<(), String> {
+    match step_interrupt.load(Ordering::Acquire) {
+        STEP_INTERRUPT_NONE => Ok(()),
+        STEP_INTERRUPT_HALT => Err("源码步进已收到手动打断请求".to_owned()),
+        STEP_INTERRUPT_RESET => Err("源码步进已收到复位请求".to_owned()),
+        other => Err(format!("源码步进收到未知中断请求: {other}")),
+    }
 }
 
 fn same_source_line(left: Option<&SourceLocationView>, right: Option<&SourceLocationView>) -> bool {
@@ -2425,14 +2522,15 @@ fn disassemble_bytes(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
 
     use probe_rs::{CoreStatus, HaltReason, MemoryInterface, RegisterValue};
 
     use super::{
-        BreakpointView, DebugStartMode, ProbeCommand, ProbeWorker, cortex_m_interrupt_masked,
+        BreakpointView, DebugStartMode, ProbeCommand, ProbeWorker, STEP_INTERRUPT_HALT,
+        STEP_INTERRUPT_NONE, STEP_INTERRUPT_RESET, check_step_interrupt, cortex_m_interrupt_masked,
         cpp_type_name, disassemble_bytes, is_cpp_language, nearest_executable_source_line,
         normalize_code_address, normalized_source_path, register_value_u64, same_source_line,
         sign_extend_bits, source_path_candidates, target_state,
@@ -2468,6 +2566,24 @@ mod tests {
             Some(RegisterValue::U32(0x0102_0301))
         ));
         assert!(cortex_m_interrupt_masked(RegisterValue::U64(0)).is_none());
+    }
+
+    #[test]
+    fn reset_has_priority_over_manual_step_interrupt() {
+        let interrupt = AtomicU8::new(STEP_INTERRUPT_NONE);
+        assert!(check_step_interrupt(&interrupt).is_ok());
+        interrupt.fetch_max(STEP_INTERRUPT_HALT, Ordering::AcqRel);
+        assert_eq!(
+            check_step_interrupt(&interrupt).unwrap_err(),
+            "源码步进已收到手动打断请求"
+        );
+        interrupt.fetch_max(STEP_INTERRUPT_RESET, Ordering::AcqRel);
+        interrupt.fetch_max(STEP_INTERRUPT_HALT, Ordering::AcqRel);
+        assert_eq!(interrupt.load(Ordering::Acquire), STEP_INTERRUPT_RESET);
+        assert_eq!(
+            check_step_interrupt(&interrupt).unwrap_err(),
+            "源码步进已收到复位请求"
+        );
     }
 
     #[test]
@@ -2607,9 +2723,12 @@ mod tests {
             acquisition_requested,
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
-            command_receiver,
-            event_sender,
-            eframe::egui::Context::default(),
+            super::ProbeWorkerIo {
+                command_receiver,
+                event_sender,
+                repaint_ctx: eframe::egui::Context::default(),
+                step_interrupt: Arc::new(AtomicU8::new(STEP_INTERRUPT_NONE)),
+            },
         );
         worker.handle_command(ProbeCommand::Connect {
             chip_name: string("probe_chip"),
@@ -2686,6 +2805,33 @@ mod tests {
                     before.path, before.line
                 ));
             }
+
+            worker
+                .step_interrupt
+                .store(STEP_INTERRUPT_HALT, Ordering::Release);
+            let interrupt_error = worker
+                .debug_step(crate::model::StepKind::Over)
+                .expect_err("pre-requested manual interrupt must cancel source stepping");
+            worker
+                .step_interrupt
+                .store(STEP_INTERRUPT_NONE, Ordering::Release);
+            if !interrupt_error.contains("手动打断") {
+                return Err(format!(
+                    "unexpected manual interrupt result: {interrupt_error}"
+                ));
+            }
+            let interrupted_pc = worker
+                .probe
+                .session_mut()
+                .and_then(|session| session.core(0))
+                .and_then(|mut core| core.read_core_reg(core.program_counter().id()))
+                .map_err(|error| format!("read PC after manual interrupt failed: {error}"))?;
+            if normalize_code_address(interrupted_pc) != normalize_code_address(before_pc) {
+                return Err(format!(
+                    "manual interrupt moved PC: 0x{before_pc:08X} -> 0x{interrupted_pc:08X}"
+                ));
+            }
+            println!("Manual step interrupt: PC remained at 0x{interrupted_pc:08X}");
 
             let local = worker
                 .stack_frames

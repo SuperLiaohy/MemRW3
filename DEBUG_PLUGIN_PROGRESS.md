@@ -2,6 +2,22 @@
 
 ## 2026-09-04
 
+### 反馈实现：可打断步进与 Pop in 确认
+
+- `ProbeWorkerHandle` 新增共享 `AtomicU8` 步进中断通道，不依赖被阻塞的 Worker 命令循环。
+  Debug 手动打断为 Halt 优先级，全局 Reset 为更高的 Reset 优先级，后到的手动打断不会
+  覆盖已请求的复位。
+- 源码 single-step 在每条指令执行前后检查中断标志。打断发生时目标正处于硬件 step 后的
+  Halt 状态，随后统一恢复 PRIMASK 和用户断点；排队的 Interrupt 刷新真实 PC，Reset 则
+  清除标志并执行原复位流程。
+- DebugBar 新增 Painter 绘制的圆圈叉号“手动打断当前步进”按钮，仅在 Debug 活跃且命令
+  pending 时启用。单指令 step 最长阻塞约一个硬件 step 周期，源码循环可协作取消。
+- Pop out 插件的主窗口 Activity 图标不再直接执行 Pop in，而是写入
+  `pending_pop_in` 并显示模态确认；确认后返回主窗口，取消、Esc、点击遮罩或独立窗口自行
+  关闭都会清理确认状态。
+- 新增 Reset 中断优先级、Pop in 必须确认的单元测试；硬件回归增加“预置手动打断后 PC
+  保持不变”的验证。
+
 ### 反馈优化：紧凑展开控件与源码高亮
 
 - 源码行汇编和局部变量树的展开按钮统一改为固定 16×16 Painter 控件，悬浮时只改变
@@ -162,8 +178,9 @@
 
 - `cargo test --release ui::debug_plugin --verbose`
 - `cargo fmt --all -- --check`
-- `cargo test --release --verbose`：86 passed，0 failed，3 ignored（含硬件回归入口）。
-- 硬件回归：1 passed，0 failed。
+- `cargo test --release --verbose`：88 passed，0 failed，3 ignored（含硬件回归入口）。
+- 既有硬件回归曾通过 Step Over 和局部变量写入；本轮扩展的手动打断硬件检查因 Probe
+  返回 usage error（设备被其他会话占用）未能运行，未强制终止用户进程。
 - `cargo build --release --verbose`：通过，生成 `target/release/MemRW3`。
 - `cargo clippy --all-targets`：DebugPlugin/ProbeWorker 本轮新增代码无警告；仍有 3 个既有
   `too_many_arguments` 提示（Chart dialog 与 Dock 两处）。
