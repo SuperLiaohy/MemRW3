@@ -263,7 +263,7 @@ pub fn render_svd_panel(ui: &mut Ui, state: &mut SvdPanelState) -> Vec<PluginAct
             if ui
                 .add_enabled(state.task.is_none(), egui::Button::new("加载 SVD"))
                 .clicked()
-                && let Some(path) = rfd::FileDialog::new()
+                && let Some(path) = crate::ui::file_dialog()
                     .add_filter("CMSIS-SVD", &["svd", "xml"])
                     .pick_file()
             {

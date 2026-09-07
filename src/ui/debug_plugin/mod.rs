@@ -263,7 +263,7 @@ impl MemRWPlugin for DebugPluginState {
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
                 if ui.button("加载调试 ELF").clicked()
-                    && let Some(path) = rfd::FileDialog::new()
+                    && let Some(path) = crate::ui::file_dialog()
                         .add_filter("ELF/AXF", &["elf", "axf", "out"])
                         .pick_file()
                 {
@@ -1251,7 +1251,7 @@ fn render_call_stack(ui: &mut Ui, state: &mut DebugPluginState) {
 fn render_project(ui: &mut Ui, state: &mut DebugPluginState) {
     ui.horizontal(|ui| {
         if ui.button("映射源码根目录").clicked()
-            && let Some(path) = rfd::FileDialog::new().pick_folder()
+            && let Some(path) = crate::ui::file_dialog().pick_folder()
         {
             state.source_root_override = Some(path.display().to_string());
             state.source_cache.clear();

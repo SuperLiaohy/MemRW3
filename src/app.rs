@@ -647,7 +647,8 @@ impl MemRW3App {
 }
 
 impl eframe::App for MemRW3App {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        ui::set_native_dialog_parent(frame);
         self.system_theme_monitor.apply(ui.ctx());
         self.poll_probe_events();
         self.sync_program_to_worker();
@@ -824,7 +825,7 @@ struct SavedVariable {
 
 impl MemRW3App {
     pub fn save_config(&mut self) {
-        let path = rfd::FileDialog::new()
+        let path = crate::ui::file_dialog()
             .add_filter("JSON", &["json"])
             .set_file_name("memrw3_config.json")
             .save_file();
@@ -885,7 +886,7 @@ impl MemRW3App {
                 .duration(Some(Duration::from_secs(5)));
             return;
         }
-        let path = rfd::FileDialog::new()
+        let path = crate::ui::file_dialog()
             .add_filter("JSON", &["json"])
             .pick_file();
         let Some(path) = path else { return };

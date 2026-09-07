@@ -19,6 +19,7 @@ dependencies = [
  "object 0.36.7",
  "probe-rs",
  "probe-rs-debug",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",

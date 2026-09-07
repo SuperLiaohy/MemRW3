@@ -440,7 +440,7 @@ fn flash_button(ui: &mut Ui, app: &mut MemRW3App) {
     if !response.clicked() {
         return;
     }
-    let Some(path) = rfd::FileDialog::new()
+    let Some(path) = crate::ui::file_dialog()
         .add_filter("固件", &["elf", "axf", "out", "hex", "ihex", "bin", "uf2"])
         .add_filter("ELF/AXF", &["elf", "axf", "out"])
         .add_filter("Intel HEX", &["hex", "ihex"])
@@ -451,7 +451,7 @@ fn flash_button(ui: &mut Ui, app: &mut MemRW3App) {
         return;
     };
 
-    let confirmed = rfd::MessageDialog::new()
+    let confirmed = crate::ui::message_dialog()
         .set_level(rfd::MessageLevel::Warning)
         .set_title("确认烧录固件")
         .set_description(format!(

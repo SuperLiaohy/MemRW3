@@ -214,7 +214,7 @@ impl VariableTreePanel {
                     .hint_text("输入 firmware.elf 路径..."),
             );
             if ui.button("浏览").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
+                if let Some(path) = crate::ui::file_dialog()
                     .add_filter("ELF/AXF", &["elf", "axf"])
                     .add_filter("全部", &["*"])
                     .pick_file()

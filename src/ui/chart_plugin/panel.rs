@@ -708,7 +708,7 @@ pub fn chart_panel(
                     ui.label("Log:");
                     ui.add_enabled_ui(!state.logging_active, |ui| {
                         if ui.button("选择文件").clicked() {
-                            if let Some(p) = rfd::FileDialog::new()
+                            if let Some(p) = crate::ui::file_dialog()
                                 .add_filter("CSV", &["csv"])
                                 .set_file_name("data.csv")
                                 .save_file()
@@ -1295,11 +1295,6 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                         .color(cursor_line)
                         .width(1.0),
                 );
-            }
-
-            if state.fft_scroll_mode != FftScrollMode::Both {
-                let pb = plot_ui.plot_bounds();
-                state.fft_plot_bounds = Some((pb.min()[0], pb.max()[0], pb.min()[1], pb.max()[1]));
             }
         });
     let plot_frame = *plot_response.transform.frame();
