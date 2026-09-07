@@ -61,6 +61,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 | egui_plot | 0.35 | 时域/频域图表绘制 |
 | egui_ltreeview | 0.7 | DWARF 变量树视图 |
 | egui-notify | 0.22 | Toast 通知 |
+| fontdb / ttf-parser | 0.24 / 0.25 | 系统字体发现、TTC face 选择与中文字形校验 |
 | probe-rs | 0.31 | MCU 调试探针连接与采集 |
 | probe-rs-debug | 0.31 | 源码断点、源码级步进、调用栈和局部变量求值 |
 | capstone | 0.14 | ARM/Thumb/AArch64/RISC-V 反汇编 |

@@ -989,8 +989,8 @@ pub fn setup_fonts(ctx: &egui::Context) {
 
     let mut fonts = egui::FontDefinitions::default();
 
-    if let Some((name, data, path)) = load_chinese_font() {
-        println!("✅ 使用字体: {}", path);
+    if let Some((name, data, family)) = load_chinese_font() {
+        println!("✅ 使用系统字体: {family}");
         fonts.font_data.insert(name.clone(), data);
 
         // 添加为备选字体，不覆盖默认英文字体
@@ -1005,129 +1005,153 @@ pub fn setup_fonts(ctx: &egui::Context) {
             .or_default()
             .push(name);
     } else {
-        println!("⚠️ 未找到中文字体，中文可能无法显示\n💡 Linux: sudo apt install fonts-noto-cjk");
+        println!(
+            "⚠️ 未找到支持简体中文的系统字体，中文可能无法显示\n\
+             💡 请安装 Noto Sans CJK SC、思源黑体或平台自带的中文字体"
+        );
     }
 
     ctx.set_fonts(fonts);
 }
 
 fn load_chinese_font() -> Option<(String, Arc<egui::FontData>, String)> {
-    get_font_paths()
-        .into_iter()
-        .find_map(|path| {
-            let path = std::path::PathBuf::from(path);
-            path.exists()
-                .then(|| {
-                    std::fs::read(&path).ok().map(|bytes| {
-                        (
-                            "chinese_font".to_owned(),
-                            Arc::new(egui::FontData::from_owned(bytes)),
-                            path.display().to_string(),
-                        )
-                    })
-                })
-                .flatten()
+    let mut database = fontdb::Database::new();
+    database.load_system_fonts();
+
+    let face = database
+        .faces()
+        .filter(|face| face_supports_chinese(&database, face.id))
+        .min_by_key(|face| face_preference_key(face))?;
+    let face_id = face.id;
+    let family = selected_family_name(face);
+    let (bytes, index) = database.with_face_data(face_id, |data, index| (data.to_vec(), index))?;
+
+    let mut font_data = egui::FontData::from_owned(bytes);
+    // A TTC/OTC can contain region-specific faces. Preserve the exact face
+    // selected by fontdb instead of silently using collection index zero.
+    font_data.index = index;
+
+    Some((
+        "system_chinese_font".to_owned(),
+        Arc::new(font_data),
+        family,
+    ))
+}
+
+const CHINESE_GLYPH_PROBES: &[char] = &['中', '文', '采', '集', '调', '试', '变', '量', '烧', '录'];
+
+#[cfg(target_os = "windows")]
+const PREFERRED_CHINESE_FAMILIES: &[&str] = &[
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "DengXian",
+    "SimHei",
+    "SimSun",
+    "Noto Sans CJK SC",
+    "Noto Sans SC",
+    "Source Han Sans SC",
+];
+
+#[cfg(target_os = "macos")]
+const PREFERRED_CHINESE_FAMILIES: &[&str] = &[
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Heiti SC",
+    "Songti SC",
+    "Noto Sans CJK SC",
+    "Noto Sans SC",
+    "Source Han Sans SC",
+];
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const PREFERRED_CHINESE_FAMILIES: &[&str] = &[
+    "Noto Sans CJK SC",
+    "Noto Sans SC",
+    "Source Han Sans SC",
+    "WenQuanYi Micro Hei",
+    "Droid Sans Fallback",
+    "AR PL UMing CN",
+    "Microsoft YaHei",
+    "PingFang SC",
+];
+
+fn face_supports_chinese(database: &fontdb::Database, id: fontdb::ID) -> bool {
+    database
+        .with_face_data(id, |data, index| {
+            ttf_parser::Face::parse(data, index).is_ok_and(|face| {
+                CHINESE_GLYPH_PROBES
+                    .iter()
+                    .all(|character| face.glyph_index(*character).is_some())
+            })
         })
-        .or_else(scan_font_directories)
+        .unwrap_or(false)
 }
 
-fn get_font_paths() -> Vec<String> {
-    let mut paths = Vec::new();
+fn family_preference_rank(face: &fontdb::FaceInfo) -> usize {
+    PREFERRED_CHINESE_FAMILIES
+        .iter()
+        .position(|preferred| {
+            face.families
+                .iter()
+                .any(|(family, _)| family.eq_ignore_ascii_case(preferred))
+        })
+        .unwrap_or(PREFERRED_CHINESE_FAMILIES.len())
+}
 
-    #[cfg(target_os = "windows")]
-    paths.extend(
-        [
-            r"C:\Windows\Fonts\msyh.ttc",
-            r"C:\Windows\Fonts\msyh.ttf",
-            r"C:\Windows\Fonts\simsun.ttc",
-            r"C:\Windows\Fonts\simhei.ttf",
-        ]
-        .map(String::from),
-    );
+fn face_preference_key(face: &fontdb::FaceInfo) -> (usize, u8, u16, bool) {
+    let normal_style = u8::from(face.style != fontdb::Style::Normal);
+    (
+        family_preference_rank(face),
+        normal_style,
+        face.weight.0.abs_diff(fontdb::Weight::NORMAL.0),
+        face.monospaced,
+    )
+}
 
-    #[cfg(target_os = "macos")]
-    paths.extend(
-        [
-            "/System/Library/Fonts/PingFang.ttc",
-            "/System/Library/Fonts/STHeiti Light.ttc",
-            "/Library/Fonts/NotoSansCJK.ttc",
-        ]
-        .map(String::from),
-    );
+fn selected_family_name(face: &fontdb::FaceInfo) -> String {
+    PREFERRED_CHINESE_FAMILIES
+        .iter()
+        .find_map(|preferred| {
+            face.families
+                .iter()
+                .find(|(family, _)| family.eq_ignore_ascii_case(preferred))
+                .map(|(family, _)| family.clone())
+        })
+        .or_else(|| face.families.first().map(|(family, _)| family.clone()))
+        .unwrap_or_else(|| face.post_script_name.clone())
+}
 
-    #[cfg(target_os = "linux")]
-    {
-        paths.extend(
-            [
-                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-                "/usr/share/fonts/truetype/arphic/uming.ttc",
-            ]
-            .map(String::from),
+#[cfg(test)]
+mod font_tests {
+    use super::{PREFERRED_CHINESE_FAMILIES, family_preference_rank};
+
+    fn face_with_families(names: &[&str]) -> fontdb::FaceInfo {
+        fontdb::FaceInfo {
+            id: fontdb::ID::dummy(),
+            source: fontdb::Source::Binary(std::sync::Arc::new(Vec::<u8>::new())),
+            index: 0,
+            families: names
+                .iter()
+                .map(|name| ((*name).to_owned(), fontdb::Language::English_UnitedStates))
+                .collect(),
+            post_script_name: String::new(),
+            style: fontdb::Style::Normal,
+            weight: fontdb::Weight::NORMAL,
+            stretch: fontdb::Stretch::Normal,
+            monospaced: false,
+        }
+    }
+
+    #[test]
+    fn prefers_platform_chinese_families_case_insensitively() {
+        let preferred = PREFERRED_CHINESE_FAMILIES[0];
+        let face = face_with_families(&[&preferred.to_ascii_lowercase()]);
+        assert_eq!(family_preference_rank(&face), 0);
+
+        let fallback = face_with_families(&["Unlisted CJK Font"]);
+        assert_eq!(
+            family_preference_rank(&fallback),
+            PREFERRED_CHINESE_FAMILIES.len()
         );
-
-        if let Ok(home) = std::env::var("HOME") {
-            paths.push(format!("{home}/.local/share/fonts/NotoSansCJK-Regular.ttc"));
-            paths.push(format!("{home}/.fonts/NotoSansCJK-Regular.ttc"));
-        }
     }
-
-    paths
-}
-
-#[cfg(target_os = "linux")]
-fn scan_font_directories() -> Option<(String, Arc<egui::FontData>, String)> {
-    const KEYWORDS: &[&str] = &[
-        "noto", "cjk", "wqy", "droid", "arphic", "uming", "microhei", "song", "hei",
-    ];
-    const VALID_EXTS: &[&str] = &["ttf", "ttc", "otf"];
-
-    for dir in ["/usr/share/fonts", "/usr/local/share/fonts"] {
-        if let Some(font) = find_font(dir, KEYWORDS, VALID_EXTS) {
-            return Some(font);
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn find_font(
-    dir: &str,
-    keywords: &[&str],
-    valid_exts: &[&str],
-) -> Option<(String, Arc<egui::FontData>, String)> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return None;
-    };
-
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-
-        if path.is_dir() {
-            if let Some(found) = find_font(path.to_str()?, keywords, valid_exts) {
-                return Some(found);
-            }
-        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            if valid_exts.contains(&ext) {
-                let name = path.file_name()?.to_str()?.to_lowercase();
-                if keywords.iter().any(|kw| name.contains(kw)) {
-                    if let Ok(bytes) = std::fs::read(&path) {
-                        return Some((
-                            "scanned_font".to_owned(),
-                            Arc::new(egui::FontData::from_owned(bytes)),
-                            path.display().to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "linux"))]
-fn scan_font_directories() -> Option<(String, Arc<egui::FontData>, String)> {
-    None
 }

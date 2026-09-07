@@ -13,6 +13,7 @@ dependencies = [
  "egui-notify",
  "egui_ltreeview",
  "egui_plot",
+ "fontdb",
  "gimli 0.31.1",
  "gimli 0.32.3",
  "object 0.36.7",
@@ -22,6 +23,7 @@ dependencies = [
  "serde",
  "serde_json",
  "svd-parser",
+ "ttf-parser",
  "typed-path",
 ]
 
@@ -1590,6 +1592,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b38ad915f6dadd993ced50848a8291a543bd41ca62bc10740d5e64e2ab4cfd7"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "fontconfig-parser"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbc773e24e02d4ddd8395fd30dc147524273a83e54e0f312d986ea30de5f5646"
+dependencies = [
+ "roxmltree",
+]
+
+[[package]]
+name = "fontdb"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2660c5e9157bf76d2db1294e4a9feba604ef610819a3b591088d0d8392a3290f"
+dependencies = [
+ "fontconfig-parser",
+ "log",
+ "memmap2",
+ "slotmap",
+ "tinyvec",
 ]
 
 [[package]]
