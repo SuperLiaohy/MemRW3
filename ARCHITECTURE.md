@@ -125,6 +125,10 @@ Acquisition slots
 连接、断开、Reset、烧录、slot 更新、Table/SVD 请求和 Debug 请求都在这个线程
 执行。旧的 `ProbeCell + Sync + acq_thread` 已移除。
 
+`ProbeSession` 在连接期间缓存唯一的 `Core` handle，采集热路径不得每轮调用
+`Session::core(0)`。采集、Debug、断点、SVD 和变量写入都复用该 handle；只有烧录等
+必须独占 `Session` 的操作、断开/重连以及采集读失败会先使缓存失效。
+
 ### 目标状态和采集状态
 
 目标状态独立于采集状态：
@@ -306,9 +310,3 @@ ELF。重新连接不会自动启动调试；用户选择 Attach 或 Reset 并�
 - DebugPlugin 从 DWARF line program 构建工程源码树；构建机路径不可用时，可将
   DWARF 公共根目录映射到本机源码根目录。
 - 没有物理 Probe 时只能执行纯逻辑和 UI 测试，硬件功能需在目标板上验证。
-
-## 开发进度记录
-
-按日期维护的 DebugPlugin 已完成项、剩余问题和后续计划见
-[`DEBUG_PLUGIN_PROGRESS.md`](DEBUG_PLUGIN_PROGRESS.md)。后续继续开发前应先检查该记录和
-当前工作树，避免重复实现。

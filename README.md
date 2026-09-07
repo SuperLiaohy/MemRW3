@@ -5,7 +5,7 @@
 ## 特性
 
 - **DWARF 变量树**: 解析 ELF 文件中的 DWARF 2/3/4/5 调试信息，自动构建变量树（结构体、数组、嵌套类型），支持跨编译单元类型引用
-- **实时数据采集**: 独立采集线程，串行化控制握手，有界 lock-free ring buffer 数据传递，采集槽位数组跨轮复用
+- **实时数据采集**: 单一 ProbeWorker 硬件线程串行调度，连接期间复用 Core handle，有界 lock-free ring buffer 数据传递，采集槽位数组跨轮复用
 - **时域图表**: 多曲线叠加，自动/固定坐标轴，切换到其他插件后仍持续摄取与记录数据；可在当前视图点数低于自定义临界值时标注采样点，隐藏曲线不参与统计；图例按 Plot 右边界对齐
 - **FFT 频谱分析**: 自包含 Radix-2 FFT（零外部依赖），4 种窗函数（Rectangular/Hann/Hamming/Blackman），可配置取样点数（4~65536，从数据末尾取），多曲线频谱叠加，频率游标追踪
 - **滚轮缩放**: 时域 + 频域均支持 X / Y / Both 三模式滚轮缩放，手动模式下锚定视图中心
@@ -230,6 +230,7 @@ src/
 ├── model/
 │   ├── debug.rs         # 调试命令、目标状态、断点/栈/局部变量/汇编快照 DTO
 │   ├── mod.rs           # Model 模块入口
+│   ├── register_io.rs   # SVD 寄存器批量读请求/结果 DTO
 │   ├── state.rs         # AppSession
 │   ├── variable_pool.rs # VariablePool (Vec + HashMap)
 │   └── ring_buffer.rs   # 有界 lock-free 环形队列

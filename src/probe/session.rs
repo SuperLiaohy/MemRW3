@@ -1,4 +1,4 @@
-use probe_rs::{MemoryInterface, Session};
+use probe_rs::{Core, MemoryInterface, Session};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -50,8 +50,14 @@ pub struct VarSlotMapping {
     pub latest_enabled: bool,
 }
 
+/// Probe state owned and constructed by `ProbeWorker` on its dedicated thread.
 pub struct ProbeSession {
-    session: Option<Session>,
+    /// Long-lived view used by the acquisition hot path.
+    ///
+    /// This field must be dropped before `session`; see `ensure_core` for the
+    /// safety invariant behind the extended lifetime.
+    cached_core: Option<Core<'static>>,
+    session: Option<Box<Session>>,
     pub connected: bool,
     pub chip_name: String,
     pub protocol: String,
@@ -70,6 +76,7 @@ pub struct ProbeSession {
 impl Default for ProbeSession {
     fn default() -> Self {
         Self {
+            cached_core: None,
             session: None,
             connected: false,
             chip_name: "STM32F407VG".into(),
@@ -86,25 +93,52 @@ impl Default for ProbeSession {
 }
 
 impl ProbeSession {
-    pub(crate) fn session_mut(&mut self) -> Result<&mut Session, probe_rs::Error> {
-        self.session
-            .as_mut()
-            .ok_or_else(|| probe_rs::Error::Other("Probe 会话不可用，请重新连接".to_owned()))
+    fn ensure_core(&mut self) -> Result<(), probe_rs::Error> {
+        if self.cached_core.is_some() {
+            return Ok(());
+        }
+
+        let session = self
+            .session
+            .as_deref_mut()
+            .ok_or_else(|| probe_rs::Error::Other("Probe 会话不可用，请重新连接".to_owned()))?;
+        let core = session.core(0)?;
+
+        // SAFETY: `session` lives in a private `Box`, so its address does not
+        // change when `ProbeSession` moves. Every path that replaces, drops, or
+        // exclusively borrows the Session clears `cached_core` first, and the
+        // field order drops `cached_core` before `session`. All core access is
+        // routed through this single cached handle, so no competing Core or
+        // mutable Session borrow exists while it is present.
+        self.cached_core = Some(unsafe { std::mem::transmute::<Core<'_>, Core<'static>>(core) });
+        Ok(())
+    }
+
+    pub(crate) fn core_mut(&mut self) -> Result<&mut Core<'static>, probe_rs::Error> {
+        self.ensure_core()?;
+        Ok(self.cached_core.as_mut().expect("core was initialized"))
+    }
+
+    fn invalidate_core(&mut self) {
+        self.cached_core = None;
     }
 
     pub fn breakpoint_capacity(&mut self) -> Result<u32, probe_rs::Error> {
-        self.session_mut()?.core(0)?.available_breakpoint_units()
+        self.core_mut()?.available_breakpoint_units()
     }
 
     pub fn set_hw_breakpoint(&mut self, address: u64) -> Result<(), probe_rs::Error> {
-        self.session_mut()?.core(0)?.set_hw_breakpoint(address)
+        self.core_mut()?.set_hw_breakpoint(address)
     }
 
     pub fn clear_hw_breakpoint(&mut self, address: u64) -> Result<(), probe_rs::Error> {
-        self.session_mut()?.core(0)?.clear_hw_breakpoint(address)
+        self.core_mut()?.clear_hw_breakpoint(address)
     }
 
     pub fn connect(&mut self) -> bool {
+        self.invalidate_core();
+        self.session = None;
+        self.connected = false;
         self.last_error = None;
         let protocol = match self.protocol.as_str() {
             "SWD" => Some(probe_rs::probe::WireProtocol::Swd),
@@ -159,7 +193,7 @@ impl ProbeSession {
                     // 5. 将配置好的 Probe Attach 到指定芯片
                     match probe.attach(self.chip_name.clone(), Default::default()) {
                         Ok(session) => {
-                            self.session = Some(session);
+                            self.session = Some(Box::new(session));
                             self.connected = true;
                             true
                         }
@@ -182,7 +216,7 @@ impl ProbeSession {
             };
             match Session::auto_attach(&self.chip_name, config) {
                 Ok(session) => {
-                    self.session = Some(session);
+                    self.session = Some(Box::new(session));
                     self.connected = true;
                     true
                 }
@@ -195,24 +229,19 @@ impl ProbeSession {
     }
 
     pub fn disconnect(&mut self) {
+        self.invalidate_core();
         self.session = None;
         self.connected = false;
     }
 
     pub fn reset_target_result(&mut self) -> Result<(), probe_rs::Error> {
         self.last_error = None;
-        if let Some(ref mut session) = self.session {
-            match session.core(0).and_then(|mut core| core.reset()) {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    self.last_error = Some(format!("复位失败: {e}"));
-                    Err(e)
-                }
+        match self.core_mut().and_then(|core| core.reset()) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                self.last_error = Some(format!("复位失败: {e}"));
+                Err(e)
             }
-        } else {
-            Err(probe_rs::Error::Other(
-                "Probe 会话不可用，请重新连接".to_owned(),
-            ))
         }
     }
 
@@ -223,11 +252,12 @@ impl ProbeSession {
 
         let image_kind = FirmwareImageKind::from_path(path)?;
         self.last_error = None;
+        self.invalidate_core();
 
         let result: Result<(), String> = (|| {
             let session = self
                 .session
-                .as_mut()
+                .as_deref_mut()
                 .ok_or_else(|| "Probe 会话不可用，请重新连接".to_owned())?;
             let format = match image_kind {
                 FirmwareImageKind::Elf => probe_rs::flashing::Format::Elf(Default::default()),
@@ -307,33 +337,34 @@ impl ProbeSession {
             return Ok(());
         }
         let ts = self.timer.elapsed().as_secs_f64();
-        let Some(session) = self.session.as_mut() else {
-            return Err("Probe 会话不可用，请重新连接".to_owned());
-        };
-        let mut core = match session.core(0) {
-            Ok(core) => core,
-            Err(error) => {
-                let message = format!("获取核心失败: {error}");
-                self.last_error = Some(message.clone());
-                return Err(message);
-            }
-        };
+        if let Err(error) = self.ensure_core() {
+            let message = format!("获取核心失败: {error}");
+            self.last_error = Some(message.clone());
+            return Err(message);
+        }
 
-        self.slot_values.resize(self.slots.len(), [0; 4]);
-        for (index, slot) in self.slots.iter().enumerate() {
-            if !publish_stream && !slot.needed_for_latest {
-                continue;
-            }
-            match core.read_word_32(slot.address) {
-                Ok(v) => {
-                    self.slot_values[index] = v.to_le_bytes();
+        let core = self.cached_core.as_mut().expect("core was initialized");
+        let read_result: Result<(), String> = (|| {
+            self.slot_values.resize(self.slots.len(), [0; 4]);
+            for (index, slot) in self.slots.iter().enumerate() {
+                if !publish_stream && !slot.needed_for_latest {
+                    continue;
                 }
-                Err(e) => {
-                    let message = format!("读取 {:#010x} 失败: {e}", slot.address);
-                    self.last_error = Some(message.clone());
-                    return Err(message);
+                match core.read_word_32(slot.address) {
+                    Ok(v) => {
+                        self.slot_values[index] = v.to_le_bytes();
+                    }
+                    Err(e) => {
+                        return Err(format!("读取 {:#010x} 失败: {e}", slot.address));
+                    }
                 }
             }
+            Ok(())
+        })();
+        if let Err(message) = read_result {
+            self.invalidate_core();
+            self.last_error = Some(message.clone());
+            return Err(message);
         }
 
         for mapping in &self.var_mappings {
@@ -374,14 +405,9 @@ impl ProbeSession {
         if !self.connected {
             return Err("Probe 未连接".to_owned());
         }
-        let session = self
-            .session
-            .as_mut()
-            .ok_or_else(|| "Probe 会话不可用，请重新连接".to_owned())?;
-        let mut core = session
-            .core(0)
-            .map_err(|error| format!("获取核心失败: {error}"))?;
-        core.status()
+        self.core_mut()
+            .map_err(|error| format!("获取核心失败: {error}"))?
+            .status()
             .map(|_| ())
             .map_err(|error| format!("Probe 链路检测失败: {error}"))
     }
@@ -392,19 +418,14 @@ impl ProbeSession {
         size: u32,
         value: u64,
     ) -> Result<(), probe_rs::Error> {
-        if let Some(ref mut session) = self.session {
-            let mut core = session.core(0)?;
-            return match size {
-                1 => core.write_word_8(addr, value as u8),
-                2 => core.write_word_16(addr, value as u16),
-                4 => core.write_word_32(addr, value as u32),
-                8 => core.write_word_64(addr, value),
-                _ => Err(probe_rs::Error::Other(format!("不支持 {size} 字节写入"))),
-            };
+        let core = self.core_mut()?;
+        match size {
+            1 => core.write_word_8(addr, value as u8),
+            2 => core.write_word_16(addr, value as u16),
+            4 => core.write_word_32(addr, value as u32),
+            8 => core.write_word_64(addr, value),
+            _ => Err(probe_rs::Error::Other(format!("不支持 {size} 字节写入"))),
         }
-        Err(probe_rs::Error::Other(
-            "Probe 会话不可用，请重新连接".to_owned(),
-        ))
     }
 
     /// Read a group of SVD registers while holding one probe core handle.
@@ -413,13 +434,7 @@ impl ProbeSession {
         &mut self,
         requests: &[RegisterReadRequest],
     ) -> Vec<(u64, Result<u64, String>)> {
-        let Some(session) = self.session.as_mut() else {
-            return requests
-                .iter()
-                .map(|request| (request.id, Err("Probe 会话不可用，请重新连接".to_owned())))
-                .collect();
-        };
-        let mut core = match session.core(0) {
+        let core = match self.core_mut() {
             Ok(core) => core,
             Err(error) => {
                 let error = format!("获取核心失败: {error}");

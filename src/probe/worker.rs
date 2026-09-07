@@ -720,10 +720,9 @@ impl ProbeWorker {
 
         self.clear_temporary_breakpoint();
         let (status, known_pc) = {
-            let mut core = self
+            let core = self
                 .probe
-                .session_mut()
-                .and_then(|session| session.core(0))
+                .core_mut()
                 .map_err(|error| format!("启动调试时获取核心失败: {error}"))?;
             match mode {
                 DebugStartMode::Attach => {
@@ -785,10 +784,9 @@ impl ProbeWorker {
         }
         self.running.store(false, Ordering::Release);
         let (info, status) = {
-            let mut core = self
+            let core = self
                 .probe
-                .session_mut()
-                .and_then(|session| session.core(0))
+                .core_mut()
                 .map_err(|error| format!("获取核心失败: {error}"))?;
             let info = core
                 .halt(Duration::from_millis(200))
@@ -815,10 +813,9 @@ impl ProbeWorker {
             return Err("请先连接目标设备".to_owned());
         }
         let pc = {
-            let mut core = self
+            let core = self
                 .probe
-                .session_mut()
-                .and_then(|session| session.core(0))
+                .core_mut()
                 .map_err(|error| format!("打断步进时获取核心失败: {error}"))?;
             if core
                 .status()
@@ -848,10 +845,9 @@ impl ProbeWorker {
             return Err("目标未处于暂停状态".to_owned());
         }
         let status = {
-            let mut core = self
+            let core = self
                 .probe
-                .session_mut()
-                .and_then(|session| session.core(0))
+                .core_mut()
                 .map_err(|error| format!("获取核心失败: {error}"))?;
             core.run()
                 .map_err(|error| format!("继续运行失败: {error}"))?;
@@ -895,7 +891,7 @@ impl ProbeWorker {
             self.temporary_breakpoint = Some(address);
         }
         let run_result = (|| {
-            let mut core = self.probe.session_mut()?.core(0)?;
+            let core = self.probe.core_mut()?;
             core.run()?;
             core.status()
         })();
@@ -934,10 +930,9 @@ impl ProbeWorker {
                 return None;
             }
             self.probe
-                .session_mut()
-                .and_then(|session| session.core(0))
+                .core_mut()
                 .ok()
-                .and_then(|mut core| disassemble_around_pc(&mut core, debug_info, address).ok())
+                .and_then(|core| disassemble_around_pc(core, debug_info, address).ok())
         };
         self.latest_instructions = from_elf
             .or_else(live)
@@ -956,10 +951,9 @@ impl ProbeWorker {
             return Err("单步前必须先暂停目标".to_owned());
         }
         let origin_pc = {
-            let mut core = self
+            let core = self
                 .probe
-                .session_mut()
-                .and_then(|session| session.core(0))
+                .core_mut()
                 .map_err(|error| format!("获取核心失败: {error}"))?;
             core.read_core_reg(core.program_counter().id())
                 .and_then(|value: RegisterValue| value.try_into())
@@ -968,10 +962,9 @@ impl ProbeWorker {
 
         let (status, actual_pc) = if kind == StepKind::Instruction {
             self.last_step_method = Some(StepExecutionMethod::SingleStep);
-            let mut core = self
+            let core = self
                 .probe
-                .session_mut()
-                .and_then(|session| session.core(0))
+                .core_mut()
                 .map_err(|error| format!("获取核心失败: {error}"))?;
             let information = core
                 .step()
@@ -1019,13 +1012,12 @@ impl ProbeWorker {
                     .debug_info
                     .as_ref()
                     .ok_or_else(|| "请先加载 ELF 调试信息".to_owned())?;
-                let mut core = self
+                let core = self
                     .probe
-                    .session_mut()
-                    .and_then(|session| session.core(0))
+                    .core_mut()
                     .map_err(|error| format!("获取核心失败: {error}"))?;
                 single_step_source(
-                    &mut core,
+                    core,
                     debug_info,
                     &self.step_interrupt,
                     SourceStepPlan {
@@ -1111,7 +1103,7 @@ impl ProbeWorker {
     /// stale locals, registers, or a stale stop_id.
     fn refresh_after_step_error(&mut self, error: String) -> String {
         let observed = (|| {
-            let mut core = self.probe.session_mut()?.core(0)?;
+            let core = self.probe.core_mut()?;
             let mut status = core.status()?;
             if !status.is_halted() {
                 core.halt(Duration::from_millis(500))?;
@@ -1187,11 +1179,7 @@ impl ProbeWorker {
     }
 
     fn poll_target_status(&mut self) {
-        let status = self
-            .probe
-            .session_mut()
-            .and_then(|session| session.core(0))
-            .and_then(|mut core| core.status());
+        let status = self.probe.core_mut().and_then(|core| core.status());
         let Ok(status) = status else {
             return;
         };
@@ -1233,14 +1221,13 @@ impl ProbeWorker {
         }
         self.latest_debug_warnings.clear();
         let debug_info = self.debug_info.as_ref();
-        let mut core = self
+        let core = self
             .probe
-            .session_mut()
-            .and_then(|session| session.core(0))
+            .core_mut()
             .map_err(|error| format!("获取核心失败: {error}"))?;
         core.spill_registers()
             .map_err(|error| format!("保存窗口寄存器失败: {error}"))?;
-        let registers = DebugRegisters::from_core(&mut core);
+        let registers = DebugRegisters::from_core(core);
         let mut warnings = Vec::new();
         // The register snapshot is authoritative. Stepping helpers may report an
         // intermediate or Thumb-tagged address while the core has already halted elsewhere.
@@ -1261,7 +1248,7 @@ impl ProbeWorker {
             .get_stack_pointer()
             .and_then(|register| register.value)
             .and_then(register_value_u64)
-            .map(|stack_pointer| read_stack_memory(&mut core, stack_pointer))
+            .map(|stack_pointer| read_stack_memory(core, stack_pointer))
         {
             Some(Ok(memory)) => memory,
             Some(Err(error)) => {
@@ -1279,7 +1266,7 @@ impl ProbeWorker {
             {
                 instructions
             } else {
-                match disassemble_around_pc(&mut core, debug_info, pc) {
+                match disassemble_around_pc(core, debug_info, pc) {
                     Ok(instructions) => instructions,
                     Err(error) => {
                         warnings.push(error);
@@ -1297,7 +1284,7 @@ impl ProbeWorker {
             let exception_handler = exception_handler_for_core(core.core_type());
             let instruction_set = core.instruction_set().ok();
             match debug_info.unwind(
-                &mut core,
+                core,
                 registers.clone(),
                 exception_handler.as_ref(),
                 instruction_set,
@@ -1312,8 +1299,6 @@ impl ProbeWorker {
         } else {
             Vec::new()
         };
-        drop(core);
-
         self.stack_frames = stack_frames;
         self.selected_frame = 0;
         self.latest_pc = pc;
@@ -1345,13 +1330,11 @@ impl ProbeWorker {
             frame_base: frame.frame_base,
             canonical_frame_address: frame.canonical_frame_address,
         };
-        let mut core = self
+        let core = self
             .probe
-            .session_mut()
-            .and_then(|session| session.core(0))
+            .core_mut()
             .map_err(|error| format!("获取核心失败: {error}"))?;
-        cache.recurse_deferred_variables(debug_info, &mut core, 2, frame_info);
-        drop(core);
+        cache.recurse_deferred_variables(debug_info, core, 2, frame_info);
         self.refresh_cpp_local_values(frame_index)
     }
 
@@ -1378,15 +1361,13 @@ impl ProbeWorker {
             frame_base: frame.frame_base,
             canonical_frame_address: frame.canonical_frame_address,
         };
-        let mut core = self
+        let core = self
             .probe
-            .session_mut()
-            .and_then(|session| session.core(0))
+            .core_mut()
             .map_err(|error| format!("获取核心失败: {error}"))?;
         debug_info
-            .cache_deferred_variables(cache, &mut core, &mut variable, frame_info)
+            .cache_deferred_variables(cache, core, &mut variable, frame_info)
             .map_err(|error| format!("展开局部变量失败: {error}"))?;
-        drop(core);
         self.refresh_cpp_local_values(frame_index)
     }
 
@@ -1431,16 +1412,13 @@ impl ProbeWorker {
             }
             writable_variable.set_value(VariableValue::Valid(new_value.trim().to_owned()));
         }
-        let mut core = self
+        let core = self
             .probe
-            .session_mut()
-            .and_then(|session| session.core(0))
+            .core_mut()
             .map_err(|error| format!("写入局部变量时获取核心失败: {error}"))?;
         writable_variable
-            .update_value(&mut core, cache, new_value.trim().to_owned())
+            .update_value(core, cache, new_value.trim().to_owned())
             .map_err(|error| format!("写入局部变量失败: {error}"))?;
-        drop(core);
-
         if is_cpp_language(original_language)
             && let Some(mut updated) = cache.get_variable_by_key(key)
         {
@@ -1466,17 +1444,16 @@ impl ProbeWorker {
             .as_ref()
             .ok_or_else(|| "请先加载 ELF 调试信息".to_owned())?;
         let endian = debug_info.endianness();
-        let mut core = self
+        let core = self
             .probe
-            .session_mut()
-            .and_then(|session| session.core(0))
+            .core_mut()
             .map_err(|error| format!("获取核心失败: {error}"))?;
         self.local_value_overrides.clear();
         for variable in variables {
             if !is_cpp_language(variable.language) {
                 continue;
             }
-            if let Some(value) = read_cpp_variable_value(&mut core, &variable, endian) {
+            if let Some(value) = read_cpp_variable_value(core, &variable, endian) {
                 self.local_value_overrides
                     .insert(i64::from(variable.variable_key()), value);
             }
@@ -3214,9 +3191,8 @@ mod tests {
 
         let was_halted = worker
             .probe
-            .session_mut()
-            .and_then(|session| session.core(0))
-            .and_then(|mut core| core.status())
+            .core_mut()
+            .and_then(|core| core.status())
             .is_ok_and(|status| status.is_halted());
         let test_result = (|| -> Result<(), String> {
             worker.handle_command(ProbeCommand::LoadProgram {
@@ -3292,9 +3268,8 @@ mod tests {
             }
             let interrupted_pc = worker
                 .probe
-                .session_mut()
-                .and_then(|session| session.core(0))
-                .and_then(|mut core| core.read_core_reg(core.program_counter().id()))
+                .core_mut()
+                .and_then(|core| core.read_core_reg(core.program_counter().id()))
                 .map_err(|error| format!("read PC after manual interrupt failed: {error}"))?;
             if normalize_code_address(interrupted_pc) != normalize_code_address(before_pc) {
                 return Err(format!(
@@ -3320,18 +3295,16 @@ mod tests {
             let local_reference = i64::from(local.variable_key());
             let original_raw = worker
                 .probe
-                .session_mut()
-                .and_then(|session| session.core(0))
-                .and_then(|mut core| core.read_word_8(local_address))
+                .core_mut()
+                .and_then(|core| core.read_word_8(local_address))
                 .map_err(|error| format!("read addr_sign before write failed: {error}"))?;
             let replacement = if original_raw == 1 { -1 } else { 1 };
             let write_result = (|| -> Result<(), String> {
                 worker.write_local_variable(0, local_reference, replacement.to_string())?;
                 let written = worker
                     .probe
-                    .session_mut()
-                    .and_then(|session| session.core(0))
-                    .and_then(|mut core| core.read_word_8(local_address))
+                    .core_mut()
+                    .and_then(|core| core.read_word_8(local_address))
                     .map_err(|error| format!("read addr_sign after write failed: {error}"))?;
                 if written != replacement as i8 as u8 {
                     return Err(format!(
@@ -3405,9 +3378,8 @@ mod tests {
         let _ = worker.remove_breakpoint(0xD06);
         let actual_halted = worker
             .probe
-            .session_mut()
-            .and_then(|session| session.core(0))
-            .and_then(|mut core| core.status())
+            .core_mut()
+            .and_then(|core| core.status())
             .is_ok_and(|status| status.is_halted());
         if was_halted && !actual_halted {
             let _ = worker.debug_halt();

@@ -5,12 +5,12 @@ pub use worker::*;
 
 #[cfg(test)]
 mod tests {
-    use super::ProbeSession;
+    use super::ProbeCommand;
 
     fn assert_send<T: Send>() {}
 
     #[test]
-    fn probe_session_is_send_to_the_worker_thread() {
-        assert_send::<ProbeSession>();
+    fn probe_commands_are_send_to_the_worker_thread() {
+        assert_send::<ProbeCommand>();
     }
 }
