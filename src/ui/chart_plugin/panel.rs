@@ -17,6 +17,7 @@ use std::time::Instant;
 
 const ZOOM_MODE_BUTTON_SIZE: [f32; 2] = [42.0, 22.0];
 const FFT_TOGGLE_BUTTON_SIZE: [f32; 2] = [80.0, 22.0];
+const SCROLL_ZOOM_STEP: f64 = 1.02;
 const MIN_POINT_MARKER_THRESHOLD: usize = 2;
 const DEFAULT_POINT_MARKER_THRESHOLD: usize = 32;
 const MAX_POINT_MARKER_THRESHOLD: usize = 1000;
@@ -941,11 +942,13 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         .input(|i| i.pointer.hover_pos().is_some_and(|p| plot_rect.contains(p)));
     let td_scroll = ui.ctx().input(|i| i.smooth_scroll_delta);
 
-    if state.td_scroll_mode == FftScrollMode::Both {
-        state.td_plot_bounds = None;
-    } else if td_hovered && td_scroll.y != 0.0 {
+    if td_hovered && td_scroll.y != 0.0 {
         state.auto_scroll = false;
-        let factor = if td_scroll.y > 0.0 { 1.0 / 1.15 } else { 1.15 };
+        let factor = if td_scroll.y > 0.0 {
+            1.0 / SCROLL_ZOOM_STEP
+        } else {
+            SCROLL_ZOOM_STEP
+        };
         let current = state.td_plot_bounds;
         state.td_plot_bounds = Some(compute_td_scroll_zoom(
             current,
@@ -955,7 +958,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         ));
     } else {
         if let Some(bounds) = &state.td_plot_bounds {
-            let range = bounds.2 - bounds.3;
+            let range = bounds.3 - bounds.2;
             if range <= 0.0 || !range.is_finite() {
                 state.td_plot_bounds = None;
             }
@@ -971,7 +974,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         .show_grid([true, true])
         .allow_zoom([true, true])
         .allow_drag([true, true])
-        .allow_scroll(state.td_scroll_mode == FftScrollMode::Both)
+        .allow_scroll(false)
         .allow_boxed_zoom(true)
         .allow_double_click_reset(false)
         .x_axis_formatter(|t, _range| fmt_time(t.value))
@@ -1039,30 +1042,13 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 state.td_plot_bounds = None;
             }
 
-            if state.td_scroll_mode == FftScrollMode::Both {
-                if state.auto_scroll {
-                    if let Some((x_min, x_max, y_min, y_max)) = auto_bounds {
-                        plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                            [x_min, y_min],
-                            [x_max, y_max],
-                        ));
-                    }
-                }
-            } else {
-                if state.auto_scroll {
-                    if let Some((x_min, x_max, y_min, y_max)) = auto_bounds {
-                        plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                            [x_min, y_min],
-                            [x_max, y_max],
-                        ));
-                    }
-                } else if let Some((x_min, x_max, y_min, y_max)) = state.td_plot_bounds {
+            if state.auto_scroll {
+                if let Some((x_min, x_max, y_min, y_max)) = auto_bounds {
                     plot_ui
                         .set_plot_bounds(PlotBounds::from_min_max([x_min, y_min], [x_max, y_max]));
                 }
-
-                let pb = plot_ui.plot_bounds();
-                state.td_plot_bounds = Some((pb.min()[0], pb.max()[0], pb.min()[1], pb.max()[1]));
+            } else if let Some((x_min, x_max, y_min, y_max)) = state.td_plot_bounds {
+                plot_ui.set_plot_bounds(PlotBounds::from_min_max([x_min, y_min], [x_max, y_max]));
             }
 
             if state.show_sparse_points {
@@ -1092,6 +1078,13 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             }
         });
     let plot_frame = *plot_response.transform.frame();
+    let plot_bounds = plot_response.transform.bounds();
+    state.td_plot_bounds = Some((
+        plot_bounds.min()[0],
+        plot_bounds.max()[0],
+        plot_bounds.min()[1],
+        plot_bounds.max()[1],
+    ));
 
     if let Some((sx, sy, cursor_data)) = &cursor_labels {
         let font_id = egui::FontId::proportional(11.0);
@@ -1233,13 +1226,11 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         .input(|i| i.pointer.hover_pos().is_some_and(|p| plot_rect.contains(p)));
     let scroll_delta = ui.ctx().input(|i| i.smooth_scroll_delta);
 
-    if state.fft_scroll_mode == FftScrollMode::Both {
-        state.fft_plot_bounds = None;
-    } else if hovered && scroll_delta.y != 0.0 {
+    if hovered && scroll_delta.y != 0.0 {
         let factor = if scroll_delta.y > 0.0 {
-            1.0 / 1.15
+            1.0 / SCROLL_ZOOM_STEP
         } else {
-            1.15
+            SCROLL_ZOOM_STEP
         };
         let current_bounds = state.fft_plot_bounds;
         let new_bounds =
@@ -1247,7 +1238,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         state.fft_plot_bounds = Some(new_bounds);
     } else {
         if let Some(bounds) = &state.fft_plot_bounds {
-            let range = bounds.2 - bounds.3;
+            let range = bounds.3 - bounds.2;
             if range <= 0.0 || !range.is_finite() {
                 state.fft_plot_bounds = None;
             }
@@ -1263,7 +1254,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         .show_grid([true, true])
         .allow_zoom([true, true])
         .allow_drag([true, true])
-        .allow_scroll(state.fft_scroll_mode == FftScrollMode::Both)
+        .allow_scroll(false)
         .allow_boxed_zoom(true)
         .x_axis_formatter(|f, _range| format!("{:.0} Hz", f.value))
         .y_axis_formatter(|v, _range| {
@@ -1312,6 +1303,13 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             }
         });
     let plot_frame = *plot_response.transform.frame();
+    let plot_bounds = plot_response.transform.bounds();
+    state.fft_plot_bounds = Some((
+        plot_bounds.min()[0],
+        plot_bounds.max()[0],
+        plot_bounds.min()[1],
+        plot_bounds.max()[1],
+    ));
 
     if let Some((sx, sy, cursor_data)) = &cursor_labels {
         let font_id = egui::FontId::proportional(11.0);
