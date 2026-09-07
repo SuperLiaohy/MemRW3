@@ -231,18 +231,15 @@ impl TableNode {
                 let due = leaf
                     .last_value_update
                     .is_none_or(|last_update| last_update.elapsed() >= interval);
-                let latest = pool
-                    .get(leaf.variable_id)
-                    .and_then(|variable| variable.latest.load().map(|(_, raw)| raw))
-                    .or_else(|| {
-                        frame_data
-                            .get(&leaf.variable_id)
-                            .and_then(|samples| samples.last())
-                            .map(|(_, raw)| *raw)
-                    });
-                if let Some(raw) = latest {
-                    if due {
-                        if let Some(variable) = pool.get(leaf.variable_id) {
+                if due {
+                    if let Some(variable) = pool.get(leaf.variable_id) {
+                        let latest = variable.latest.load().map(|(_, raw)| raw).or_else(|| {
+                            frame_data
+                                .get(&leaf.variable_id)
+                                .and_then(|samples| samples.last())
+                                .map(|(_, raw)| *raw)
+                        });
+                        if let Some(raw) = latest {
                             formatter(&raw, &variable.ext_type, &mut leaf.current_value);
                             leaf.last_value_update = Some(Instant::now());
                         }
@@ -407,6 +404,32 @@ mod tests {
             Some(Instant::now() - Duration::from_secs(1));
         root.update_values(&pool, &frame_data, formatter);
         assert_eq!(root.leaf.as_ref().unwrap().current_value, "2");
+    }
+
+    #[test]
+    fn prefers_latest_value_over_frame_data_and_falls_back_before_first_sample() {
+        let candidate = leaf("value", 0x2000_0000);
+        let mut pool = VariablePool::default();
+        let mut next_id = 0;
+        let mut root =
+            TableNode::from_candidate(&candidate, "value".to_owned(), &mut pool, &mut next_id)
+                .unwrap();
+        let variable_id = root.leaf.as_ref().unwrap().variable_id;
+        let mut frame_data = FrameData::default();
+        frame_data.insert(variable_id, vec![(1.0, [3; 8]), (2.0, [7; 8])]);
+        let formatter = |raw: &[u8], _: &ExtendType, output: &mut String| {
+            *output = raw[0].to_string();
+        };
+
+        root.update_values(&pool, &frame_data, formatter);
+        assert_eq!(root.leaf.as_ref().unwrap().current_value, "7");
+
+        pool.get(variable_id).unwrap().latest.store([9; 8]);
+        root.leaf.as_mut().unwrap().last_value_update =
+            Some(Instant::now() - Duration::from_secs(1));
+        root.update_values(&pool, &frame_data, formatter);
+        assert_eq!(root.leaf.as_ref().unwrap().current_value, "9");
+        assert_eq!(frame_data.get(&variable_id).unwrap().len(), 2);
     }
 
     #[test]
