@@ -167,6 +167,7 @@ impl MemRWPlugin for DebugPluginState {
             self.command_pending = false;
             self.variable_edits.clear();
             self.snapshot = ctx.debug_snapshot.clone();
+            canonicalize_snapshot_source_paths(&mut self.snapshot);
             self.capture_inline_assembly();
             self.resolve_pending_assembly_scroll();
         }
@@ -2412,6 +2413,7 @@ impl DebugPluginState {
     }
 
     fn navigate_to_source(&mut self, path: String, line: Option<u64>, record: bool) {
+        let path = indexed_source_path(&path, &self.snapshot.source_files);
         let changed = self.selected_source_path.as_deref() != Some(path.as_str());
         if !self.source_tabs.iter().any(|open| open == &path) {
             self.source_tabs.push(path.clone());
@@ -2685,8 +2687,181 @@ fn short_path(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
+/// Normalize a source path lexically instead of using `std::fs::canonicalize`.
+///
+/// DWARF paths may refer to files from another machine, so they do not
+/// necessarily exist on the host running MemRW3. In particular, Windows build
+/// tools commonly emit mixed separators and unresolved parent components.
+fn canonical_source_path(path: &str) -> String {
+    let replaced = path.replace('\\', "/");
+    let bytes = replaced.as_bytes();
+    let (prefix, rest, rooted, protected_components) = if replaced.starts_with("//") {
+        ("//".to_owned(), replaced.trim_start_matches('/'), true, 2)
+    } else if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let drive = (bytes[0] as char).to_ascii_uppercase();
+        let after_drive = &replaced[2..];
+        if after_drive.starts_with('/') {
+            (
+                format!("{drive}:/"),
+                after_drive.trim_start_matches('/'),
+                true,
+                0,
+            )
+        } else {
+            (format!("{drive}:"), after_drive, false, 0)
+        }
+    } else if replaced.starts_with('/') {
+        ("/".to_owned(), replaced.trim_start_matches('/'), true, 0)
+    } else {
+        (String::new(), replaced.as_str(), false, 0)
+    };
+
+    let mut components: Vec<&str> = Vec::new();
+    for component in rest.split('/') {
+        match component {
+            "" | "." => {}
+            ".." if components.len() > protected_components && components.last() != Some(&"..") => {
+                components.pop();
+            }
+            ".." if !rooted => components.push(component),
+            ".." => {}
+            other => components.push(other),
+        }
+    }
+
+    format!("{prefix}{}", components.join("/"))
+}
+
+fn canonicalize_breakpoint_spec(spec: &mut BreakpointSpec) {
+    if let BreakpointSpec::Source { path, .. } = spec {
+        *path = canonical_source_path(path);
+    }
+}
+
+/// Resolve a runtime/debugger spelling back to the authoritative path in the
+/// DWARF source index. This mirrors breakpoint resolution's longest unique
+/// suffix matching and covers toolchains that report the same source once as
+/// `build/../src/file.c` and once as `build/src/file.c`.
+fn indexed_source_path(path: &str, source_files: &[String]) -> String {
+    let normalized = canonical_source_path(path);
+    if source_files
+        .iter()
+        .any(|candidate| candidate == &normalized)
+    {
+        return normalized;
+    }
+
+    let components: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    for suffix_len in (1..=components.len()).rev() {
+        let suffix = components[components.len() - suffix_len..].join("/");
+        let matches = source_files
+            .iter()
+            .filter(|candidate| {
+                candidate.as_str() == suffix || candidate.ends_with(&format!("/{suffix}"))
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [candidate] => return (*candidate).clone(),
+            [] => {}
+            _ => return normalized,
+        }
+    }
+    normalized
+}
+
+fn aliased_source_path(
+    path: &str,
+    aliases: &BTreeMap<String, String>,
+    source_files: &[String],
+) -> String {
+    let normalized = canonical_source_path(path);
+    let normalized = aliases.get(&normalized).unwrap_or(&normalized);
+    indexed_source_path(normalized, source_files)
+}
+
+fn canonicalize_snapshot_source_paths(snapshot: &mut DebugSnapshot) {
+    let normalized_source_files = snapshot
+        .source_files
+        .iter()
+        .map(|path| canonical_source_path(path))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    // A successfully resolved source breakpoint is authoritative evidence that
+    // its requested and resolved spellings identify the same source file.
+    let aliases = snapshot
+        .breakpoints
+        .iter()
+        .filter_map(|breakpoint| {
+            let BreakpointSpec::Source { path, .. } = &breakpoint.spec else {
+                return None;
+            };
+            let resolved = breakpoint.resolved_source.as_ref()?;
+            let requested = indexed_source_path(path, &normalized_source_files);
+            normalized_source_files
+                .contains(&requested)
+                .then(|| (canonical_source_path(&resolved.path), requested))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    snapshot.source_files = normalized_source_files
+        .iter()
+        .map(|path| aliases.get(path).unwrap_or(path).clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let source_files = &snapshot.source_files;
+
+    let executable_lines = snapshot
+        .executable_lines
+        .iter()
+        .fold(BTreeMap::new(), |mut lines, source| {
+            lines
+                .entry((
+                    aliased_source_path(&source.path, &aliases, source_files),
+                    source.line,
+                ))
+                .and_modify(|address: &mut u64| *address = (*address).min(source.address))
+                .or_insert(source.address);
+            lines
+        })
+        .into_iter()
+        .map(|((path, line), address)| crate::model::ExecutableLineView {
+            path,
+            line,
+            address,
+        })
+        .collect::<Vec<_>>();
+    snapshot.executable_lines = executable_lines.into();
+
+    for frame in &mut snapshot.frames {
+        if let Some(source) = &mut frame.source {
+            source.path = aliased_source_path(&source.path, &aliases, source_files);
+        }
+    }
+    for instruction in &mut snapshot.instructions {
+        if let Some(source) = &mut instruction.source {
+            source.path = aliased_source_path(&source.path, &aliases, source_files);
+        }
+    }
+    for breakpoint in &mut snapshot.breakpoints {
+        canonicalize_breakpoint_spec(&mut breakpoint.spec);
+        if let BreakpointSpec::Source { path, .. } = &mut breakpoint.spec {
+            *path = aliased_source_path(path, &aliases, source_files);
+        }
+        if let Some(source) = &mut breakpoint.resolved_source {
+            source.path = aliased_source_path(&source.path, &aliases, source_files);
+        }
+    }
+}
+
 fn normalized_components(path: &str) -> Vec<String> {
-    path.replace('\\', "/")
+    canonical_source_path(path)
         .split('/')
         .filter(|component| !component.is_empty() && *component != ".")
         .map(str::to_owned)
@@ -2792,8 +2967,9 @@ fn resolve_local_source_path(
 mod tests {
     use super::{
         CODE_PANE_MIN_WIDTH, CODE_SPLITTER_SIZE, CodeView, SOURCE_ROW_WIDTHS, SOURCE_ROWS_RENDERED,
-        SourceVisualRow, breakpoint_label, build_source_tree, compact_expander,
-        compressed_directory, current_cursor_spec, editable_variable_value, render_source_code,
+        SourceVisualRow, breakpoint_label, build_source_tree, canonical_source_path,
+        canonicalize_snapshot_source_paths, compact_expander, compressed_directory,
+        current_cursor_spec, editable_variable_value, indexed_source_path, render_source_code,
         render_toolbar, resolve_local_source_path, single_line_variable_value,
         source_highlight_job, source_node_matches, source_visual_row_at, source_visual_row_count,
         source_visual_row_for_line, split_code_rects, stabilize_debug_style, step_method_label,
@@ -2824,6 +3000,124 @@ mod tests {
     }
 
     #[test]
+    fn canonicalizes_windows_source_paths_lexically() {
+        assert_eq!(
+            canonical_source_path(r"D:\User\Code\Stm32\MDK\\\\../Core/Src/main.c"),
+            "D:/User/Code/Stm32/Core/Src/main.c"
+        );
+        assert_eq!(
+            canonical_source_path(r"d:/User/Code/Stm32/Core/./Src/main.c"),
+            "D:/User/Code/Stm32/Core/Src/main.c"
+        );
+        assert_eq!(
+            canonical_source_path("../../src/main.c"),
+            "../../src/main.c"
+        );
+    }
+
+    #[test]
+    fn canonicalizes_all_snapshot_source_path_owners_and_deduplicates_indexes() {
+        let indexed = "D:/User/Code/Stm32/Core/Src/main.c";
+        let unresolved = r"D:\User\Code\Stm32\MDK\\\\../Core/Src/main.c";
+        let runtime = r"D:\User\Code\Stm32\MDK\Core\Src\main.c";
+        let mut snapshot = crate::model::DebugSnapshot {
+            source_files: vec![
+                unresolved.to_owned(),
+                indexed.to_owned(),
+                runtime.to_owned(),
+            ],
+            executable_lines: vec![
+                crate::model::ExecutableLineView {
+                    path: unresolved.to_owned(),
+                    line: 12,
+                    address: 0x102,
+                },
+                crate::model::ExecutableLineView {
+                    path: indexed.to_owned(),
+                    line: 12,
+                    address: 0x100,
+                },
+            ]
+            .into(),
+            frames: vec![crate::model::StackFrameView {
+                index: 0,
+                function: "main".to_owned(),
+                pc: 0x100,
+                source: Some(SourceLocationView {
+                    path: runtime.to_owned(),
+                    line: Some(12),
+                    column: None,
+                }),
+                is_inline: false,
+            }],
+            instructions: vec![InstructionView {
+                address: 0x100,
+                bytes: "00 BF".to_owned(),
+                instruction: "nop".to_owned(),
+                source: Some(SourceLocationView {
+                    path: runtime.to_owned(),
+                    line: Some(12),
+                    column: None,
+                }),
+            }],
+            breakpoints: vec![BreakpointView {
+                id: 1,
+                spec: BreakpointSpec::Source {
+                    path: unresolved.to_owned(),
+                    line: 12,
+                    column: None,
+                },
+                address: Some(0x100),
+                enabled: true,
+                verified: true,
+                message: None,
+                resolved_source: Some(SourceLocationView {
+                    path: runtime.to_owned(),
+                    line: Some(12),
+                    column: None,
+                }),
+            }],
+            ..Default::default()
+        };
+
+        canonicalize_snapshot_source_paths(&mut snapshot);
+
+        assert_eq!(snapshot.source_files, vec![indexed]);
+        assert_eq!(snapshot.executable_lines.len(), 1);
+        assert_eq!(snapshot.executable_lines[0].path, indexed);
+        assert_eq!(snapshot.executable_lines[0].address, 0x100);
+        assert_eq!(snapshot.frames[0].source.as_ref().unwrap().path, indexed);
+        assert_eq!(
+            snapshot.instructions[0].source.as_ref().unwrap().path,
+            indexed
+        );
+        let BreakpointSpec::Source { path, .. } = &snapshot.breakpoints[0].spec else {
+            panic!("expected source breakpoint");
+        };
+        assert_eq!(path, indexed);
+        assert_eq!(
+            snapshot.breakpoints[0]
+                .resolved_source
+                .as_ref()
+                .unwrap()
+                .path,
+            indexed
+        );
+    }
+
+    #[test]
+    fn maps_debugger_paths_to_the_longest_unique_source_index_suffix() {
+        let files = vec![
+            "D:/User/Code/Stm32/Core/Src/main.c".to_owned(),
+            "D:/User/Code/Stm32/Drivers/Src/gpio.c".to_owned(),
+        ];
+        assert_eq!(
+            indexed_source_path(r"D:\User\Code\Stm32\MDK\Core\Src\main.c", &files),
+            files[0]
+        );
+    }
+
+    #[test]
     fn source_buffers_open_once_switch_and_close_to_an_adjacent_tab() {
         let mut plugin = super::DebugPluginState::default();
         plugin.open_source("/src/main.cpp".to_owned());
@@ -2844,6 +3138,23 @@ mod tests {
         plugin.close_source(0);
         assert!(plugin.source_tabs.is_empty());
         assert_eq!(plugin.code_view, CodeView::Assembly);
+    }
+
+    #[test]
+    fn equivalent_windows_paths_share_one_source_buffer() {
+        let mut plugin = super::DebugPluginState::default();
+        plugin.snapshot.source_files = vec!["D:/User/Code/Stm32/Core/Src/main.c".to_owned()];
+        plugin.open_source(r"D:\User\Code\Stm32\MDK\\\\../Core/Src/main.c".to_owned());
+        plugin.open_source(r"D:\User\Code\Stm32\MDK\Core\Src\main.c".to_owned());
+
+        assert_eq!(
+            plugin.source_tabs,
+            vec!["D:/User/Code/Stm32/Core/Src/main.c"]
+        );
+        assert_eq!(
+            plugin.selected_source_path.as_deref(),
+            Some("D:/User/Code/Stm32/Core/Src/main.c")
+        );
     }
 
     #[test]
