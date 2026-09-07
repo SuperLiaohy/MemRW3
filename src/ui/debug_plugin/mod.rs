@@ -1459,16 +1459,9 @@ fn render_code(ui: &mut Ui, state: &mut DebugPluginState) {
         CodeView::Source => render_source_code(ui, state),
         CodeView::Split => {
             let available = ui.available_rect_before_wrap();
-            let gap = 5.0;
-            let split_x = available.center().x;
-            let source_rect = egui::Rect::from_min_max(
-                available.min,
-                egui::pos2(split_x - gap * 0.5, available.bottom()),
-            );
-            let assembly_rect = egui::Rect::from_min_max(
-                egui::pos2(split_x + gap * 0.5, available.top()),
-                available.max,
-            );
+            let (source_rect, splitter_rect, assembly_rect, ratio) =
+                split_code_rects(available, state.workspace_layout.code_split_ratio);
+            state.workspace_layout.code_split_ratio = ratio;
             let mut source_ui = ui.new_child(
                 egui::UiBuilder::new()
                     .id_salt("debug_split_source")
@@ -1485,14 +1478,23 @@ fn render_code(ui: &mut Ui, state: &mut DebugPluginState) {
             );
             assembly_ui.set_clip_rect(assembly_rect);
             render_disassembly(&mut assembly_ui, state, "debug_split_disassembly");
-            ui.painter().rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(split_x - gap * 0.5, available.top()),
-                    egui::pos2(split_x + gap * 0.5, available.bottom()),
-                ),
-                0.0,
-                ui.visuals().widgets.noninteractive.bg_stroke.color,
-            );
+            let splitter = ui
+                .interact(
+                    splitter_rect.expand2(egui::vec2(2.0, 0.0)),
+                    ui.id().with("debug_code_splitter"),
+                    egui::Sense::drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+            if splitter.dragged() && available.width() > CODE_SPLITTER_SIZE {
+                state.workspace_layout.code_split_ratio +=
+                    splitter.drag_delta().x / (available.width() - CODE_SPLITTER_SIZE);
+            }
+            let splitter_color = if splitter.hovered() || splitter.dragged() {
+                ui.visuals().selection.stroke.color
+            } else {
+                ui.visuals().widgets.noninteractive.bg_stroke.color
+            };
+            ui.painter().rect_filled(splitter_rect, 0.0, splitter_color);
             ui.advance_cursor_after_rect(available);
         }
     }
@@ -1837,6 +1839,33 @@ enum SourceVisualRow {
         line_index: usize,
         instruction_index: usize,
     },
+}
+
+const CODE_SPLITTER_SIZE: f32 = 5.0;
+const CODE_PANE_MIN_WIDTH: f32 = 120.0;
+
+fn split_code_rects(
+    available: egui::Rect,
+    requested_ratio: f32,
+) -> (egui::Rect, egui::Rect, egui::Rect, f32) {
+    let content_width = (available.width() - CODE_SPLITTER_SIZE).max(0.0);
+    let ratio = if content_width >= CODE_PANE_MIN_WIDTH * 2.0 {
+        let minimum = CODE_PANE_MIN_WIDTH / content_width;
+        requested_ratio.clamp(minimum, 1.0 - minimum)
+    } else {
+        0.5
+    };
+    let split_x = available.left() + content_width * ratio;
+    let source = egui::Rect::from_min_max(available.min, egui::pos2(split_x, available.bottom()));
+    let splitter = egui::Rect::from_min_max(
+        egui::pos2(split_x, available.top()),
+        egui::pos2(split_x + CODE_SPLITTER_SIZE, available.bottom()),
+    );
+    let assembly = egui::Rect::from_min_max(
+        egui::pos2(split_x + CODE_SPLITTER_SIZE, available.top()),
+        available.max,
+    );
+    (source, splitter, assembly, ratio)
 }
 
 /// Store only expanded lines. Mapping a visible visual row is proportional to
@@ -2762,12 +2791,12 @@ fn resolve_local_source_path(
 #[cfg(test)]
 mod tests {
     use super::{
-        CodeView, SOURCE_ROW_WIDTHS, SOURCE_ROWS_RENDERED, SourceVisualRow, breakpoint_label,
-        build_source_tree, compact_expander, compressed_directory, current_cursor_spec,
-        editable_variable_value, render_source_code, render_toolbar, resolve_local_source_path,
-        single_line_variable_value, source_highlight_job, source_node_matches,
-        source_visual_row_at, source_visual_row_count, source_visual_row_for_line,
-        stabilize_debug_style, step_method_label,
+        CODE_PANE_MIN_WIDTH, CODE_SPLITTER_SIZE, CodeView, SOURCE_ROW_WIDTHS, SOURCE_ROWS_RENDERED,
+        SourceVisualRow, breakpoint_label, build_source_tree, compact_expander,
+        compressed_directory, current_cursor_spec, editable_variable_value, render_source_code,
+        render_toolbar, resolve_local_source_path, single_line_variable_value,
+        source_highlight_job, source_node_matches, source_visual_row_at, source_visual_row_count,
+        source_visual_row_for_line, split_code_rects, stabilize_debug_style, step_method_label,
     };
     use crate::model::VariablePool;
     use crate::model::{
@@ -3211,6 +3240,26 @@ mod tests {
             Some(SourceVisualRow::Source(5))
         );
         assert_eq!(source_visual_row_at(9, 6, &expanded), None);
+    }
+
+    #[test]
+    fn split_code_panes_follow_and_clamp_the_saved_drag_ratio() {
+        let available = eframe::egui::Rect::from_min_max(
+            eframe::egui::pos2(10.0, 20.0),
+            eframe::egui::pos2(810.0, 520.0),
+        );
+        let (source, splitter, assembly, ratio) = split_code_rects(available, 0.7);
+        assert!((ratio - 0.7).abs() < f32::EPSILON);
+        assert!((splitter.width() - CODE_SPLITTER_SIZE).abs() < f32::EPSILON);
+        assert_eq!(source.right(), splitter.left());
+        assert_eq!(splitter.right(), assembly.left());
+        assert_eq!(source.left(), available.left());
+        assert_eq!(assembly.right(), available.right());
+
+        let (source, _, assembly, ratio) = split_code_rects(available, 1.0);
+        assert!(ratio < 1.0);
+        assert!(source.width() >= CODE_PANE_MIN_WIDTH);
+        assert!(assembly.width() >= CODE_PANE_MIN_WIDTH);
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub(super) struct WorkspaceLayoutState {
     pub inspector_width: f32,
     pub call_stack_height: f32,
     pub bottom_split_ratio: f32,
+    pub code_split_ratio: f32,
 }
 
 impl Default for WorkspaceLayoutState {
@@ -24,6 +25,7 @@ impl Default for WorkspaceLayoutState {
             inspector_width: 280.0,
             call_stack_height: 140.0,
             bottom_split_ratio: 0.55,
+            code_split_ratio: 0.5,
         }
     }
 }
@@ -250,6 +252,7 @@ mod tests {
             inspector_width: 10_000.0,
             call_stack_height: 10_000.0,
             bottom_split_ratio: 10_000.0,
+            code_split_ratio: 10_000.0,
         };
         let rects = layout.layout(bounds);
         assert!(rects.editor.width() >= 260.0);
