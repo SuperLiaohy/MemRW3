@@ -1609,7 +1609,7 @@ fn source_highlight_job(
         ui.visuals().weak_text_color()
     };
     job.append(
-        &format!("{line_number:>5}  "),
+        &format!("{line_number:>4}  "),
         0.0,
         egui::TextFormat {
             font_id: font_id.clone(),
@@ -1935,9 +1935,15 @@ fn render_inline_source_row(
             )
         })
         .unwrap_or_else(|| "    正在加载该行对应汇编…".to_owned());
-    ui.add_sized(
-        [ui.available_width(), SOURCE_ROW_HEIGHT],
-        egui::Label::new(RichText::new(text).monospace()),
+    let width = ui.available_width();
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, SOURCE_ROW_HEIGHT), egui::Sense::hover());
+    ui.painter().text(
+        rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::TextStyle::Monospace.resolve(ui.style()),
+        ui.visuals().text_color(),
     );
 }
 
