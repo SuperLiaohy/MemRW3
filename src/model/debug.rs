@@ -34,6 +34,12 @@ pub enum StepKind {
     Out,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepExecutionMethod {
+    SingleStep,
+    HardwareBreakpoint,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BreakpointSpec {
     Source {
@@ -158,6 +164,7 @@ pub struct DebugSnapshot {
     pub target_state: TargetState,
     pub active: bool,
     pub pc: Option<u64>,
+    pub last_step_method: Option<StepExecutionMethod>,
     pub registers: Vec<RegisterView>,
     pub frames: Vec<StackFrameView>,
     pub selected_frame: usize,

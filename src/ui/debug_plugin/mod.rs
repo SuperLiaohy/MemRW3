@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{
     BreakpointSpec, DebugCommand, DebugSnapshot, DebugStartMode, LogicalBreakpoint,
-    SourceLocationView, StepKind, TargetState, VariablePool, VariableView,
+    SourceLocationView, StepExecutionMethod, StepKind, TargetState, VariablePool, VariableView,
 };
 use crate::ui::plugin::{
     MemRWPlugin, PluginAction, PluginRenderContext, PluginUpdateContext, VariableCandidate,
@@ -50,7 +50,8 @@ pub struct DebugPluginState {
     expanded_variables: HashSet<i64>,
     variable_edits: HashMap<i64, String>,
     queued_after_load: Vec<LogicalBreakpoint>,
-    source_cache: HashMap<String, Result<Vec<String>, String>>,
+    source_cache: HashMap<String, Result<std::sync::Arc<[String]>, String>>,
+    executable_line_index: HashMap<String, BTreeMap<u64, u64>>,
     command_pending: bool,
     project_tree: SourceTreeNode,
     project_generation: u64,
@@ -87,6 +88,7 @@ impl Default for DebugPluginState {
             variable_edits: HashMap::new(),
             queued_after_load: Vec::new(),
             source_cache: HashMap::new(),
+            executable_line_index: HashMap::new(),
             command_pending: false,
             project_tree: SourceTreeNode::root(),
             project_generation: 0,
@@ -189,6 +191,14 @@ impl MemRWPlugin for DebugPluginState {
         }
         if self.project_generation != self.snapshot.program_generation {
             let (tree, common_root) = build_source_tree(&self.snapshot.source_files);
+            self.executable_line_index.clear();
+            for line in self.snapshot.executable_lines.iter() {
+                self.executable_line_index
+                    .entry(line.path.clone())
+                    .or_default()
+                    .entry(line.line)
+                    .or_insert(line.address);
+            }
             self.project_tree = tree;
             self.debug_source_root = common_root;
             self.project_generation = self.snapshot.program_generation;
@@ -496,6 +506,12 @@ fn render_toolbar(ui: &mut Ui, state: &mut DebugPluginState) {
                 [142.0, 20.0],
                 egui::Label::new(RichText::new(pc).monospace()).truncate(),
             );
+            let step_method = step_method_label(state.snapshot.last_step_method);
+            ui.add_sized(
+                [156.0, 20.0],
+                egui::Label::new(RichText::new(step_method).monospace().size(11.0)).truncate(),
+            )
+            .on_hover_text("显示最近一次实际采用的步进方式；硬件断点不可用时自动回退 SingleStep");
 
             let (diagnostic, diagnostic_color) = if let Some(error) = &state.snapshot.last_error {
                 (format!("错误: {error}"), ui.visuals().error_fg_color)
@@ -624,8 +640,16 @@ fn render_toolbar(ui: &mut Ui, state: &mut DebugPluginState) {
                     "指令步进",
                 ),
                 (DebugIcon::StepInto, StepKind::Into, "源码步入 (F11)"),
-                (DebugIcon::StepOver, StepKind::Over, "源码步过 (F10)"),
-                (DebugIcon::StepOut, StepKind::Out, "源码步出 (Shift+F11)"),
+                (
+                    DebugIcon::StepOver,
+                    StepKind::Over,
+                    "源码步过 (F10，函数调用自动加速)",
+                ),
+                (
+                    DebugIcon::StepOut,
+                    StepKind::Out,
+                    "源码步出 (Shift+F11，优先运行到调用者)",
+                ),
             ] {
                 let response = debug_icon_button(
                     ui,
@@ -667,6 +691,14 @@ fn render_toolbar(ui: &mut Ui, state: &mut DebugPluginState) {
             }
         },
     );
+}
+
+fn step_method_label(method: Option<StepExecutionMethod>) -> &'static str {
+    match method {
+        Some(StepExecutionMethod::HardwareBreakpoint) => "步进: 硬件断点加速",
+        Some(StepExecutionMethod::SingleStep) => "步进: SingleStep",
+        None => "步进: —",
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1790,6 +1822,125 @@ fn is_source_type(word: &str) -> bool {
     )
 }
 
+const SOURCE_ROW_HEIGHT: f32 = 20.0;
+
+#[cfg(test)]
+std::thread_local! {
+    static SOURCE_ROWS_RENDERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SOURCE_ROW_WIDTHS: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceVisualRow {
+    Source(usize),
+    Inline {
+        line_index: usize,
+        instruction_index: usize,
+    },
+}
+
+/// Store only expanded lines. Mapping a visible visual row is proportional to
+/// the number of expanded lines, rather than the source file length.
+fn source_expanded_rows(
+    state: &DebugPluginState,
+    path: &str,
+    line_count: usize,
+) -> Vec<(usize, usize)> {
+    let mut rows = state
+        .expanded_source_assembly
+        .iter()
+        .filter_map(|(expanded_path, line)| {
+            let line_index = usize::try_from(line.saturating_sub(1)).ok()?;
+            if expanded_path != path || line_index >= line_count {
+                return None;
+            }
+            let instruction_count = state
+                .inline_assembly_cache
+                .get(&(expanded_path.clone(), *line))
+                .map_or(1, |instructions| instructions.len().max(1));
+            Some((line_index, instruction_count))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_unstable_by_key(|row| row.0);
+    rows
+}
+
+fn source_visual_row_count(line_count: usize, expanded: &[(usize, usize)]) -> usize {
+    expanded
+        .iter()
+        .fold(line_count, |count, (_, extra)| count.saturating_add(*extra))
+}
+
+fn source_visual_row_for_line(line_index: usize, expanded: &[(usize, usize)]) -> usize {
+    expanded
+        .iter()
+        .filter(|(expanded_line, _)| *expanded_line < line_index)
+        .fold(line_index, |row, (_, extra)| row.saturating_add(*extra))
+}
+
+fn source_visual_row_at(
+    visual_row: usize,
+    line_count: usize,
+    expanded: &[(usize, usize)],
+) -> Option<SourceVisualRow> {
+    let mut source_index = 0usize;
+    let mut display_index = 0usize;
+    for &(expanded_line, extra_rows) in expanded {
+        let source_rows_before = expanded_line.saturating_sub(source_index);
+        if visual_row < display_index.saturating_add(source_rows_before) {
+            return Some(SourceVisualRow::Source(
+                source_index + visual_row.saturating_sub(display_index),
+            ));
+        }
+        display_index = display_index.saturating_add(source_rows_before);
+        if visual_row == display_index {
+            return Some(SourceVisualRow::Source(expanded_line));
+        }
+        display_index = display_index.saturating_add(1);
+        if visual_row < display_index.saturating_add(extra_rows) {
+            return Some(SourceVisualRow::Inline {
+                line_index: expanded_line,
+                instruction_index: visual_row.saturating_sub(display_index),
+            });
+        }
+        display_index = display_index.saturating_add(extra_rows);
+        source_index = expanded_line.saturating_add(1);
+    }
+    let remaining_index = source_index.saturating_add(visual_row.saturating_sub(display_index));
+    (remaining_index < line_count).then_some(SourceVisualRow::Source(remaining_index))
+}
+
+fn render_inline_source_row(
+    ui: &mut Ui,
+    state: &DebugPluginState,
+    path: &str,
+    row: SourceVisualRow,
+) {
+    let SourceVisualRow::Inline {
+        line_index,
+        instruction_index,
+    } = row
+    else {
+        return;
+    };
+    let key = (path.to_owned(), line_index as u64 + 1);
+    let text = state
+        .inline_assembly_cache
+        .get(&key)
+        .and_then(|instructions| instructions.get(instruction_index))
+        .map(|instruction| {
+            format!(
+                "    0x{:08X}  {:<14} {}",
+                instruction.address, instruction.bytes, instruction.instruction
+            )
+        })
+        .unwrap_or_else(|| "    正在加载该行对应汇编…".to_owned());
+    ui.add_sized(
+        [ui.available_width(), SOURCE_ROW_HEIGHT],
+        egui::Label::new(RichText::new(text).monospace()),
+    );
+}
+
 fn render_source_code(ui: &mut Ui, state: &mut DebugPluginState) {
     let frame_location = state
         .snapshot
@@ -1826,7 +1977,7 @@ fn render_source_code(ui: &mut Ui, state: &mut DebugPluginState) {
         .entry(local_path.clone())
         .or_insert_with(|| {
             std::fs::read_to_string(&local_path)
-                .map(|text| text.lines().map(str::to_owned).collect())
+                .map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>().into())
                 .map_err(|error| format!("无法读取源码文件 {local_path}: {error}"))
         });
     let Ok(lines) = source else {
@@ -1837,13 +1988,44 @@ fn render_source_code(ui: &mut Ui, state: &mut DebugPluginState) {
         return;
     };
 
-    let lines = lines.clone();
-    let target = state.source_scroll_target.take();
-    egui::ScrollArea::both()
-        .id_salt(("debug_source", &debug_path))
-        .show(ui, |ui| {
+    // Keep the immutable file shared while navigation mutates the UI state;
+    // cloning the handle avoids copying every source line on every repaint.
+    let lines = std::sync::Arc::clone(lines);
+    let expanded_rows = source_expanded_rows(state, &debug_path, lines.len());
+    let visual_row_count = source_visual_row_count(lines.len(), &expanded_rows);
+    let target = state
+        .source_scroll_target
+        .filter(|line| (1..=lines.len()).contains(line));
+    // Source rows fill the editor viewport. Long text is already clipped by
+    // the fixed row control, so horizontal content sizing only made the layout
+    // change while scrolling between short and long lines.
+    let mut scroll = egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .id_salt(("debug_source", &debug_path));
+    if let Some(line) = target {
+        let target_row = source_visual_row_for_line(line - 1, &expanded_rows);
+        let row_stride = SOURCE_ROW_HEIGHT + ui.spacing().item_spacing.y;
+        let offset = (target_row as f32 * row_stride - ui.available_height() * 0.5).max(0.0);
+        scroll = scroll.vertical_scroll_offset(offset);
+    }
+    scroll.show_rows(
+        ui,
+        SOURCE_ROW_HEIGHT,
+        visual_row_count,
+        |ui, visible_rows| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            for (index, line) in lines.iter().enumerate() {
+            for visual_row in visible_rows {
+                #[cfg(test)]
+                SOURCE_ROWS_RENDERED.with(|count| count.set(count.get() + 1));
+                let Some(row) = source_visual_row_at(visual_row, lines.len(), &expanded_rows)
+                else {
+                    continue;
+                };
+                let SourceVisualRow::Source(index) = row else {
+                    render_inline_source_row(ui, state, &debug_path, row);
+                    continue;
+                };
+                let line = &lines[index];
                 let line_number = index + 1;
                 let has_breakpoint =
                     source_breakpoint_at(state, &debug_path, line_number as u64).is_some();
@@ -1862,39 +2044,50 @@ fn render_source_code(ui: &mut Ui, state: &mut DebugPluginState) {
                 let mut toggle_inline_assembly = false;
                 let mut select_line = false;
                 let response = ui
-                    .horizontal(|ui| {
-                        toggle_breakpoint = ui
-                            .add_sized(
-                                [22.0, 18.0],
-                                egui::Label::new(RichText::new(marker).monospace())
-                                    .sense(egui::Sense::click()),
-                            )
-                            .on_hover_text("单击设置或移除源码断点 (F9)")
-                            .clicked();
-                        if executable_address.is_some() {
-                            let expanded = state
-                                .expanded_source_assembly
-                                .contains(&(debug_path.clone(), line_number as u64));
-                            toggle_inline_assembly =
-                                compact_expander(ui, expanded, "展开该行对应汇编", "收起该行汇编")
-                                    .clicked();
-                        } else {
-                            ui.allocate_space(egui::vec2(16.0, 16.0));
-                        }
-                        let job = source_highlight_job(ui, line_number, line, current);
-                        let code = stable_selectable_job(
-                            ui,
-                            state.source_cursor.as_ref().is_some_and(|(path, line)| {
-                                path == &debug_path && *line == line_number as u64
-                            }),
-                            job,
-                        );
-                        select_line = code.clicked();
-                        toggle_breakpoint |= code.double_clicked();
-                    })
+                    .allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), SOURCE_ROW_HEIGHT),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            toggle_breakpoint = ui
+                                .add_sized(
+                                    [22.0, 18.0],
+                                    egui::Label::new(RichText::new(marker).monospace())
+                                        .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text("单击设置或移除源码断点 (F9)")
+                                .clicked();
+                            if executable_address.is_some() {
+                                let expanded = state
+                                    .expanded_source_assembly
+                                    .contains(&(debug_path.clone(), line_number as u64));
+                                toggle_inline_assembly = compact_expander(
+                                    ui,
+                                    expanded,
+                                    "展开该行对应汇编",
+                                    "收起该行汇编",
+                                )
+                                .clicked();
+                            } else {
+                                ui.allocate_space(egui::vec2(16.0, 16.0));
+                            }
+                            let job = source_highlight_job(ui, line_number, line, current);
+                            let code = stable_selectable_job(
+                                ui,
+                                state.source_cursor.as_ref().is_some_and(|(path, line)| {
+                                    path == &debug_path && *line == line_number as u64
+                                }),
+                                job,
+                            );
+                            select_line = code.clicked();
+                            toggle_breakpoint |= code.double_clicked();
+                        },
+                    )
                     .response;
+                #[cfg(test)]
+                SOURCE_ROW_WIDTHS.with(|widths| widths.borrow_mut().push(response.rect.width()));
                 if target == Some(line_number) {
                     response.scroll_to_me(Some(egui::Align::Center));
+                    state.source_scroll_target = None;
                 }
                 if select_line {
                     state.source_cursor = Some((debug_path.clone(), line_number as u64));
@@ -1930,27 +2123,9 @@ fn render_source_code(ui: &mut Ui, state: &mut DebugPluginState) {
                             }));
                     }
                 }
-                if state.expanded_source_assembly.contains(&inline_key) {
-                    let instructions = state
-                        .inline_assembly_cache
-                        .get(&inline_key)
-                        .cloned()
-                        .unwrap_or_default();
-                    ui.indent(("inline_source_assembly", &inline_key), |ui| {
-                        if instructions.is_empty() {
-                            ui.small("正在加载该行对应汇编…");
-                        } else {
-                            for instruction in instructions {
-                                ui.monospace(format!(
-                                    "0x{:08X}  {:<14} {}",
-                                    instruction.address, instruction.bytes, instruction.instruction
-                                ));
-                            }
-                        }
-                    });
-                }
             }
-        });
+        },
+    );
 }
 
 fn source_breakpoint_at(state: &DebugPluginState, path: &str, line: u64) -> Option<u64> {
@@ -1971,11 +2146,10 @@ fn source_breakpoint_at(state: &DebugPluginState, path: &str, line: u64) -> Opti
 
 fn executable_line_address(state: &DebugPluginState, path: &str, line: u64) -> Option<u64> {
     state
-        .snapshot
-        .executable_lines
-        .iter()
-        .find(|record| record.path == path && record.line == line)
-        .map(|record| record.address)
+        .executable_line_index
+        .get(path)
+        .and_then(|lines| lines.get(&line))
+        .copied()
 }
 
 fn current_cursor_spec(state: &DebugPluginState) -> Option<BreakpointSpec> {
@@ -2582,10 +2756,12 @@ fn resolve_local_source_path(
 #[cfg(test)]
 mod tests {
     use super::{
-        CodeView, breakpoint_label, build_source_tree, compact_expander, compressed_directory,
-        current_cursor_spec, editable_variable_value, render_toolbar, resolve_local_source_path,
+        CodeView, SOURCE_ROW_WIDTHS, SOURCE_ROWS_RENDERED, SourceVisualRow, breakpoint_label,
+        build_source_tree, compact_expander, compressed_directory, current_cursor_spec,
+        editable_variable_value, render_source_code, render_toolbar, resolve_local_source_path,
         single_line_variable_value, source_highlight_job, source_node_matches,
-        stabilize_debug_style,
+        source_visual_row_at, source_visual_row_count, source_visual_row_for_line,
+        stabilize_debug_style, step_method_label,
     };
     use crate::model::VariablePool;
     use crate::model::{
@@ -2978,6 +3154,93 @@ mod tests {
                 .height();
 
             assert_eq!(idle_height, busy_height);
+        });
+    }
+
+    #[test]
+    fn status_labels_the_actual_step_execution_method() {
+        assert_eq!(step_method_label(None), "步进: —");
+        assert_eq!(
+            step_method_label(Some(crate::model::StepExecutionMethod::SingleStep)),
+            "步进: SingleStep"
+        );
+        assert_eq!(
+            step_method_label(Some(crate::model::StepExecutionMethod::HardwareBreakpoint)),
+            "步进: 硬件断点加速"
+        );
+    }
+
+    #[test]
+    fn virtual_source_rows_keep_inline_assembly_at_the_correct_lines() {
+        let expanded = vec![(1, 2), (4, 1)];
+        assert_eq!(source_visual_row_count(6, &expanded), 9);
+        assert_eq!(source_visual_row_for_line(0, &expanded), 0);
+        assert_eq!(source_visual_row_for_line(1, &expanded), 1);
+        assert_eq!(source_visual_row_for_line(2, &expanded), 4);
+        assert_eq!(source_visual_row_for_line(5, &expanded), 8);
+        assert_eq!(
+            source_visual_row_at(0, 6, &expanded),
+            Some(SourceVisualRow::Source(0))
+        );
+        assert_eq!(
+            source_visual_row_at(1, 6, &expanded),
+            Some(SourceVisualRow::Source(1))
+        );
+        assert_eq!(
+            source_visual_row_at(2, 6, &expanded),
+            Some(SourceVisualRow::Inline {
+                line_index: 1,
+                instruction_index: 0
+            })
+        );
+        assert_eq!(
+            source_visual_row_at(3, 6, &expanded),
+            Some(SourceVisualRow::Inline {
+                line_index: 1,
+                instruction_index: 1
+            })
+        );
+        assert_eq!(
+            source_visual_row_at(8, 6, &expanded),
+            Some(SourceVisualRow::Source(5))
+        );
+        assert_eq!(source_visual_row_at(9, 6, &expanded), None);
+    }
+
+    #[test]
+    fn large_source_view_only_renders_visible_rows() {
+        eframe::egui::__run_test_ui(|ui| {
+            ui.set_width(900.0);
+            ui.set_height(520.0);
+            let mut plugin = super::DebugPluginState {
+                selected_source_path: Some("/virtual/large.c".to_owned()),
+                ..Default::default()
+            };
+            let lines = (0..100_000)
+                .map(|line| format!("int value_{line} = {line};"))
+                .collect::<Vec<_>>()
+                .into();
+            plugin
+                .source_cache
+                .insert("/virtual/large.c".to_owned(), Ok(lines));
+
+            SOURCE_ROWS_RENDERED.with(|count| count.set(0));
+            SOURCE_ROW_WIDTHS.with(|widths| widths.borrow_mut().clear());
+            render_source_code(ui, &mut plugin);
+            let rendered = SOURCE_ROWS_RENDERED.with(std::cell::Cell::get);
+            assert!(rendered > 0);
+            assert!(
+                rendered < 100,
+                "rendered {rendered} rows for a 100k-line file"
+            );
+            let widths = SOURCE_ROW_WIDTHS.with(|widths| widths.borrow().clone());
+            assert!(!widths.is_empty());
+            assert!(
+                widths
+                    .iter()
+                    .all(|width| (*width - widths[0]).abs() <= f32::EPSILON),
+                "source rows changed width while scrolling: {widths:?}"
+            );
         });
     }
 

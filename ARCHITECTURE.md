@@ -190,19 +190,23 @@ RingBuffer 写入，因此不会在 Chart、FFT 或 CSV 中制造调试暂停期
 - `DebugInfo::unwind`
 - `VariableCache` 的局部变量懒加载
 
-源码步进由 Worker 自己控制，全部只使用 `Core::step()`，不使用临时断点或
-`probe-rs-debug::SteppingMode` 的运行等待：
+源码步进由 Worker 自己控制，不使用 `probe-rs-debug::SteppingMode` 的运行等待：
 
 - Step Into 在 DWARF 规范化文件路径或行号首次变化时停止；列号变化不算源码级前进。
 - Step Over 在源位置变化且 unwind 调用栈深度不大于起始深度时停止，因此会跨过被调
   函数。
 - Step Out 在 unwind 调用栈深度小于起始深度时停止。
+- Step Over 执行到与目标内存字节一致的直接调用指令时，临时恢复中断状态并使用硬件
+  断点运行到返回地址；Step Out 优先运行到 unwind 得到的调用者地址。没有空闲硬件断点
+  或无法可靠确定地址时自动回退到 `Core::step()`。
+- Fault、数据 watchpoint、软件断点、外部暂停或非预期硬件断点会立即结束源码步进，
+  不会继续执行下一条指令。
 - 源码步进期间暂时卸载用户硬件断点，结束后恢复，避免目标指令同时命中用户 comparator
   干扰单步停止原因。
 
-`ProbeWorkerHandle` 另持有不经过命令队列的原子步进中断标志。Debug 手动打断写入 Halt
-请求，全局 Reset 写入优先级更高的 Reset 请求；`single_step_source` 在每条硬件指令前后
-检查标志。Worker 退出循环并恢复 PRIMASK/用户断点后，再处理队列中的 Interrupt 或 Reset，
+`ProbeWorkerHandle` 另持有不经过命令队列的原子步进中断标志。Debug 手动打断、停止、
+断开、Reset 和退出按优先级写入请求；`single_step_source` 在每条硬件指令前后及加速运行
+期间检查标志。Worker 恢复 PRIMASK、临时断点和用户断点后，再处理队列中的命令，
 因此唯一 Session owner 约束不变，也不会从 UI 线程直接访问 Probe。
 
 汇编由 Capstone 0.14 完成。支持 Thumb2、A32、A64、RV32 和 RV32C；Xtensa
@@ -249,6 +253,11 @@ Debug 工作区底部拆分为局部变量和 CPU 寄存器两个可调整面板
 源码/汇编双向导航分别维护 source line 和 instruction address 滚动目标。新的 `stop_id`
 将真实 PC 设置为汇编滚动目标；反汇编异步返回时再将源码请求解析到具体指令。滚动目标
 只有在对应行实际渲染并居中后才清除，因此隐藏视图和 Split 模式不会丢失定位请求。
+
+源码文件缓存为共享不可变行数组。源码行及已展开的行内汇编映射为固定高度虚拟行，只
+渲染可见范围；DWARF 可执行行在 program generation 更新时构建路径／行号索引。
+`DebugSnapshot.last_step_method` 记录最近一次实际采用的 `SingleStep` 或硬件断点加速，
+并显示在 DebugBar 状态行；开始、继续、复位或更换程序时清空。
 
 ### 断点
 

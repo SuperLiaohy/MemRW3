@@ -22,14 +22,19 @@ use crate::dwarf::extract::SourceLineRecord;
 use crate::model::{
     BreakpointSpec, BreakpointView, DebugCommand, DebugSnapshot, DebugStartMode, InstructionView,
     RegisterReadRequest, RegisterView, RingBuffer, SourceLocationView, StackFrameView,
-    StackMemoryWord, StepKind, TargetState, VariableView,
+    StackMemoryWord, StepExecutionMethod, StepKind, TargetState, VariableView,
 };
 
 use super::{AcqSlot, ProbeSession, VarSlotMapping};
 
 const STEP_INTERRUPT_NONE: u8 = 0;
 const STEP_INTERRUPT_HALT: u8 = 1;
-const STEP_INTERRUPT_RESET: u8 = 2;
+const STEP_INTERRUPT_STOP: u8 = 2;
+const STEP_INTERRUPT_RESET: u8 = 3;
+const STEP_INTERRUPT_SHUTDOWN: u8 = 4;
+
+const SOURCE_STEP_INSTRUCTION_LIMIT: usize = 16_384;
+const SOURCE_STEP_TIME_LIMIT: Duration = Duration::from_secs(10);
 
 pub enum ProbeCommand {
     Connect {
@@ -153,10 +158,16 @@ impl ProbeWorkerHandle {
     pub fn send(&self, command: ProbeCommand) -> Result<(), String> {
         let interrupt = match &command {
             ProbeCommand::Reset => STEP_INTERRUPT_RESET,
+            ProbeCommand::Disconnect | ProbeCommand::Flash { .. } => STEP_INTERRUPT_STOP,
             ProbeCommand::Debug {
                 command: DebugCommand::Interrupt,
                 ..
             } => STEP_INTERRUPT_HALT,
+            ProbeCommand::Debug {
+                command: DebugCommand::Stop,
+                ..
+            } => STEP_INTERRUPT_STOP,
+            ProbeCommand::Shutdown => STEP_INTERRUPT_SHUTDOWN,
             _ => STEP_INTERRUPT_NONE,
         };
         if interrupt != STEP_INTERRUPT_NONE {
@@ -172,6 +183,8 @@ impl ProbeWorkerHandle {
     }
 
     pub fn shutdown(&mut self) {
+        self.step_interrupt
+            .store(STEP_INTERRUPT_SHUTDOWN, Ordering::Release);
         let _ = self.command_sender.send(ProbeCommand::Shutdown);
         if let Some(handle) = self.join_handle.take() {
             let _ = handle.join();
@@ -218,6 +231,7 @@ struct ProbeWorker {
     stack_frames: Vec<StackFrame>,
     selected_frame: usize,
     latest_pc: Option<u64>,
+    last_step_method: Option<StepExecutionMethod>,
     latest_registers: Vec<RegisterView>,
     latest_instructions: Vec<InstructionView>,
     latest_stack_memory: Vec<StackMemoryWord>,
@@ -273,6 +287,7 @@ impl ProbeWorker {
             stack_frames: Vec::new(),
             selected_frame: 0,
             latest_pc: None,
+            last_step_method: None,
             latest_registers: Vec::new(),
             latest_instructions: Vec::new(),
             latest_stack_memory: Vec::new(),
@@ -395,6 +410,9 @@ impl ProbeWorker {
                 speed_khz,
                 selected_probe_id,
             } => {
+                self.step_interrupt
+                    .store(STEP_INTERRUPT_NONE, Ordering::Release);
+                self.last_step_method = None;
                 self.debug_active = false;
                 self.breakpoint_capacity = None;
                 self.invalidate_halted_data();
@@ -424,6 +442,9 @@ impl ProbeWorker {
                 });
             }
             ProbeCommand::Disconnect => {
+                self.step_interrupt
+                    .store(STEP_INTERRUPT_NONE, Ordering::Release);
+                self.last_step_method = None;
                 self.running.store(false, Ordering::Release);
                 self.acquisition_requested.store(false, Ordering::Release);
                 self.temporary_breakpoint = None;
@@ -438,6 +459,7 @@ impl ProbeWorker {
             ProbeCommand::Reset => {
                 self.step_interrupt
                     .store(STEP_INTERRUPT_NONE, Ordering::Release);
+                self.last_step_method = None;
                 self.clear_temporary_breakpoint();
                 let result = self
                     .probe
@@ -455,6 +477,9 @@ impl ProbeWorker {
                 self.emit(ProbeEvent::ResetFinished(result));
             }
             ProbeCommand::Flash { path } => {
+                self.step_interrupt
+                    .store(STEP_INTERRUPT_NONE, Ordering::Release);
+                self.last_step_method = None;
                 self.clear_temporary_breakpoint();
                 let result = self.probe.flash_firmware(&path);
                 self.target_state = TargetState::Unknown;
@@ -503,6 +528,7 @@ impl ProbeWorker {
                 });
             }
             ProbeCommand::LoadProgram { path, generation } => {
+                self.last_step_method = None;
                 self.clear_temporary_breakpoint();
                 self.clear_installed_breakpoints();
                 let source_index =
@@ -598,7 +624,11 @@ impl ProbeWorker {
         }
         let result = match command {
             DebugCommand::Start(mode) => self.debug_start(mode),
-            DebugCommand::Stop => self.debug_stop(),
+            DebugCommand::Stop => {
+                self.step_interrupt
+                    .store(STEP_INTERRUPT_NONE, Ordering::Release);
+                self.debug_stop()
+            }
             DebugCommand::Interrupt => {
                 self.step_interrupt
                     .store(STEP_INTERRUPT_NONE, Ordering::Release);
@@ -677,6 +707,7 @@ impl ProbeWorker {
     }
 
     fn debug_start(&mut self, mode: DebugStartMode) -> Result<(), String> {
+        self.last_step_method = None;
         if self.debug_active {
             return Ok(());
         }
@@ -735,6 +766,7 @@ impl ProbeWorker {
     }
 
     fn debug_stop(&mut self) -> Result<(), String> {
+        self.last_step_method = None;
         if !self.debug_active {
             return Ok(());
         }
@@ -811,6 +843,7 @@ impl ProbeWorker {
     }
 
     fn debug_continue(&mut self) -> Result<(), String> {
+        self.last_step_method = None;
         if !self.target_state.is_halted() {
             return Err("目标未处于暂停状态".to_owned());
         }
@@ -832,8 +865,15 @@ impl ProbeWorker {
             self.refresh_halted_data()
         } else {
             self.invalidate_halted_data();
-            if self.acquisition_requested.load(Ordering::Acquire) {
+            if self.acquisition_requested.load(Ordering::Acquire)
+                && matches!(
+                    self.target_state,
+                    TargetState::Running | TargetState::Sleeping
+                )
+            {
                 self.running.store(true, Ordering::Release);
+            } else {
+                self.running.store(false, Ordering::Release);
             }
             Ok(())
         }
@@ -911,6 +951,7 @@ impl ProbeWorker {
     }
 
     fn debug_step(&mut self, kind: StepKind) -> Result<(), String> {
+        self.last_step_method = None;
         if !self.target_state.is_halted() {
             return Err("单步前必须先暂停目标".to_owned());
         }
@@ -926,6 +967,7 @@ impl ProbeWorker {
         };
 
         let (status, actual_pc) = if kind == StepKind::Instruction {
+            self.last_step_method = Some(StepExecutionMethod::SingleStep);
             let mut core = self
                 .probe
                 .session_mut()
@@ -940,6 +982,38 @@ impl ProbeWorker {
             (status, information.pc)
         } else {
             let installed_breakpoints = self.suspend_user_breakpoints()?;
+            let mut step_method = StepExecutionMethod::SingleStep;
+            let source_instructions = self
+                .program_code
+                .as_ref()
+                .and_then(|code| {
+                    code.disassemble_from(origin_pc, self.debug_info.as_ref())
+                        .ok()
+                })
+                .unwrap_or_default();
+            let step_out_target = (kind == StepKind::Out)
+                .then(|| {
+                    if self
+                        .stack_frames
+                        .first()
+                        .is_some_and(|frame| frame.is_inlined)
+                    {
+                        return None;
+                    }
+                    let instruction_set = self.program_code.as_ref()?.instruction_set;
+                    self.stack_frames
+                        .iter()
+                        .skip(1)
+                        .find(|frame| !frame.is_inlined)
+                        .and_then(|frame| register_value_u64(frame.pc))
+                        .and_then(|pc| unwind_caller_resume_address(pc, instruction_set))
+                        .filter(|target| {
+                            self.program_code
+                                .as_ref()
+                                .is_some_and(|code| code.contains_address(*target))
+                        })
+                })
+                .flatten();
             let step_result = (|| -> Result<(CoreStatus, u64), String> {
                 let debug_info = self
                     .debug_info
@@ -950,28 +1024,29 @@ impl ProbeWorker {
                     .session_mut()
                     .and_then(|session| session.core(0))
                     .map_err(|error| format!("获取核心失败: {error}"))?;
-                let interrupt_mask = mask_interrupts_for_source_step(&mut core)?;
-                let result = single_step_source(
+                single_step_source(
                     &mut core,
                     debug_info,
-                    kind,
-                    origin_pc,
                     &self.step_interrupt,
-                );
-                let restore_mask = restore_interrupt_mask(&mut core, interrupt_mask);
-                match (result, restore_mask) {
-                    (Ok(result), Ok(())) => Ok(result),
-                    (Err(error), Ok(())) => Err(error),
-                    (_, Err(error)) => Err(error),
-                }
+                    SourceStepPlan {
+                        kind,
+                        origin_pc,
+                        instructions: &source_instructions,
+                        step_out_target,
+                    },
+                    &mut step_method,
+                )
             })();
+            self.last_step_method = Some(step_method);
             let restore_breakpoints = self.restore_user_breakpoints(&installed_breakpoints);
             match (step_result, restore_breakpoints) {
                 (Ok(result), Ok(())) => result,
-                (Err(error), Ok(())) => return Err(error),
-                (Ok(_), Err(error)) => return Err(error),
+                (Err(error), Ok(())) => return Err(self.refresh_after_step_error(error)),
+                (Ok(_), Err(error)) => return Err(self.refresh_after_step_error(error)),
                 (Err(step_error), Err(restore_error)) => {
-                    return Err(format!("{step_error}；{restore_error}"));
+                    return Err(
+                        self.refresh_after_step_error(format!("{step_error}；{restore_error}"))
+                    );
                 }
             }
         };
@@ -996,7 +1071,6 @@ impl ProbeWorker {
                     reason,
                     HaltReason::Step
                         | HaltReason::Request
-                        | HaltReason::Multiple
                         | HaltReason::Breakpoint(BreakpointCause::Unknown)
                 )
             {
@@ -1015,13 +1089,56 @@ impl ProbeWorker {
             self.refresh_halted_data_at(Some(actual_pc))
         } else {
             self.invalidate_halted_data();
-            if self.acquisition_requested.load(Ordering::Acquire) {
+            if self.acquisition_requested.load(Ordering::Acquire)
+                && matches!(
+                    self.target_state,
+                    TargetState::Running | TargetState::Sleeping
+                )
+            {
                 self.running.store(true, Ordering::Release);
+            } else {
+                self.running.store(false, Ordering::Release);
             }
             Err(format!(
                 "单步命令结束后目标没有暂停，当前状态：{:?}",
                 self.target_state
             ))
+        }
+    }
+
+    /// A cancelled or failed source step may already have changed PC. Refresh
+    /// the real target state before returning the error so the UI never keeps
+    /// stale locals, registers, or a stale stop_id.
+    fn refresh_after_step_error(&mut self, error: String) -> String {
+        let observed = (|| {
+            let mut core = self.probe.session_mut()?.core(0)?;
+            let mut status = core.status()?;
+            if !status.is_halted() {
+                core.halt(Duration::from_millis(500))?;
+                status = core.status()?;
+            }
+            Ok::<CoreStatus, probe_rs::Error>(status)
+        })();
+
+        match observed {
+            Ok(status) => {
+                self.target_state = target_state(status);
+                self.running.store(false, Ordering::Release);
+                if status.is_halted() {
+                    self.stop_id = self.stop_id.wrapping_add(1);
+                    if let Err(refresh_error) = self.refresh_halted_data() {
+                        return format!("{error}；刷新实际停止位置失败: {refresh_error}");
+                    }
+                } else {
+                    self.invalidate_halted_data();
+                }
+                error
+            }
+            Err(status_error) => {
+                self.target_state = TargetState::Unknown;
+                self.invalidate_halted_data();
+                format!("{error}；无法确认单步后的目标状态: {status_error}")
+            }
         }
     }
 
@@ -1658,6 +1775,7 @@ impl ProbeWorker {
             target_state: self.target_state.clone(),
             active: self.debug_active,
             pc: self.latest_pc,
+            last_step_method: self.last_step_method,
             registers: self.latest_registers.clone(),
             frames,
             selected_frame: self.selected_frame,
@@ -1826,13 +1944,26 @@ fn normalize_code_address(address: u64) -> u64 {
     address & !1
 }
 
+struct SourceStepPlan<'a> {
+    kind: StepKind,
+    origin_pc: u64,
+    instructions: &'a [InstructionView],
+    step_out_target: Option<u64>,
+}
+
 fn single_step_source(
     core: &mut probe_rs::Core<'_>,
     debug_info: &DebugInfo,
-    kind: StepKind,
-    origin_pc: u64,
     step_interrupt: &AtomicU8,
+    plan: SourceStepPlan<'_>,
+    step_method: &mut StepExecutionMethod,
 ) -> Result<(CoreStatus, u64), String> {
+    let SourceStepPlan {
+        kind,
+        origin_pc,
+        instructions,
+        step_out_target,
+    } = plan;
     let origin = debug_info
         .get_source_location(origin_pc)
         .as_ref()
@@ -1846,69 +1977,281 @@ fn single_step_source(
     } else {
         Some(current_stack_depth(core, debug_info)?)
     };
+    let started = Instant::now();
     let mut previous_pc = normalize_code_address(origin_pc);
     let mut last_location = Some(origin.clone());
+    let mut interrupt_mask = mask_interrupts_for_source_step(core)?;
+    let result = (|| {
+        // Step Out has a reliable unwind-derived return PC in the common case.
+        // Running to it avoids thousands of host-driven instruction steps.
+        if kind == StepKind::Out
+            && let Some(target) = step_out_target.filter(|target| *target != previous_pc)
+        {
+            restore_interrupt_mask(core, interrupt_mask.take())?;
+            if let Some((status, pc, reached_target)) =
+                run_to_step_target(core, target, step_interrupt, step_method)?
+            {
+                return Ok((
+                    if reached_target {
+                        CoreStatus::Halted(HaltReason::Request)
+                    } else {
+                        status
+                    },
+                    pc,
+                ));
+            }
+            interrupt_mask = mask_interrupts_for_source_step(core)?;
+        }
 
-    for step_count in 1..=4096 {
-        check_step_interrupt(step_interrupt)?;
-        let information = core
-            .step()
-            .map_err(|error| format!("源码{kind:?}的第 {step_count} 次指令步进失败: {error}"))?;
-        check_step_interrupt(step_interrupt)?;
-        let pc = normalize_code_address(information.pc);
-        if pc == previous_pc {
-            return Err(format!("源码{kind:?}没有前进，目标仍停在 0x{pc:08X}"));
-        }
-        previous_pc = pc;
-        let status = core
-            .status()
-            .map_err(|error| format!("读取源码步进状态失败: {error}"))?;
-        if !status.is_halted() {
-            return Err(format!(
-                "源码{kind:?}的指令步进后目标未暂停，当前状态: {status:?}"
-            ));
-        }
-        let current = debug_info
-            .get_source_location(pc)
-            .as_ref()
-            .map(source_location_view);
-        let location_changed = !same_source_line(current.as_ref(), last_location.as_ref());
-        if location_changed {
-            last_location = current.clone();
-        }
-        let left_origin = !same_source_line(current.as_ref(), Some(&origin));
-        if current.is_some() && left_origin {
+        for step_count in 1..=SOURCE_STEP_INSTRUCTION_LIMIT {
+            if started.elapsed() >= SOURCE_STEP_TIME_LIMIT {
+                return Err(format!(
+                    "源码{kind:?}超过 {} 秒仍未到达有效停止位置",
+                    SOURCE_STEP_TIME_LIMIT.as_secs()
+                ));
+            }
+            check_step_interrupt(step_interrupt)?;
+
+            // When Step Over reaches a direct call, run to its fall-through
+            // address. Interrupts are restored while the function runs so
+            // delay/RTOS code can make progress normally.
+            if kind == StepKind::Over
+                && let Some(target) = direct_call_return_address(instructions, previous_pc)
+                && target_instruction_matches(core, instructions, previous_pc)
+            {
+                restore_interrupt_mask(core, interrupt_mask.take())?;
+                if let Some((status, pc, reached_target)) =
+                    run_to_step_target(core, target, step_interrupt, step_method)?
+                {
+                    if !reached_target {
+                        return Ok((status, pc));
+                    }
+                    previous_pc = normalize_code_address(pc);
+                    let current = debug_info
+                        .get_source_location(previous_pc)
+                        .as_ref()
+                        .map(source_location_view)
+                        .filter(valid_source_location);
+                    if current.is_some() && !same_source_line(current.as_ref(), Some(&origin)) {
+                        return Ok((CoreStatus::Halted(HaltReason::Request), pc));
+                    }
+                    last_location = current;
+                    interrupt_mask = mask_interrupts_for_source_step(core)?;
+                    continue;
+                }
+                interrupt_mask = mask_interrupts_for_source_step(core)?;
+            }
+
+            let information = core.step().map_err(|error| {
+                format!("源码{kind:?}的第 {step_count} 次指令步进失败: {error}")
+            })?;
+            check_step_interrupt(step_interrupt)?;
+            let pc = normalize_code_address(information.pc);
+            if pc == previous_pc {
+                return Err(format!("源码{kind:?}没有前进，目标仍停在 0x{pc:08X}"));
+            }
+            previous_pc = pc;
+            let status = core
+                .status()
+                .map_err(|error| format!("读取源码步进状态失败: {error}"))?;
+            if source_step_was_interrupted(status) {
+                return Ok((status, information.pc));
+            }
+            if !status.is_halted() {
+                return Err(format!(
+                    "源码{kind:?}的指令步进后目标未暂停，当前状态: {status:?}"
+                ));
+            }
+
+            let current = debug_info
+                .get_source_location(pc)
+                .as_ref()
+                .map(source_location_view)
+                .filter(valid_source_location);
+            let location_changed = !same_source_line(current.as_ref(), last_location.as_ref());
+            if location_changed {
+                last_location = current.clone();
+            }
+            let left_origin = !same_source_line(current.as_ref(), Some(&origin));
             match kind {
-                StepKind::Into => return Ok((status, information.pc)),
-                StepKind::Over if location_changed => {
-                    if current_stack_depth(core, debug_info)? <= origin_depth.unwrap_or(1) {
+                StepKind::Into if current.is_some() && left_origin => {
+                    return Ok((status, information.pc));
+                }
+                StepKind::Over => {
+                    let depth = (current.is_some() && left_origin)
+                        .then(|| current_stack_depth(core, debug_info))
+                        .transpose()?;
+                    if depth.is_some_and(|depth| depth <= origin_depth.unwrap_or(1)) {
+                        return Ok((status, information.pc));
+                    }
+                    // A return can land on the same source line in a caller.
+                    // Check periodically even without a line change so Step Over
+                    // cannot escape the frame that initiated it.
+                    if step_count % 8 == 0
+                        && current_stack_depth(core, debug_info)? < origin_depth.unwrap_or(1)
+                    {
                         return Ok((status, information.pc));
                     }
                 }
-                StepKind::Out if location_changed => {
+                StepKind::Out => {
+                    // Check every instruction. Sampling the depth every N steps
+                    // can miss a brief return followed by another call.
                     if current_stack_depth(core, debug_info)? < origin_depth.unwrap_or(1) {
                         return Ok((status, information.pc));
                     }
                 }
-                StepKind::Instruction | StepKind::Over | StepKind::Out => {}
+                StepKind::Instruction | StepKind::Into => {}
             }
-        } else if kind == StepKind::Out
-            && step_count % 16 == 0
-            && current_stack_depth(core, debug_info)? < origin_depth.unwrap_or(1)
-        {
-            return Ok((status, information.pc));
         }
+        Err(format!(
+            "源码{kind:?}执行了 {SOURCE_STEP_INSTRUCTION_LIMIT} 条指令后仍未达到新的有效停止位置"
+        ))
+    })();
+    let restore = restore_interrupt_mask(core, interrupt_mask);
+    match (result, restore) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(restore_error)) => Err(format!("{error}；{restore_error}")),
     }
-    Err(format!(
-        "源码{kind:?}执行了 4096 条指令后仍未达到新的有效 DWARF 停止位置"
-    ))
+}
+
+fn valid_source_location(location: &SourceLocationView) -> bool {
+    !location.path.is_empty() && location.line.is_some()
+}
+
+fn source_step_was_interrupted(status: CoreStatus) -> bool {
+    matches!(
+        status,
+        CoreStatus::Halted(
+            HaltReason::Multiple
+                | HaltReason::Exception
+                | HaltReason::Watchpoint
+                | HaltReason::External
+                | HaltReason::Unknown
+                | HaltReason::Breakpoint(BreakpointCause::Hardware | BreakpointCause::Software)
+                | HaltReason::Breakpoint(BreakpointCause::Semihosting(_))
+        ) | CoreStatus::LockedUp
+    )
+}
+
+fn direct_call_return_address(instructions: &[InstructionView], pc: u64) -> Option<u64> {
+    let instruction = instructions.iter().find(|instruction| {
+        normalize_code_address(instruction.address) == normalize_code_address(pc)
+    })?;
+    let mnemonic = instruction.instruction.split_whitespace().next()?;
+    if !matches!(mnemonic, "bl" | "blx" | "blr") {
+        return None;
+    }
+    let size = instruction.bytes.split_whitespace().count() as u64;
+    (size > 0)
+        .then(|| normalize_code_address(instruction.address).checked_add(size))
+        .flatten()
+}
+
+fn unwind_caller_resume_address(pc: u64, instruction_set: InstructionSet) -> Option<u64> {
+    match instruction_set {
+        InstructionSet::Thumb2 => (pc & !1).checked_add(2),
+        InstructionSet::RV32C => pc.checked_add(2),
+        InstructionSet::RV32 => pc.checked_add(4),
+        InstructionSet::Xtensa => pc.checked_add(3),
+        InstructionSet::A32 | InstructionSet::A64 => Some(pc),
+    }
+}
+
+fn target_instruction_matches(
+    core: &mut probe_rs::Core<'_>,
+    instructions: &[InstructionView],
+    pc: u64,
+) -> bool {
+    let Some(instruction) = instructions.iter().find(|instruction| {
+        normalize_code_address(instruction.address) == normalize_code_address(pc)
+    }) else {
+        return false;
+    };
+    let Some(expected) = instruction
+        .bytes
+        .split_whitespace()
+        .map(|byte| u8::from_str_radix(byte, 16).ok())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let mut actual = vec![0; expected.len()];
+    core.read(normalize_code_address(pc), &mut actual).is_ok() && actual == expected
+}
+
+/// Returns `Ok(None)` only when no hardware comparator is available; callers
+/// then fall back to instruction stepping. Any partially installed breakpoint
+/// is always removed before returning.
+fn run_to_step_target(
+    core: &mut probe_rs::Core<'_>,
+    target: u64,
+    step_interrupt: &AtomicU8,
+    step_method: &mut StepExecutionMethod,
+) -> Result<Option<(CoreStatus, u64, bool)>, String> {
+    let target = normalize_code_address(target);
+    if core.set_hw_breakpoint(target).is_err() {
+        return Ok(None);
+    }
+    *step_method = StepExecutionMethod::HardwareBreakpoint;
+    let started = Instant::now();
+    let result = (|| {
+        core.run()
+            .map_err(|error| format!("加速步进启动目标失败: {error}"))?;
+        loop {
+            if let Err(cancelled) = check_step_interrupt(step_interrupt) {
+                let information = core
+                    .halt(Duration::from_millis(500))
+                    .map_err(|error| format!("{cancelled}；暂停目标失败: {error}"))?;
+                let status = core
+                    .status()
+                    .map_err(|error| format!("打断加速步进后读取状态失败: {error}"))?;
+                return Err(format!(
+                    "{cancelled}，目标已停在 0x{:08X} ({status:?})",
+                    information.pc
+                ));
+            }
+            let status = core
+                .status()
+                .map_err(|error| format!("读取加速步进状态失败: {error}"))?;
+            if status.is_halted() {
+                let pc: u64 = core
+                    .read_core_reg(core.program_counter().id())
+                    .map_err(|error| format!("读取加速步进停止 PC 失败: {error}"))?;
+                return Ok((status, pc, normalize_code_address(pc) == target));
+            }
+            if started.elapsed() >= SOURCE_STEP_TIME_LIMIT {
+                let information = core
+                    .halt(Duration::from_millis(500))
+                    .map_err(|error| format!("加速步进超时且暂停目标失败: {error}"))?;
+                return Err(format!(
+                    "加速步进超过 {} 秒，目标已停在 0x{:08X}",
+                    SOURCE_STEP_TIME_LIMIT.as_secs(),
+                    information.pc
+                ));
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    })();
+    let clear = core
+        .clear_hw_breakpoint(target)
+        .map_err(|error| format!("清理加速步进临时断点 0x{target:08X} 失败: {error}"));
+    match (result, clear) {
+        (Ok(result), Ok(())) => Ok(Some(result)),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(clear_error)) => Err(format!("{error}；{clear_error}")),
+    }
 }
 
 fn check_step_interrupt(step_interrupt: &AtomicU8) -> Result<(), String> {
     match step_interrupt.load(Ordering::Acquire) {
         STEP_INTERRUPT_NONE => Ok(()),
         STEP_INTERRUPT_HALT => Err("源码步进已收到手动打断请求".to_owned()),
+        STEP_INTERRUPT_STOP => Err("源码步进已收到停止或断开请求".to_owned()),
         STEP_INTERRUPT_RESET => Err("源码步进已收到复位请求".to_owned()),
+        STEP_INTERRUPT_SHUTDOWN => Err("源码步进已收到退出请求".to_owned()),
         other => Err(format!("源码步进收到未知中断请求: {other}")),
     }
 }
@@ -2378,6 +2721,36 @@ impl ProgramCode {
                 && address < section.address.saturating_add(section.bytes.len() as u64)
         })
     }
+
+    /// Decode forward from a known PC boundary for source-step call detection.
+    /// This avoids starting in the second half of a 32-bit Thumb instruction.
+    fn disassemble_from(
+        &self,
+        address: u64,
+        debug_info: Option<&DebugInfo>,
+    ) -> Result<Vec<InstructionView>, String> {
+        let address = normalize_code_address(address);
+        let section = self
+            .sections
+            .iter()
+            .find(|section| {
+                address >= section.address
+                    && address < section.address.saturating_add(section.bytes.len() as u64)
+            })
+            .ok_or_else(|| format!("PC 0x{address:08X} 不在 ELF 代码段内"))?;
+        let offset = usize::try_from(address.saturating_sub(section.address))
+            .unwrap_or_default()
+            .min(section.bytes.len());
+        let end = offset.saturating_add(512).min(section.bytes.len());
+        disassemble_bytes(
+            self.instruction_set,
+            self.little_endian,
+            address,
+            &section.bytes[offset..end],
+            debug_info,
+            160,
+        )
+    }
 }
 
 fn disassemble_around_pc(
@@ -2530,10 +2903,12 @@ mod tests {
 
     use super::{
         BreakpointView, DebugStartMode, ProbeCommand, ProbeWorker, STEP_INTERRUPT_HALT,
-        STEP_INTERRUPT_NONE, STEP_INTERRUPT_RESET, check_step_interrupt, cortex_m_interrupt_masked,
-        cpp_type_name, disassemble_bytes, is_cpp_language, nearest_executable_source_line,
-        normalize_code_address, normalized_source_path, register_value_u64, same_source_line,
-        sign_extend_bits, source_path_candidates, target_state,
+        STEP_INTERRUPT_NONE, STEP_INTERRUPT_RESET, STEP_INTERRUPT_SHUTDOWN, STEP_INTERRUPT_STOP,
+        check_step_interrupt, cortex_m_interrupt_masked, cpp_type_name, direct_call_return_address,
+        disassemble_bytes, is_cpp_language, nearest_executable_source_line, normalize_code_address,
+        normalized_source_path, register_value_u64, same_source_line, sign_extend_bits,
+        source_path_candidates, source_step_was_interrupted, target_state,
+        unwind_caller_resume_address, valid_source_location,
     };
     use crate::dwarf::extract::SourceLineRecord;
     use crate::model::{LogicalBreakpoint, SourceLocationView, TargetState};
@@ -2584,6 +2959,101 @@ mod tests {
             check_step_interrupt(&interrupt).unwrap_err(),
             "源码步进已收到复位请求"
         );
+    }
+
+    #[test]
+    fn stop_and_shutdown_cancel_source_steps_with_stable_priority() {
+        let interrupt = AtomicU8::new(STEP_INTERRUPT_STOP);
+        assert!(
+            check_step_interrupt(&interrupt)
+                .unwrap_err()
+                .contains("停止")
+        );
+        interrupt.fetch_max(STEP_INTERRUPT_SHUTDOWN, Ordering::AcqRel);
+        interrupt.fetch_max(STEP_INTERRUPT_HALT, Ordering::AcqRel);
+        assert_eq!(interrupt.load(Ordering::Acquire), STEP_INTERRUPT_SHUTDOWN);
+        assert!(
+            check_step_interrupt(&interrupt)
+                .unwrap_err()
+                .contains("退出")
+        );
+    }
+
+    #[test]
+    fn source_step_stops_for_fault_watchpoint_and_real_breakpoints() {
+        for reason in [
+            HaltReason::Multiple,
+            HaltReason::Exception,
+            HaltReason::Watchpoint,
+            HaltReason::External,
+            HaltReason::Breakpoint(probe_rs::BreakpointCause::Hardware),
+            HaltReason::Breakpoint(probe_rs::BreakpointCause::Software),
+        ] {
+            assert!(source_step_was_interrupted(CoreStatus::Halted(reason)));
+        }
+        assert!(!source_step_was_interrupted(CoreStatus::Halted(
+            HaltReason::Step
+        )));
+        assert!(!source_step_was_interrupted(CoreStatus::Halted(
+            HaltReason::Request
+        )));
+    }
+
+    #[test]
+    fn direct_arm_calls_resolve_their_fallthrough_address() {
+        let call = crate::model::InstructionView {
+            address: 0x0800_0100,
+            bytes: "00 F0 06 F8".to_owned(),
+            instruction: "bl       #0x08000110".to_owned(),
+            source: None,
+        };
+        assert_eq!(
+            direct_call_return_address(&[call], 0x0800_0101),
+            Some(0x0800_0104)
+        );
+
+        let branch = crate::model::InstructionView {
+            address: 0x0800_0100,
+            bytes: "06 E0".to_owned(),
+            instruction: "b        #0x08000110".to_owned(),
+            source: None,
+        };
+        assert_eq!(direct_call_return_address(&[branch], 0x0800_0100), None);
+    }
+
+    #[test]
+    fn restores_the_resume_address_from_unwind_adjustments() {
+        assert_eq!(
+            unwind_caller_resume_address(0x0800_0102, probe_rs::InstructionSet::Thumb2),
+            Some(0x0800_0104)
+        );
+        assert_eq!(
+            unwind_caller_resume_address(0x0800_0100, probe_rs::InstructionSet::A32),
+            Some(0x0800_0100)
+        );
+        assert_eq!(
+            unwind_caller_resume_address(0x1002, probe_rs::InstructionSet::RV32C),
+            Some(0x1004)
+        );
+    }
+
+    #[test]
+    fn source_step_rejects_locations_without_a_line_or_path() {
+        assert!(!valid_source_location(&SourceLocationView {
+            path: "/src/main.c".to_owned(),
+            line: None,
+            column: None,
+        }));
+        assert!(!valid_source_location(&SourceLocationView {
+            path: String::new(),
+            line: Some(10),
+            column: None,
+        }));
+        assert!(valid_source_location(&SourceLocationView {
+            path: "/src/main.c".to_owned(),
+            line: Some(10),
+            column: None,
+        }));
     }
 
     #[test]
