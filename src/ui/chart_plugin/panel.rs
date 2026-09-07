@@ -1124,11 +1124,7 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
         }
     }
 
-    legend_overlay(
-        ui,
-        state,
-        egui::pos2(plot_frame.right() - 5.0, plot_frame.top() + 5.0),
-    );
+    legend_overlay(ui, state, plot_frame);
 }
 
 fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
@@ -1554,12 +1550,11 @@ fn nearest_mag(points: &[egui_plot::PlotPoint], target: f64) -> f64 {
     }
 }
 
-fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2) {
+fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, plot_rect: egui::Rect) {
     let colors = theme::palette(ui);
     let mut toggle = None;
     let mut edit = None;
-    let mut y = anchor.y + 4.0;
-    let x = (anchor.x - 160.0).max(0.0);
+    let mut y = plot_rect.top() + 9.0;
     for (i, legend) in state.legends.iter().enumerate() {
         let op = if legend.visible { 1.0 } else { 0.35 };
         let tc = if legend.visible {
@@ -1573,7 +1568,7 @@ fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2)
             .layout_no_wrap(text, egui::FontId::proportional(11.0), tc);
         let w = g.rect.width() + 24.0;
         let h = g.rect.height() + 6.0;
-        let r = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+        let r = right_aligned_legend_rect(plot_rect, y, egui::vec2(w, h));
         let resp = ui.interact(r, egui::Id::new(("chart_legend", i)), egui::Sense::click());
         let bg = if resp.hovered() {
             colors.elevated_bg
@@ -1612,6 +1607,20 @@ fn legend_overlay(ui: &mut Ui, state: &mut ChartPluginState, anchor: egui::Pos2)
         state.edit_buffer_size = legend.buffer_size;
         state.edit_visible = legend.visible;
     }
+}
+
+fn right_aligned_legend_rect(
+    plot_rect: egui::Rect,
+    y: f32,
+    desired_size: egui::Vec2,
+) -> egui::Rect {
+    let right = plot_rect.right() - 5.0;
+    let available_width = (right - plot_rect.left() - 5.0).max(0.0);
+    let width = desired_size.x.min(available_width);
+    egui::Rect::from_min_size(
+        egui::pos2(right - width, y),
+        egui::vec2(width, desired_size.y),
+    )
 }
 
 fn decode_value_f64(data: &[u8], ext_type: &crate::dwarf::types::ExtendType) -> f64 {
@@ -1756,8 +1765,9 @@ mod tests {
 
     use super::{
         ChartLegend, ChartPluginState, FFT_TOGGLE_BUTTON_SIZE, FftScrollMode,
-        ZOOM_MODE_BUTTON_SIZE, confined_overlay_rect, fft_toggle_button, sparse_visible_points,
-        update_chart_data, visible_history_bounds, write_log_frame, zoom_mode_button,
+        ZOOM_MODE_BUTTON_SIZE, confined_overlay_rect, fft_toggle_button, right_aligned_legend_rect,
+        sparse_visible_points, update_chart_data, visible_history_bounds, write_log_frame,
+        zoom_mode_button,
     };
 
     fn add_u8(pool: &mut VariablePool, name: &str, address: u64) -> usize {
@@ -1946,5 +1956,20 @@ mod tests {
 
         let oversized = confined_overlay_rect(plot, plot.center(), egui::vec2(500.0, 300.0));
         assert_eq!(oversized, plot);
+    }
+
+    #[test]
+    fn legend_rows_with_different_widths_share_the_plot_right_edge() {
+        let plot = egui::Rect::from_min_max(egui::pos2(50.0, 20.0), egui::pos2(450.0, 300.0));
+        let short = right_aligned_legend_rect(plot, 30.0, egui::vec2(80.0, 20.0));
+        let long = right_aligned_legend_rect(plot, 55.0, egui::vec2(220.0, 20.0));
+
+        assert_eq!(short.right(), plot.right() - 5.0);
+        assert_eq!(long.right(), plot.right() - 5.0);
+        assert!(short.left() > long.left());
+
+        let oversized = right_aligned_legend_rect(plot, 80.0, egui::vec2(800.0, 20.0));
+        assert_eq!(oversized.left(), plot.left() + 5.0);
+        assert_eq!(oversized.right(), plot.right() - 5.0);
     }
 }
