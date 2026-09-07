@@ -9,7 +9,7 @@ use crate::ui::plugin::{
 };
 use crate::ui::theme;
 use eframe::egui::{self, Color32, RichText, Ui};
-use egui_plot::{Line, Plot, PlotBounds, PlotPoints};
+use egui_plot::{Line, Plot, PlotBounds, PlotPoint, PlotPoints, Points};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
@@ -17,6 +17,9 @@ use std::time::Instant;
 
 const ZOOM_MODE_BUTTON_SIZE: [f32; 2] = [42.0, 22.0];
 const FFT_TOGGLE_BUTTON_SIZE: [f32; 2] = [80.0, 22.0];
+const MIN_POINT_MARKER_THRESHOLD: usize = 2;
+const DEFAULT_POINT_MARKER_THRESHOLD: usize = 32;
+const MAX_POINT_MARKER_THRESHOLD: usize = 1000;
 type CursorValue = (String, f64, f64, Color32);
 type CursorOverlay = (f32, f32, Vec<CursorValue>);
 type FftSeries<'a> = (&'a str, Color32, std::sync::Arc<FftResult>, f64);
@@ -82,6 +85,8 @@ pub struct ChartPluginState {
     pub log_stopped: bool,
     pub cursor_txt: String,
     pub show_fft: bool,
+    pub show_sparse_points: bool,
+    pub sparse_point_threshold: usize,
     pub fft_sample_count: usize,
     pub fft_window_type: FftWindowType,
     pub fft_scroll_mode: FftScrollMode,
@@ -117,6 +122,8 @@ impl Default for ChartPluginState {
             log_stopped: false,
             cursor_txt: String::new(),
             show_fft: false,
+            show_sparse_points: false,
+            sparse_point_threshold: DEFAULT_POINT_MARKER_THRESHOLD,
             fft_sample_count: 1024,
             fft_window_type: FftWindowType::Hann,
             fft_scroll_mode: FftScrollMode::Both,
@@ -173,6 +180,26 @@ struct SavedChartLegend {
     color: [u8; 4],
     visible: bool,
     buffer_size: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedChartConfig {
+    legends: Vec<SavedChartLegend>,
+    #[serde(default)]
+    show_sparse_points: bool,
+    #[serde(default = "default_point_marker_threshold")]
+    sparse_point_threshold: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SavedChartPayload {
+    Current(SavedChartConfig),
+    Legacy(Vec<SavedChartLegend>),
+}
+
+fn default_point_marker_threshold() -> usize {
+    DEFAULT_POINT_MARKER_THRESHOLD
 }
 
 impl MemRWPlugin for ChartPluginState {
@@ -327,7 +354,12 @@ impl MemRWPlugin for ChartPluginState {
                 }
             })
             .collect();
-        serde_json::to_value(legends).unwrap_or(serde_json::Value::Null)
+        serde_json::to_value(SavedChartConfig {
+            legends,
+            show_sparse_points: self.show_sparse_points,
+            sparse_point_threshold: self.sparse_point_threshold,
+        })
+        .unwrap_or(serde_json::Value::Null)
     }
 
     fn load_config(
@@ -335,10 +367,24 @@ impl MemRWPlugin for ChartPluginState {
         payload: &serde_json::Value,
         pool: &mut VariablePool,
     ) -> Result<(), String> {
-        let legends: Vec<SavedChartLegend> =
-            serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+        let (legends, show_sparse_points, sparse_point_threshold) = match serde_json::from_value::<
+            SavedChartPayload,
+        >(payload.clone())
+        .map_err(|e| e.to_string())?
+        {
+            SavedChartPayload::Current(config) => (
+                config.legends,
+                config.show_sparse_points,
+                config
+                    .sparse_point_threshold
+                    .clamp(MIN_POINT_MARKER_THRESHOLD, MAX_POINT_MARKER_THRESHOLD),
+            ),
+            SavedChartPayload::Legacy(legends) => (legends, false, DEFAULT_POINT_MARKER_THRESHOLD),
+        };
 
         self.legends.clear();
+        self.show_sparse_points = show_sparse_points;
+        self.sparse_point_threshold = sparse_point_threshold;
         for saved in legends {
             let var_id = saved
                 .variable_type
@@ -543,6 +589,16 @@ pub fn chart_panel(
                 ui.separator();
                 if fft_toggle_button(ui, state.show_fft).clicked() {
                     state.show_fft = !state.show_fft;
+                }
+                ui.checkbox(&mut state.show_sparse_points, "标注点")
+                    .on_hover_text("当前 Plot 视图内的点数小于临界值时，在可见曲线上绘制采样点");
+                if state.show_sparse_points {
+                    ui.add(
+                        egui::DragValue::new(&mut state.sparse_point_threshold)
+                            .range(MIN_POINT_MARKER_THRESHOLD..=MAX_POINT_MARKER_THRESHOLD)
+                            .prefix("临界 ")
+                            .suffix(" 点"),
+                    );
                 }
                 ui.separator();
                 ui.label("缩放:");
@@ -1008,6 +1064,32 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 let pb = plot_ui.plot_bounds();
                 state.td_plot_bounds = Some((pb.min()[0], pb.max()[0], pb.min()[1], pb.max()[1]));
             }
+
+            if state.show_sparse_points {
+                let bounds = plot_ui.plot_bounds();
+                let visible_bounds = [
+                    bounds.min()[0],
+                    bounds.max()[0],
+                    bounds.min()[1],
+                    bounds.max()[1],
+                ];
+                for (legend_index, legend) in state.legends.iter().enumerate() {
+                    if let Some(points) =
+                        sparse_visible_points(legend, visible_bounds, state.sparse_point_threshold)
+                    {
+                        plot_ui.points(
+                            Points::new(
+                                format!("{} visible points", legend.curve_name),
+                                PlotPoints::Owned(points),
+                            )
+                            .id(egui::Id::new(("chart_visible_points", legend_index)))
+                            .color(legend.color)
+                            .radius(3.0)
+                            .allow_hover(false),
+                        );
+                    }
+                }
+            }
         });
     let plot_frame = *plot_response.transform.frame();
 
@@ -1390,6 +1472,34 @@ fn visible_history_bounds(legends: &[ChartLegend]) -> Option<(f64, f64, f64, f64
     found.then_some((x_min, x_max, y_min, y_max))
 }
 
+/// Return points that are actually inside the current plot viewport, but only
+/// while their count is strictly below the configured threshold. The scan uses
+/// timestamp partitioning and exits as soon as the threshold is reached.
+fn sparse_visible_points(
+    legend: &ChartLegend,
+    [x_min, x_max, y_min, y_max]: [f64; 4],
+    threshold: usize,
+) -> Option<Vec<PlotPoint>> {
+    if !legend.visible || threshold < MIN_POINT_MARKER_THRESHOLD {
+        return None;
+    }
+    let mut points = Vec::with_capacity(threshold.min(legend.data_history.len()));
+    let (first, second) = legend.data_history.as_slices();
+    for slice in [first, second] {
+        let start = slice.partition_point(|point| point.x < x_min);
+        let end = slice.partition_point(|point| point.x <= x_max);
+        for point in &slice[start..end] {
+            if point.x.is_finite() && point.y.is_finite() && (y_min..=y_max).contains(&point.y) {
+                points.push(*point);
+                if points.len() >= threshold {
+                    return None;
+                }
+            }
+        }
+    }
+    (!points.is_empty()).then_some(points)
+}
+
 fn compute_td_scroll_zoom(
     current: Option<(f64, f64, f64, f64)>,
     factor: f64,
@@ -1646,8 +1756,8 @@ mod tests {
 
     use super::{
         ChartLegend, ChartPluginState, FFT_TOGGLE_BUTTON_SIZE, FftScrollMode,
-        ZOOM_MODE_BUTTON_SIZE, confined_overlay_rect, fft_toggle_button, update_chart_data,
-        visible_history_bounds, write_log_frame, zoom_mode_button,
+        ZOOM_MODE_BUTTON_SIZE, confined_overlay_rect, fft_toggle_button, sparse_visible_points,
+        update_chart_data, visible_history_bounds, write_log_frame, zoom_mode_button,
     };
 
     fn add_u8(pool: &mut VariablePool, name: &str, address: u64) -> usize {
@@ -1701,6 +1811,48 @@ mod tests {
             visible_history_bounds(&[visible, hidden]),
             Some((1.0, 3.0, -2.0, 4.0))
         );
+    }
+
+    #[test]
+    fn point_markers_use_only_points_inside_the_current_plot_view() {
+        let mut legend = ChartLegend::new(0, "visible".to_owned());
+        for value in 0..10 {
+            legend.push_prepared(value as f64, value as f64);
+        }
+
+        let points = sparse_visible_points(&legend, [2.0, 7.0, 3.0, 6.0], 5).unwrap();
+        assert_eq!(
+            points
+                .iter()
+                .map(|point| (point.x, point.y))
+                .collect::<Vec<_>>(),
+            vec![(3.0, 3.0), (4.0, 4.0), (5.0, 5.0), (6.0, 6.0)]
+        );
+        assert!(sparse_visible_points(&legend, [2.0, 7.0, 3.0, 6.0], 4).is_none());
+
+        legend.visible = false;
+        assert!(sparse_visible_points(&legend, [0.0, 9.0, 0.0, 9.0], 20).is_none());
+    }
+
+    #[test]
+    fn sparse_point_settings_are_saved_and_legacy_configs_still_load() {
+        let current = serde_json::json!({
+            "legends": [],
+            "show_sparse_points": true,
+            "sparse_point_threshold": 17
+        });
+        match serde_json::from_value::<super::SavedChartPayload>(current).unwrap() {
+            super::SavedChartPayload::Current(config) => {
+                assert!(config.show_sparse_points);
+                assert_eq!(config.sparse_point_threshold, 17);
+            }
+            super::SavedChartPayload::Legacy(_) => panic!("expected current chart config"),
+        }
+
+        match serde_json::from_value::<super::SavedChartPayload>(serde_json::json!([])).unwrap() {
+            super::SavedChartPayload::Legacy(legends) => assert!(legends.is_empty()),
+            super::SavedChartPayload::Current(_) => panic!("expected legacy chart config"),
+        }
     }
 
     #[test]
