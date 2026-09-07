@@ -1,4 +1,4 @@
-use super::fft::{FftWindowType, compute_fft};
+use super::fft::{FftResult, FftWindowType};
 use super::legend::ChartLegend;
 use crate::dwarf::types::ExtendType;
 use crate::model::VariablePool;
@@ -19,6 +19,7 @@ const ZOOM_MODE_BUTTON_SIZE: [f32; 2] = [42.0, 22.0];
 const FFT_TOGGLE_BUTTON_SIZE: [f32; 2] = [80.0, 22.0];
 type CursorValue = (String, f64, f64, Color32);
 type CursorOverlay = (f32, f32, Vec<CursorValue>);
+type FftSeries<'a> = (&'a str, Color32, std::sync::Arc<FftResult>, f64);
 
 #[derive(Clone, PartialEq)]
 pub enum YAxisMode {
@@ -1049,13 +1050,13 @@ fn render_chart(ui: &mut Ui, state: &mut ChartPluginState) {
 }
 
 fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
-    let mut fft_series: Vec<(&str, Color32, Vec<egui_plot::PlotPoint>, f64)> = Vec::new();
+    let mut fft_series: Vec<FftSeries<'_>> = Vec::new();
 
-    for legend in &state.legends {
+    for legend in &mut state.legends {
         if !legend.visible || legend.data_history.len() < 4 {
             continue;
         }
-        if let Some(fft) = compute_fft(
+        if let Some(fft) = legend.fft_cache.get(
             &legend.data_history,
             state.fft_sample_count,
             state.fft_window_type,
@@ -1063,7 +1064,7 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
             fft_series.push((
                 legend.curve_name.as_str(),
                 legend.color,
-                fft.points,
+                std::sync::Arc::clone(&fft),
                 fft.sample_rate,
             ));
         }
@@ -1200,9 +1201,9 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 plot_ui.set_plot_bounds(PlotBounds::from_min_max([x_min, y_min], [x_max, y_max]));
             }
 
-            for (name, color, points, _sr) in &fft_series {
+            for (name, color, fft, _sr) in &fft_series {
                 plot_ui.line(
-                    Line::new(*name, PlotPoints::Borrowed(points))
+                    Line::new(*name, PlotPoints::Borrowed(&fft.points))
                         .color(*color)
                         .width(1.2),
                 );
@@ -1212,8 +1213,8 @@ fn render_fft_chart(ui: &mut Ui, state: &mut ChartPluginState) {
                 let freq = cursor.x;
                 let screen = plot_ui.screen_from_plot(cursor);
                 let mut data: Vec<(String, f64, f64, Color32)> = Vec::new();
-                for (name, color, points, _sr) in &fft_series {
-                    let mag = nearest_mag(points, freq);
+                for (name, color, fft, _sr) in &fft_series {
+                    let mag = nearest_mag(&fft.points, freq);
                     data.push((name.to_string(), freq, mag, *color));
                 }
                 if !data.is_empty() {
@@ -1319,24 +1320,24 @@ fn compute_scroll_zoom(
     current: Option<(f64, f64, f64, f64)>,
     factor: f64,
     mode: FftScrollMode,
-    fft_series: &[(&str, Color32, Vec<egui_plot::PlotPoint>, f64)],
+    fft_series: &[FftSeries<'_>],
 ) -> (f64, f64, f64, f64) {
     let (x_min, x_max, y_min, y_max) = current.unwrap_or_else(|| {
         let x_min = fft_series
             .iter()
-            .filter_map(|s| s.2.first().map(|point| point.x))
+            .filter_map(|s| s.2.points.first().map(|point| point.x))
             .fold(f64::MAX, f64::min);
         let x_max = fft_series
             .iter()
-            .filter_map(|s| s.2.last().map(|point| point.x))
+            .filter_map(|s| s.2.points.last().map(|point| point.x))
             .fold(0.0, f64::max);
         let y_min = fft_series
             .iter()
-            .flat_map(|s| s.2.iter().map(|point| point.y))
+            .flat_map(|s| s.2.points.iter().map(|point| point.y))
             .fold(f64::MAX, f64::min);
         let y_max = fft_series
             .iter()
-            .flat_map(|s| s.2.iter().map(|point| point.y))
+            .flat_map(|s| s.2.points.iter().map(|point| point.y))
             .fold(f64::NEG_INFINITY, f64::max);
         let y_pad = ((y_max - y_min).max(0.001) * 0.1).max(0.001);
         (x_min, x_max, y_min - y_pad, y_max + y_pad)

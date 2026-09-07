@@ -3,6 +3,7 @@ use egui_plot::PlotPoint;
 use std::collections::VecDeque;
 
 pub struct ChartLegend {
+    pub fft_cache: super::fft::FftCache,
     pub variable_id: usize,
     pub curve_name: String,
     pub color: Color32,
@@ -15,6 +16,7 @@ pub struct ChartLegend {
 impl ChartLegend {
     pub fn new(variable_id: usize, curve_name: String) -> Self {
         Self {
+            fft_cache: super::fft::FftCache::default(),
             variable_id,
             curve_name,
             color: default_color(variable_id),

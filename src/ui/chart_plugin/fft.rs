@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::f64::consts::PI;
 use std::ops::{Add, Mul, Sub};
+use std::sync::Arc;
 
 use egui_plot::PlotPoint;
 
@@ -129,6 +130,42 @@ fn window_value(win_type: FftWindowType, size: usize, index: usize) -> f64 {
 pub struct FftResult {
     pub points: Vec<PlotPoint>,
     pub sample_rate: f64,
+}
+
+/// Reuse the spectrum while its input window is unchanged (for example while
+/// inspecting a paused chart). Compare the actual samples so clearing/reloading
+/// history or replacing a value with the same timestamp cannot leave stale FFTs.
+#[derive(Default)]
+pub struct FftCache {
+    samples: Vec<PlotPoint>,
+    window_type: Option<FftWindowType>,
+    result: Option<Arc<FftResult>>,
+}
+
+impl FftCache {
+    pub fn get(
+        &mut self,
+        data: &VecDeque<PlotPoint>,
+        sample_count: usize,
+        window_type: FftWindowType,
+    ) -> Option<Arc<FftResult>> {
+        let take = sample_count.clamp(4, MAX_FFT_SIZE).min(data.len());
+        let offset = data.len() - take;
+        let unchanged = self.window_type == Some(window_type)
+            && self.samples.len() == take
+            && self
+                .samples
+                .iter()
+                .zip(data.iter().skip(offset))
+                .all(|(a, b)| a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits());
+        if !unchanged {
+            self.samples.clear();
+            self.samples.extend(data.iter().skip(offset).copied());
+            self.window_type = Some(window_type);
+            self.result = compute_fft(data, sample_count, window_type).map(Arc::new);
+        }
+        self.result.clone()
+    }
 }
 
 const MAX_FFT_SIZE: usize = 65536;
@@ -289,7 +326,47 @@ mod tests {
 
     use std::f64::consts::PI;
 
-    use super::{FftWindowType, compute_fft};
+    use super::{FftCache, FftWindowType, compute_fft};
+
+    #[test]
+    fn reuses_spectrum_while_the_selected_input_window_is_unchanged() {
+        let mut history = sine_history(32, 32.0, 4.0, 1.0);
+        let mut cache = FftCache::default();
+        let first = cache.get(&history, 16, FftWindowType::Hann).unwrap();
+        let again = cache.get(&history, 16, FftWindowType::Hann).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+
+        // Older points outside the requested FFT window cannot affect it.
+        history[0].y = 100.0;
+        let unchanged = cache.get(&history, 16, FftWindowType::Hann).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &unchanged));
+
+        // Even an in-place value replacement with the same timestamp invalidates it.
+        history[20].y += 10.0;
+        let changed = cache.get(&history, 16, FftWindowType::Hann).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &changed));
+        assert_ne!(first.points, changed.points);
+    }
+
+    #[test]
+    fn invalidates_cached_spectrum_for_options_and_history_reset() {
+        let mut history = sine_history(32, 32.0, 4.0, 1.0);
+        let mut cache = FftCache::default();
+        let first = cache.get(&history, 16, FftWindowType::Hann).unwrap();
+        let resized = cache.get(&history, 32, FftWindowType::Hann).unwrap();
+        assert_ne!(first.points.len(), resized.points.len());
+        let window = cache.get(&history, 32, FftWindowType::Blackman).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&resized, &window));
+
+        history[20].y = f64::NAN;
+        assert!(cache.get(&history, 32, FftWindowType::Blackman).is_none());
+        history.clear();
+        assert!(cache.get(&history, 32, FftWindowType::Blackman).is_none());
+        history = sine_history(32, 64.0, 4.0, 2.0);
+        let reloaded = cache.get(&history, 32, FftWindowType::Blackman).unwrap();
+        assert_eq!(reloaded.sample_rate, 64.0);
+        assert!(!std::sync::Arc::ptr_eq(&window, &reloaded));
+    }
 
     fn sine_history(
         count: usize,
