@@ -2871,7 +2871,7 @@ mod tests {
         eframe::egui::__run_test_ui(|ui| {
             let job =
                 source_highlight_job(ui, 42, "if (value >= 10) return \"ok\"; // done", false);
-            assert_eq!(job.text, "   42  if (value >= 10) return \"ok\"; // done");
+            assert_eq!(job.text, "  42  if (value >= 10) return \"ok\"; // done");
             assert!(job.sections.len() > 6);
             assert!(job.sections.iter().any(|section| section.format.italics));
             let distinct_colors = job
